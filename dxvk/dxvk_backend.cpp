@@ -464,6 +464,28 @@ namespace dxvk {
     m_capturing = false;
   }
 
+  // The CAMetalLayer hands back a drawable at the window's physical (Retina)
+  // pixel size, which the layer picks regardless of the size we request. The
+  // backbuffer pass renders at that size; the D3D9 viewport is in logical
+  // backbuffer pixels, so it scales up by drawable/backbuffer. The registered
+  // backbuffer texture carries the logical size (GetClientRect already returns
+  // Retina pixels, so m_width can equal the drawable and is not a safe divisor).
+  void D9mtBackend::measureDrawableAndRenderScale(uint64_t drawableTexture) {
+    if (m_drawableWidth)
+      return;
+    m_drawableWidth  = uint32_t(MTLTexture_width(drawableTexture));
+    m_drawableHeight = uint32_t(MTLTexture_height(drawableTexture));
+
+    uint32_t backbufferWidth = m_width, backbufferHeight = m_height;
+    if (!m_backbufferTextures.empty()) {
+      uint64_t backbuffer = *m_backbufferTextures.begin();
+      backbufferWidth  = uint32_t(MTLTexture_width(backbuffer));
+      backbufferHeight = uint32_t(MTLTexture_height(backbuffer));
+    }
+    m_renderScaleX = backbufferWidth  ? double(m_drawableWidth)  / backbufferWidth  : 1.0;
+    m_renderScaleY = backbufferHeight ? double(m_drawableHeight) / backbufferHeight : 1.0;
+  }
+
   void D9mtBackend::setColorTarget(uint64_t texture) {
     if (texture == m_targetTexture)
       return;
@@ -511,22 +533,7 @@ namespace dxvk {
       if (!m_frameDrawable)
         return;  // no drawable available — leave the pass closed.
       colorTexture = MetalDrawable_texture(m_frameDrawable);
-      if (!m_drawableWidth) {
-        m_drawableWidth  = uint32_t(MTLTexture_width(colorTexture));
-        m_drawableHeight = uint32_t(MTLTexture_height(colorTexture));
-        // Scale relative to the D3D9 backbuffer (the viewport's coordinate
-        // space), not the window — GetClientRect already reports Retina pixels,
-        // so m_width can equal the drawable. The registered backbuffer texture
-        // is the logical backbuffer size.
-        uint32_t bbW = m_width, bbH = m_height;
-        if (!m_backbufferTextures.empty()) {
-          uint64_t bb = *m_backbufferTextures.begin();
-          bbW = uint32_t(MTLTexture_width(bb));
-          bbH = uint32_t(MTLTexture_height(bb));
-        }
-        m_renderScaleX = bbW ? double(m_drawableWidth)  / bbW : 1.0;
-        m_renderScaleY = bbH ? double(m_drawableHeight) / bbH : 1.0;
-      }
+      measureDrawableAndRenderScale(colorTexture);
     }
 
     // Depth+stencil buffer (Depth32Float_Stencil8, drawable-sized, GPU-private),
@@ -638,14 +645,14 @@ namespace dxvk {
     // default of the full render target. The D3D9 viewport/scissor are in the
     // logical backbuffer's pixels; the backbuffer pass renders into the larger
     // Retina drawable, so scale them up by the drawable factor.
-    double sx = m_backbufferPassOpen ? m_renderScaleX : 1.0;
-    double sy = m_backbufferPassOpen ? m_renderScaleY : 1.0;
+    double viewportScaleX = m_backbufferPassOpen ? m_renderScaleX : 1.0;
+    double viewportScaleY = m_backbufferPassOpen ? m_renderScaleY : 1.0;
     if (draw.hasViewport) {
       setViewport.type              = WMTRenderCommandSetViewport;
-      setViewport.viewport.originX  = draw.viewportX * sx;
-      setViewport.viewport.originY  = draw.viewportY * sy;
-      setViewport.viewport.width    = draw.viewportWidth * sx;
-      setViewport.viewport.height   = draw.viewportHeight * sy;
+      setViewport.viewport.originX  = draw.viewportX * viewportScaleX;
+      setViewport.viewport.originY  = draw.viewportY * viewportScaleY;
+      setViewport.viewport.width    = draw.viewportWidth * viewportScaleX;
+      setViewport.viewport.height   = draw.viewportHeight * viewportScaleY;
       setViewport.viewport.znear    = draw.viewportMinDepth;
       setViewport.viewport.zfar     = draw.viewportMaxDepth;
       tail->next.set(&setViewport);
@@ -653,10 +660,10 @@ namespace dxvk {
     }
     if (draw.hasScissor) {
       setScissor.type                = WMTRenderCommandSetScissorRect;
-      setScissor.scissor_rect.x      = uint64_t(draw.scissorX * sx);
-      setScissor.scissor_rect.y      = uint64_t(draw.scissorY * sy);
-      setScissor.scissor_rect.width  = uint64_t(draw.scissorWidth * sx);
-      setScissor.scissor_rect.height = uint64_t(draw.scissorHeight * sy);
+      setScissor.scissor_rect.x      = uint64_t(draw.scissorX * viewportScaleX);
+      setScissor.scissor_rect.y      = uint64_t(draw.scissorY * viewportScaleY);
+      setScissor.scissor_rect.width  = uint64_t(draw.scissorWidth * viewportScaleX);
+      setScissor.scissor_rect.height = uint64_t(draw.scissorHeight * viewportScaleY);
       tail->next.set(&setScissor);
       tail = reinterpret_cast<wmtcmd_base*>(&setScissor);
     }

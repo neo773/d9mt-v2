@@ -227,6 +227,7 @@ namespace dxvk {
     bool m_capturing = false;
     void maybeBeginGpuCapture();
     void endGpuCaptureIfActive();
+    void measureDrawableAndRenderScale(uint64_t drawableTexture);
 
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many
