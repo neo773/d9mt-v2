@@ -112,6 +112,7 @@ namespace dxvk {
     // heap) to gpuResourceIdOut. Filters/address modes are winemetal enums.
     uint64_t createSampler(uint32_t minFilter, uint32_t magFilter, uint32_t mipFilter,
                            uint32_t addressU, uint32_t addressV, uint32_t addressW,
+                           uint32_t maxAnisotropy, float lodMinClamp, float lodMaxClamp,
                            uint64_t* gpuResourceIdOut);
 
     // Creates a depth-stencil state object (compare function is a WMT/Metal

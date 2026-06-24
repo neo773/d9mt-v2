@@ -215,6 +215,8 @@ namespace dxvk {
   uint64_t D9mtBackend::createSampler(uint32_t minFilter, uint32_t magFilter,
                                       uint32_t mipFilter, uint32_t addressU,
                                       uint32_t addressV, uint32_t addressW,
+                                      uint32_t maxAnisotropy, float lodMinClamp,
+                                      float lodMaxClamp,
                                       uint64_t* gpuResourceIdOut) {
     if (gpuResourceIdOut)
       *gpuResourceIdOut = 0;
@@ -227,9 +229,9 @@ namespace dxvk {
     info.t_address_mode    = WMTSamplerAddressMode(addressV);
     info.r_address_mode    = WMTSamplerAddressMode(addressW);
     info.compare_function  = WMTCompareFunctionNever;
-    info.lod_min_clamp     = 0.0f;
-    info.lod_max_clamp     = 1000.0f;
-    info.max_anisotroy     = 1u;
+    info.lod_min_clamp     = lodMinClamp;
+    info.lod_max_clamp     = lodMaxClamp;
+    info.max_anisotroy     = maxAnisotropy ? maxAnisotropy : 1u;
     info.normalized_coords = true;
     // Samplers live in the bindless heap, so they must be argument-buffer-usable.
     info.support_argument_buffers = true;

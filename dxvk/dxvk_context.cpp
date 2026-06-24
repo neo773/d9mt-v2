@@ -463,11 +463,16 @@ namespace dxvk {
     // winemetal min/mag enum; mip uses NotMipmapped(0)/Nearest(1)/Linear(2).
     uint32_t mipFilter = key.u.p.mipMode ? 2u : 1u;
 
+    // LOD clamps are stored as 4.8 fixed-point (see DxvkSamplerKey::setLodRange).
+    float lodMin = bit::decodeFixed<uint32_t, 4, 8>(key.u.p.minLod);
+    float lodMax = bit::decodeFixed<uint32_t, 4, 8>(key.u.p.maxLod);
+
     MetalSampler sampler;
     sampler.handle = m_backend->createSampler(
       key.u.p.minFilter, key.u.p.magFilter, mipFilter,
       toMetalAddress(key.u.p.addressU), toMetalAddress(key.u.p.addressV),
-      toMetalAddress(key.u.p.addressW), &sampler.resourceId);
+      toMetalAddress(key.u.p.addressW), key.u.p.anisotropy, lodMin, lodMax,
+      &sampler.resourceId);
 
     m_samplerCache.emplace(hash, sampler);
     return sampler;
