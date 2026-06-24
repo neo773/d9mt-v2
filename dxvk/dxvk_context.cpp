@@ -667,6 +667,9 @@ namespace dxvk {
     pipelineDraw.fillMode = m_rasterizerState.polygonMode() == VK_POLYGON_MODE_LINE
       ? 1u   // WMTTriangleFillModeLines
       : 0u;  // WMTTriangleFillModeFill
+    pipelineDraw.depthBias       = m_depthBias.depthBiasConstant;
+    pipelineDraw.depthSlopeScale = m_depthBias.depthBiasSlope;
+    pipelineDraw.depthBiasClamp  = m_depthBias.depthBiasClamp;
 
     if (m_hasViewport) {
       const VkViewport& vp = m_viewport.viewport;

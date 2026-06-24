@@ -386,7 +386,7 @@ namespace dxvk {
 
     // Remaining recorded state setters: pure no-ops on the FF triangle path.
     void setBlendConstants(DxvkBlendConstants blendConstants) { (void) blendConstants; }
-    void setDepthBias(DxvkDepthBias depthBias) { (void) depthBias; }
+    void setDepthBias(DxvkDepthBias depthBias) { m_depthBias = depthBias; }
     void setDepthBiasRepresentation(DxvkDepthBiasRepresentation r) { (void) r; }
     void setDepthBounds(DxvkDepthBounds depthBounds) { (void) depthBounds; }
     void setStencilReference(uint32_t reference) { m_stencilReference = reference; }
@@ -695,6 +695,7 @@ namespace dxvk {
 
     // Rasterizer state (setRasterizerState): cull mode, winding, fill, bias.
     DxvkRasterizerState m_rasterizerState = { };
+    DxvkDepthBias       m_depthBias       = { };
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value
