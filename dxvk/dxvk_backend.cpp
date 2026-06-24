@@ -511,17 +511,35 @@ namespace dxvk {
       if (!m_frameDrawable)
         return;  // no drawable available — leave the pass closed.
       colorTexture = MetalDrawable_texture(m_frameDrawable);
+      if (!m_drawableWidth) {
+        m_drawableWidth  = uint32_t(MTLTexture_width(colorTexture));
+        m_drawableHeight = uint32_t(MTLTexture_height(colorTexture));
+        // Scale relative to the D3D9 backbuffer (the viewport's coordinate
+        // space), not the window — GetClientRect already reports Retina pixels,
+        // so m_width can equal the drawable. The registered backbuffer texture
+        // is the logical backbuffer size.
+        uint32_t bbW = m_width, bbH = m_height;
+        if (!m_backbufferTextures.empty()) {
+          uint64_t bb = *m_backbufferTextures.begin();
+          bbW = uint32_t(MTLTexture_width(bb));
+          bbH = uint32_t(MTLTexture_height(bb));
+        }
+        m_renderScaleX = bbW ? double(m_drawableWidth)  / bbW : 1.0;
+        m_renderScaleY = bbH ? double(m_drawableHeight) / bbH : 1.0;
+      }
     }
 
     // Depth+stencil buffer (Depth32Float_Stencil8, drawable-sized, GPU-private),
     // created once and reused. Cleared at each pass so depth/stencil-tested draws
     // start fresh; draws that enable neither simply ignore it. A combined format
     // (not plain Depth32Float) so stencil-test state has a stencil plane to use.
-    if (!m_depthTexture && m_width && m_height) {
+    uint32_t depthWidth  = m_drawableWidth  ? m_drawableWidth  : m_width;
+    uint32_t depthHeight = m_drawableHeight ? m_drawableHeight : m_height;
+    if (!m_depthTexture && depthWidth && depthHeight) {
       WMTTextureInfo depthInfo = {};
       depthInfo.pixel_format       = WMTPixelFormatDepth32Float_Stencil8;
-      depthInfo.width              = m_width;
-      depthInfo.height             = m_height;
+      depthInfo.width              = depthWidth;
+      depthInfo.height             = depthHeight;
       depthInfo.depth              = 1u;
       depthInfo.array_length       = 1u;
       depthInfo.type               = WMTTextureType2D;
@@ -550,9 +568,13 @@ namespace dxvk {
     renderPass.stencil.load_action  = WMTLoadActionClear;
     renderPass.stencil.store_action = WMTStoreActionDontCare;
     renderPass.stencil.clear_stencil = 0u;
-    renderPass.render_target_width = m_width;
-    renderPass.render_target_height = m_height;
+    // The backbuffer pass fills the (Retina-sized) drawable; an offscreen pass
+    // fills its own logical-sized target within the larger shared depth buffer.
+    bool backbufferPass = !(m_targetTexture && !m_backbufferTextures.count(m_targetTexture));
+    renderPass.render_target_width  = backbufferPass && m_drawableWidth  ? m_drawableWidth  : m_width;
+    renderPass.render_target_height = backbufferPass && m_drawableHeight ? m_drawableHeight : m_height;
     renderPass.default_raster_sample_count = 1;
+    m_backbufferPassOpen = backbufferPass;
 
     m_frameEncoder = MTLCommandBuffer_renderCommandEncoder(m_frameCommandBuffer, &renderPass);
     m_frameOpen = true;
@@ -613,13 +635,17 @@ namespace dxvk {
     tail = reinterpret_cast<wmtcmd_base*>(&setRaster);
 
     // Viewport (pixel rect + depth range) and scissor; absent leaves Metal's
-    // default of the full render target.
+    // default of the full render target. The D3D9 viewport/scissor are in the
+    // logical backbuffer's pixels; the backbuffer pass renders into the larger
+    // Retina drawable, so scale them up by the drawable factor.
+    double sx = m_backbufferPassOpen ? m_renderScaleX : 1.0;
+    double sy = m_backbufferPassOpen ? m_renderScaleY : 1.0;
     if (draw.hasViewport) {
       setViewport.type              = WMTRenderCommandSetViewport;
-      setViewport.viewport.originX  = draw.viewportX;
-      setViewport.viewport.originY  = draw.viewportY;
-      setViewport.viewport.width    = draw.viewportWidth;
-      setViewport.viewport.height   = draw.viewportHeight;
+      setViewport.viewport.originX  = draw.viewportX * sx;
+      setViewport.viewport.originY  = draw.viewportY * sy;
+      setViewport.viewport.width    = draw.viewportWidth * sx;
+      setViewport.viewport.height   = draw.viewportHeight * sy;
       setViewport.viewport.znear    = draw.viewportMinDepth;
       setViewport.viewport.zfar     = draw.viewportMaxDepth;
       tail->next.set(&setViewport);
@@ -627,10 +653,10 @@ namespace dxvk {
     }
     if (draw.hasScissor) {
       setScissor.type                = WMTRenderCommandSetScissorRect;
-      setScissor.scissor_rect.x      = draw.scissorX;
-      setScissor.scissor_rect.y      = draw.scissorY;
-      setScissor.scissor_rect.width  = draw.scissorWidth;
-      setScissor.scissor_rect.height = draw.scissorHeight;
+      setScissor.scissor_rect.x      = uint64_t(draw.scissorX * sx);
+      setScissor.scissor_rect.y      = uint64_t(draw.scissorY * sy);
+      setScissor.scissor_rect.width  = uint64_t(draw.scissorWidth * sx);
+      setScissor.scissor_rect.height = uint64_t(draw.scissorHeight * sy);
       tail->next.set(&setScissor);
       tail = reinterpret_cast<wmtcmd_base*>(&setScissor);
     }

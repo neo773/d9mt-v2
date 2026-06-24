@@ -212,6 +212,16 @@ namespace dxvk {
     uint64_t                     m_targetTexture = 0;
     std::unordered_set<uint64_t> m_backbufferTextures;
 
+    // The swapchain drawable is the window's physical (Retina) pixel size, which
+    // can exceed the D3D9 logical backbuffer (m_width/height). The backbuffer
+    // pass renders at the drawable size and scales the logical viewport up by
+    // this factor; offscreen targets stay at their own (logical) size.
+    uint32_t m_drawableWidth  = 0;
+    uint32_t m_drawableHeight = 0;
+    double   m_renderScaleX   = 1.0;
+    double   m_renderScaleY   = 1.0;
+    bool     m_backbufferPassOpen = false;
+
     // Programmatic GPU capture: when the DO_CAPTURE trigger file exists, capture
     // the next frame's command buffer to a .gputrace for Metal Debugger.
     bool m_capturing = false;
