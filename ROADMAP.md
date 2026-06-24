@@ -91,9 +91,20 @@ This is the most work but everything downstream depends on it, and it's what mak
 
 Order by measured cost. Stop a cut that doesn't move the needle.
 
+> **Status / gate.** Item 6 (below) is **done** (`59c9e09`). Items 7, 9, 10 are
+> the dirty-skip / EmitCs-devirtualize / descriptor-collapse cuts — exactly the
+> class of change that broke GTA IV's startup + D3D `Reset` in v1 (see
+> `memory/perf-guards-break-startup-reset.md`). They **must** regression-test
+> against a real game (Phase 1's exit), and the profiler shows steady-state
+> per-draw CPU is already ~0 on the simple tests, so there is nothing to
+> measure a win against yet. Holding 7/9/10 until a real game frame exists —
+> doing them blind would violate this phase's own discipline. Item 8 (compact
+> PSO key) is effectively already in place: the PSO is cached and keyed on the
+> shader pair + blend bits, and `buildPipeline` is ~0 steady-state.
+
 6. **C′ — residency once per frame** — winemetal has no `MTLResidencySet`, so
    dedupe `useResource` manually: issue per resource per *frame*, not per draw.
-   *Risk: low, backend-only.*
+   *Risk: low, backend-only.* **DONE** (`59c9e09`).
 7. **D — dirty-gate AB/push + cache vertex layout** — skip rebuilds when bound
    state is unchanged since the last draw (v1 had this gate; v2 dropped it).
    Validatable only against multi-state frames. *Risk: med.*
