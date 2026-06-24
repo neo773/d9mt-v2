@@ -683,6 +683,10 @@ namespace dxvk {
     DxvkDepthStencilState m_depthStencilState = { };
     std::unordered_map<uint32_t, uint64_t> m_depthStencilCache;
 
+    // Viewport + scissor (setViewports). D3D9 binds a single pair.
+    DxvkViewport m_viewport    = { };
+    bool         m_hasViewport = false;
+
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value
 

@@ -63,6 +63,15 @@ namespace dxvk {
     // Depth-stencil state object bound before the draw (0 = leave the Metal
     // default: depth test always passes, no depth write).
     uint64_t                  depthStencilState = 0;
+    // Viewport (pixel rect + [minZ,maxZ] depth range) and scissor rect bound
+    // before the draw. hasViewport/hasScissor false leaves Metal's default
+    // (full render target). Decoupled from winemetal types to keep this header
+    // free of the winemetal include.
+    bool                      hasViewport    = false;
+    double                    viewportX = 0, viewportY = 0, viewportWidth = 0;
+    double                    viewportHeight = 0, viewportMinDepth = 0, viewportMaxDepth = 1;
+    bool                      hasScissor     = false;
+    uint32_t                  scissorX = 0, scissorY = 0, scissorWidth = 0, scissorHeight = 0;
     bool                      clear          = false;
     uint32_t                  clearColorArgb = 0;
   };

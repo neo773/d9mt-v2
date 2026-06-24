@@ -158,10 +158,10 @@ namespace dxvk {
   void DxvkContext::setViewports(
             uint32_t              viewportCount,
       const DxvkViewport*         viewports) {
-    (void) viewportCount;
-    (void) viewports;
-    // The triangle is emitted in NDC, so the backend ignores viewport. The call
-    // is kept so the frontend's recorded setViewports binds to a real method.
+    // D3D9 binds a single viewport/scissor pair; store it for the draw path.
+    m_hasViewport = viewportCount > 0;
+    if (m_hasViewport)
+      m_viewport = viewports[0];
   }
 
 
@@ -616,6 +616,28 @@ namespace dxvk {
     pipelineDraw.residentBuffers   = residentBuffers.data();
     pipelineDraw.residentCount     = uint32_t(residentBuffers.size());
     pipelineDraw.depthStencilState = resolveDepthStencilState();
+    if (m_hasViewport) {
+      const VkViewport& vp = m_viewport.viewport;
+      // DXVK emits a negative-height viewport (Vulkan's bottom-left y-flip
+      // convention). Metal is top-left like D3D9 and the shader output already
+      // matches it, so normalize to a positive-height top-left rect — applying
+      // the flip verbatim would render upside-down.
+      double y = vp.y, height = vp.height;
+      if (height < 0) { y += height; height = -height; }
+      pipelineDraw.hasViewport      = true;
+      pipelineDraw.viewportX        = vp.x;
+      pipelineDraw.viewportY        = y;
+      pipelineDraw.viewportWidth    = vp.width;
+      pipelineDraw.viewportHeight   = height;
+      pipelineDraw.viewportMinDepth = vp.minDepth;
+      pipelineDraw.viewportMaxDepth = vp.maxDepth;
+      const VkRect2D& sc = m_viewport.scissor;
+      pipelineDraw.hasScissor       = true;
+      pipelineDraw.scissorX         = sc.offset.x;
+      pipelineDraw.scissorY         = sc.offset.y;
+      pipelineDraw.scissorWidth     = sc.extent.width;
+      pipelineDraw.scissorHeight    = sc.extent.height;
+    }
     pipelineDraw.clear             = m_clearPending;
     pipelineDraw.clearColorArgb    = m_clearColorArgb;
     return true;

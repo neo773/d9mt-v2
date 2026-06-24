@@ -525,9 +525,11 @@ namespace dxvk {
     bufferCommands.assign(draw.bindingCount, {});
     residencyCommands.assign(draw.residentCount, {});
 
-    wmtcmd_render_setpso  setPipeline = {};
-    wmtcmd_render_setdsso setDepthState = {};
-    wmtcmd_render_draw    drawCmd     = {};
+    wmtcmd_render_setpso         setPipeline = {};
+    wmtcmd_render_setdsso        setDepthState = {};
+    wmtcmd_render_setviewport    setViewport = {};
+    wmtcmd_render_setscissorrect setScissor = {};
+    wmtcmd_render_draw           drawCmd     = {};
 
     setPipeline.type = WMTRenderCommandSetPSO;
     setPipeline.pso  = draw.pipelineState;
@@ -542,6 +544,29 @@ namespace dxvk {
       setDepthState.stencil_ref = 0u;
       tail->next.set(&setDepthState);
       tail = reinterpret_cast<wmtcmd_base*>(&setDepthState);
+    }
+
+    // Viewport (pixel rect + depth range) and scissor; absent leaves Metal's
+    // default of the full render target.
+    if (draw.hasViewport) {
+      setViewport.type              = WMTRenderCommandSetViewport;
+      setViewport.viewport.originX  = draw.viewportX;
+      setViewport.viewport.originY  = draw.viewportY;
+      setViewport.viewport.width    = draw.viewportWidth;
+      setViewport.viewport.height   = draw.viewportHeight;
+      setViewport.viewport.znear    = draw.viewportMinDepth;
+      setViewport.viewport.zfar     = draw.viewportMaxDepth;
+      tail->next.set(&setViewport);
+      tail = reinterpret_cast<wmtcmd_base*>(&setViewport);
+    }
+    if (draw.hasScissor) {
+      setScissor.type                = WMTRenderCommandSetScissorRect;
+      setScissor.scissor_rect.x      = draw.scissorX;
+      setScissor.scissor_rect.y      = draw.scissorY;
+      setScissor.scissor_rect.width  = draw.scissorWidth;
+      setScissor.scissor_rect.height = draw.scissorHeight;
+      tail->next.set(&setScissor);
+      tail = reinterpret_cast<wmtcmd_base*>(&setScissor);
     }
 
     // Make every argument-buffer-referenced resource resident so the GPU can
