@@ -536,6 +536,20 @@ namespace dxvk {
   }
 
 
+  // Maps a Vulkan primitive topology to the winemetal WMTPrimitiveType. Metal
+  // has no triangle fan, so fans fall back to a triangle list (their geometry
+  // needs index conversion — a later refinement); the pipeline's topology class
+  // stays Unspecified, which can draw any of these primitive types.
+  static uint32_t metalPrimitiveType(VkPrimitiveTopology topology) {
+    switch (topology) {
+      case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:     return 0;  // WMTPrimitiveTypePoint
+      case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:      return 1;  // WMTPrimitiveTypeLine
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:     return 2;  // WMTPrimitiveTypeLineStrip
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: return 4;  // WMTPrimitiveTypeTriangleStrip
+      default:                                   return 3;  // WMTPrimitiveTypeTriangle
+    }
+  }
+
   bool DxvkContext::prepareDraw(D9mtPipelineDraw& pipelineDraw) {
     // Translate + compile the bound shaders (cached). The vertex shader is
     // mandatory; the fragment shader is optional (depth-only passes have none).
@@ -638,6 +652,7 @@ namespace dxvk {
     pipelineDraw.residentCount     = uint32_t(residentBuffers.size());
     pipelineDraw.depthStencilState = resolveDepthStencilState();
     pipelineDraw.stencilReference  = m_stencilReference;
+    pipelineDraw.primitiveType     = metalPrimitiveType(m_inputTopology);
     if (m_hasViewport) {
       const VkViewport& vp = m_viewport.viewport;
       // DXVK emits a negative-height viewport (Vulkan's bottom-left y-flip

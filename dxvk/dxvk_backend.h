@@ -51,6 +51,9 @@ namespace dxvk {
     const uint64_t*           residentBuffers = nullptr;
     uint32_t                  residentCount   = 0;
     uint32_t                  vertexCount    = 0;
+    // Primitive type for the draw (winemetal WMTPrimitiveType: point/line/
+    // line-strip/triangle/triangle-strip). Defaults to triangle list.
+    uint32_t                  primitiveType  = 3;  // WMTPrimitiveTypeTriangle
     // Indexed draw: when indexBuffer is non-zero, the draw fetches indexCount
     // indices of indexType (0 = uint16, 1 = uint32) from indexBuffer at
     // indexBufferOffset, adding baseVertex to each. Otherwise it is a linear

@@ -390,7 +390,9 @@ namespace dxvk {
     void setDepthBiasRepresentation(DxvkDepthBiasRepresentation r) { (void) r; }
     void setDepthBounds(DxvkDepthBounds depthBounds) { (void) depthBounds; }
     void setStencilReference(uint32_t reference) { m_stencilReference = reference; }
-    void setInputAssemblyState(const DxvkInputAssemblyState& ia) { (void) ia; }
+    void setInputAssemblyState(const DxvkInputAssemblyState& ia) {
+      m_inputTopology = ia.primitiveTopology();
+    }
     // Capture the D3D9 vertex declaration so draw() can build the Metal vertex
     // descriptor (attributes feed shader [[attribute(location)]]; bindings give
     // each stream's stride/step).
@@ -687,6 +689,9 @@ namespace dxvk {
     // Viewport + scissor (setViewports). D3D9 binds a single pair.
     DxvkViewport m_viewport    = { };
     bool         m_hasViewport = false;
+
+    // Primitive topology (setInputAssemblyState); default triangle list.
+    VkPrimitiveTopology m_inputTopology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value

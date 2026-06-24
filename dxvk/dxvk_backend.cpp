@@ -621,7 +621,7 @@ namespace dxvk {
     wmtcmd_render_draw_indexed indexedCmd = {};
     if (draw.indexBuffer) {
       indexedCmd.type                = WMTRenderCommandDrawIndexed;
-      indexedCmd.primitive_type      = WMTPrimitiveTypeTriangle;
+      indexedCmd.primitive_type      = WMTPrimitiveType(draw.primitiveType);
       indexedCmd.index_type          = WMTIndexType(draw.indexType);
       indexedCmd.index_count         = draw.indexCount;
       indexedCmd.index_buffer        = draw.indexBuffer;
@@ -632,7 +632,7 @@ namespace dxvk {
       tail->next.set(&indexedCmd);
     } else {
       drawCmd.type           = WMTRenderCommandDraw;
-      drawCmd.primitive_type = WMTPrimitiveTypeTriangle;
+      drawCmd.primitive_type = WMTPrimitiveType(draw.primitiveType);
       drawCmd.vertex_start   = 0;
       drawCmd.vertex_count   = draw.vertexCount;
       drawCmd.instance_count = 1;
