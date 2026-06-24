@@ -1,5 +1,3 @@
 ps_3_0
-dcl_2d s0
-dcl_texcoord0 v0
-texld r0, v0, s0
-mov oC0, r0
+def c0, 0, 1, 0, 1
+mov oC0, c0

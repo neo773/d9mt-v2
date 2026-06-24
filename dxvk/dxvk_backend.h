@@ -212,6 +212,12 @@ namespace dxvk {
     uint64_t                     m_targetTexture = 0;
     std::unordered_set<uint64_t> m_backbufferTextures;
 
+    // Programmatic GPU capture: when the DO_CAPTURE trigger file exists, capture
+    // the next frame's command buffer to a .gputrace for Metal Debugger.
+    bool m_capturing = false;
+    void maybeBeginGpuCapture();
+    void endGpuCaptureIfActive();
+
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many
     // draws only needs one useResource per frame, not one per draw.

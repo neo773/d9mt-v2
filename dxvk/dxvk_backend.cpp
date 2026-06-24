@@ -10,6 +10,7 @@
 #include "winemetal.h"
 
 #include "dxvk_trace.h"   // per-frame CPU draw-path profiler (D9MT_TRACE)
+#include "d9mtmetal.h"    // D9MT_FUNC_CAPTURE: programmatic .gputrace capture
 
 // Generated at build time from the embedded triangle MSL:
 //   d9mt_triangle_metallib[] + d9mt_triangle_metallib_len.
@@ -431,6 +432,36 @@ namespace dxvk {
       m_backbufferTextures.insert(texture);
   }
 
+  // Start a Metal frame capture when C:\d9mt-test\DO_CAPTURE exists (deleted on
+  // trigger so exactly one frame is captured). Needs MTL_CAPTURE_ENABLED=1 in
+  // the launch environment. Writes a .gputrace openable in Metal Debugger.
+  void D9mtBackend::maybeBeginGpuCapture() {
+    if (m_capturing)
+      return;
+    const char* trigger = "C:\\d9mt-test\\DO_CAPTURE";
+    if (FILE* f = std::fopen(trigger, "rb")) {
+      std::fclose(f);
+      std::remove(trigger);
+      static const char path[] = "C:\\d9mt-test\\frame.gputrace";
+      d9mt_capture_params p = {};
+      p.action   = 1u;
+      p.queue    = m_queue;
+      p.path_ptr = uint64_t(uintptr_t(path));
+      p.path_len = sizeof(path) - 1u;
+      D9MT_UnixCall(D9MT_FUNC_CAPTURE, &p);
+      m_capturing = p.ret_ok != 0u;
+    }
+  }
+
+  void D9mtBackend::endGpuCaptureIfActive() {
+    if (!m_capturing)
+      return;
+    d9mt_capture_params p = {};
+    p.action = 0u;
+    D9MT_UnixCall(D9MT_FUNC_CAPTURE, &p);
+    m_capturing = false;
+  }
+
   void D9mtBackend::setColorTarget(uint64_t texture) {
     if (texture == m_targetTexture)
       return;
@@ -461,8 +492,10 @@ namespace dxvk {
     // passes); created once, on the first pass.
     if (!m_framePool)
       m_framePool = NSAutoreleasePool_alloc_init();
-    if (!m_frameCommandBuffer)
+    if (!m_frameCommandBuffer) {
+      maybeBeginGpuCapture();
       m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
+    }
 
     // The backbuffer renders into the swapchain drawable (acquired once per
     // frame, presented at the end); an offscreen target renders into its own
@@ -680,6 +713,7 @@ namespace dxvk {
       MTLCommandBuffer_commit(m_frameCommandBuffer);
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
     }
+    endGpuCaptureIfActive();
 
     if (m_framePool)
       NSObject_release(m_framePool);
