@@ -90,10 +90,21 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
   samples a red offscreen RT onto a quad. Current cut assumes full-screen RTs
   (reuse `m_depthTexture`, so the Depth32Float PSO matches); arbitrary RT sizes
   need per-size depth or a target-keyed PSO depth format.
-- **Cube textures** (skyboxes/reflections): texture type Cube + 6 faces; the
-  IR already bakes the sampler dimensionality from the DCL.
+- **Cube textures** — DONE (`c95016a`). `createSampledTexture` builds a
+  WMTTextureTypeCube when the cube flag is set; each face uploads to its array
+  slice (D3D9 `baseArrayLayer` → Metal cube slice); the IR already bakes the
+  sampler dimensionality from the DCL. `code_cube.exe` samples the +Z face
+  (cyan), verified by GPU capture.
 - **Occlusion queries**, multi-RT, more uncompressed formats (with channel
   swizzle for L8/A8/…).
+  - *Format note (investigated):* the frontend maps `A8`/`L8` → `VK_FORMAT_R8_UNORM`
+    and `A8L8` → `VK_FORMAT_R8G8_UNORM`, neither of which is in
+    `metalPixelFormatFromVulkan`, so those textures currently get no Metal
+    texture at all. Each also carries a D3D9 component swizzle (`L8`=rrr1,
+    `A8`=000r, `A8L8`=rrrg). winemetal's format-encoded swizzles (R001/RGB1/
+    GBAR) can't express rrr1/000r, so the clean path is **upload-time channel
+    expansion**: create an RGBA8 Metal texture and expand the R8/RG8 source per
+    the frontend's `VkComponentMapping` in `copyBufferToImage`/`uploadTexture`.
 
 ---
 
