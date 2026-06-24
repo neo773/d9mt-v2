@@ -223,6 +223,9 @@ $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_stencil.exe" "$V2/test/code_stencil.
 echo "[dxvk] compiling code_strip.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_strip.exe" "$V2/test/code_strip.c" -ld3d9 -luser32 -lgdi32
 
+echo "[dxvk] compiling code_cull.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_cull.exe" "$V2/test/code_cull.c" -ld3d9 -luser32 -lgdi32
+
 echo "[dxvk] compiling code_rtt.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_rtt.exe" "$V2/test/code_rtt.c" \
   -ld3d9 -luser32 -lgdi32

@@ -653,6 +653,21 @@ namespace dxvk {
     pipelineDraw.depthStencilState = resolveDepthStencilState();
     pipelineDraw.stencilReference  = m_stencilReference;
     pipelineDraw.primitiveType     = metalPrimitiveType(m_inputTopology);
+
+    // Rasterizer state. VkCullModeFlags and the Metal cull mode share their
+    // none/front/back encoding. For winding, the frontend already accounts for
+    // the render-target orientation, and the viewport normalization above keeps
+    // screen-space winding D3D9-oriented, so map by meaning (Vulkan clockwise ->
+    // Metal clockwise).
+    VkCullModeFlags cull = m_rasterizerState.cullMode();
+    pipelineDraw.cullMode = cull <= VK_CULL_MODE_BACK_BIT ? uint32_t(cull) : 2u;
+    pipelineDraw.winding  = m_rasterizerState.frontFace() == VK_FRONT_FACE_CLOCKWISE
+      ? 0u   // WMTWindingClockwise
+      : 1u;  // WMTWindingCounterClockwise
+    pipelineDraw.fillMode = m_rasterizerState.polygonMode() == VK_POLYGON_MODE_LINE
+      ? 1u   // WMTTriangleFillModeLines
+      : 0u;  // WMTTriangleFillModeFill
+
     if (m_hasViewport) {
       const VkViewport& vp = m_viewport.viewport;
       // DXVK emits a negative-height viewport (Vulkan's bottom-left y-flip

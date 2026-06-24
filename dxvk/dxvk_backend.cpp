@@ -543,11 +543,12 @@ namespace dxvk {
     bufferCommands.assign(draw.bindingCount, {});
     residencyCommands.assign(draw.residentCount, {});
 
-    wmtcmd_render_setpso         setPipeline = {};
-    wmtcmd_render_setdsso        setDepthState = {};
-    wmtcmd_render_setviewport    setViewport = {};
-    wmtcmd_render_setscissorrect setScissor = {};
-    wmtcmd_render_draw           drawCmd     = {};
+    wmtcmd_render_setpso              setPipeline = {};
+    wmtcmd_render_setdsso             setDepthState = {};
+    wmtcmd_render_setrasterizerstate  setRaster = {};
+    wmtcmd_render_setviewport         setViewport = {};
+    wmtcmd_render_setscissorrect      setScissor = {};
+    wmtcmd_render_draw                drawCmd     = {};
 
     setPipeline.type = WMTRenderCommandSetPSO;
     setPipeline.pso  = draw.pipelineState;
@@ -563,6 +564,18 @@ namespace dxvk {
       tail->next.set(&setDepthState);
       tail = reinterpret_cast<wmtcmd_base*>(&setDepthState);
     }
+
+    // Rasterizer state: cull mode, winding, fill mode, depth bias.
+    setRaster.type            = WMTRenderCommandSetRasterizerState;
+    setRaster.fill_mode       = WMTTriangleFillMode(draw.fillMode);
+    setRaster.cull_mode       = WMTCullMode(draw.cullMode);
+    setRaster.depth_clip_mode = WMTDepthClipModeClip;
+    setRaster.winding         = WMTWinding(draw.winding);
+    setRaster.depth_bias      = draw.depthBias;
+    setRaster.scole_scale     = draw.depthSlopeScale;
+    setRaster.depth_bias_clamp = draw.depthBiasClamp;
+    tail->next.set(&setRaster);
+    tail = reinterpret_cast<wmtcmd_base*>(&setRaster);
 
     // Viewport (pixel rect + depth range) and scissor; absent leaves Metal's
     // default of the full render target.

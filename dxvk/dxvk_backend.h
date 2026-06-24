@@ -76,6 +76,10 @@ namespace dxvk {
     double                    viewportHeight = 0, viewportMinDepth = 0, viewportMaxDepth = 1;
     bool                      hasScissor     = false;
     uint32_t                  scissorX = 0, scissorY = 0, scissorWidth = 0, scissorHeight = 0;
+    // Rasterizer state (winemetal enum values): cull mode, front-face winding,
+    // triangle fill mode, and depth bias. Defaults: no culling, fill.
+    uint32_t                  cullMode = 0, winding = 0, fillMode = 0;
+    float                     depthBias = 0, depthSlopeScale = 0, depthBiasClamp = 0;
     bool                      clear          = false;
     uint32_t                  clearColorArgb = 0;
   };

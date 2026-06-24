@@ -401,7 +401,7 @@ namespace dxvk {
       m_vertexAttributes.assign(attributes, attributes + attributeCount);
       m_vertexBindings.assign(bindings, bindings + bindingCount);
     }
-    void setRasterizerState(const DxvkRasterizerState& rs) { (void) rs; }
+    void setRasterizerState(const DxvkRasterizerState& rs) { m_rasterizerState = rs; }
     void setMultisampleState(const DxvkMultisampleState& ms) { (void) ms; }
     // Capture the depth-stencil state so draw() can bind a matching Metal
     // depth-stencil state object (resolved + cached at draw time).
@@ -692,6 +692,9 @@ namespace dxvk {
 
     // Primitive topology (setInputAssemblyState); default triangle list.
     VkPrimitiveTopology m_inputTopology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    // Rasterizer state (setRasterizerState): cull mode, winding, fill, bias.
+    DxvkRasterizerState m_rasterizerState = { };
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value
