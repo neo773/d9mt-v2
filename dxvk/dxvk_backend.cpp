@@ -750,6 +750,8 @@ namespace dxvk {
         MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
       MTLCommandBuffer_commit(m_frameCommandBuffer);
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
+      if (MTLCommandBuffer_status(m_frameCommandBuffer) == WMTCommandBufferStatusError)
+        logLine("endFrameAndPresent: command buffer ERROR");
     }
     endGpuCaptureIfActive();
 

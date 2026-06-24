@@ -120,20 +120,33 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     leaves the pixels off-GPU. That fix was applied but still read black, so the
     remaining suspect is `MTLTexture_newTextureView`'s out `gpu_resource_id`
     (verify it's non-zero and lands in the argument buffer).
-  - *Attempt 2 (reverted):* isolated the swizzle by mapping `R8_UNORM` only (no
-    swizzle view) and rendering the L8 gradient through `texquad_ps`. Result was
-    WORSE than attempt 1: `code_l8`'s window stayed **unpainted** (not even the
-    clear color) and the GPU capture came back **empty / no color drawable /
-    no render encoders** — repeatably — whereas `code_texture` (RGBA8, identical
-    path) captures and renders fine. So the blocker is **R8 single-channel
-    sampling itself**, not the swizzle: creating an `R8Unorm` Metal texture and
-    binding it through the argument-buffer heap appears to fault the command
-    buffer (no present). Next investigation is the bindless-heap descriptor for
-    a 1-channel format (texture type / `gpu_resource_id` registration for R8),
-    NOT more swizzle work. Verification is also a hard blocker here: `code_l8`
-    captures are unreliable (unlike RGBA8/cube), so fixing the GPU capture's
-    multi-frame drawable-pool hang — or finding why R8 aborts the frame — should
-    come first.
+  - *Attempt 2 + root cause (the earlier "R8 faults" guess was WRONG):* mapping
+    `R8_UNORM` only (no swizzle), the frame **renders and presents fine** — the
+    command buffer reports no error (added a `MTLCommandBuffer_status` check),
+    `beginFrame` confirms the target is in the backbuffer set, and the GPU
+    capture (once it lands a frame) shows `drawPrimitives` + `presentDrawable`
+    to the 1600×1200 drawable. The drawn quad is just **invisible** — the
+    drawable holds only the clear color. Reading the fragment MSL (same method
+    that cracked the alpha-test bug) shows why:
+    ```
+    float _66 = _62.w;                 // sampled .a
+    if (!alphaTest(_66)) discard_fragment();
+    ```
+    Metal samples an `R8Unorm` texture's missing alpha as **0**, so every
+    fragment fails `alphaTest` and is discarded. `code_texture` survives only
+    because its RGBA alpha is 1. **So the rrr1 swizzle is not optional — it
+    forces alpha=1 and is what makes L8 visible at all**, confirming the
+    swizzled-view path is correct; it still needs `newTextureView`'s
+    `gpu_resource_id` to be valid (attempt 1's "black"). Verification gotcha:
+    `code_l8` GPU captures are flaky (retry until a frame with the 1600×1200
+    `CAMetalLayer Drawable` appears), and the trace-log frame counter lags so a
+    low count is not a hang.
+  - *Latent bug to check:* `code_l8` does NOT enable `D3DRS_ALPHATESTENABLE`, yet
+    the shader still discards on alpha. Either the FF/alpha-test spec constant
+    defaults to enabled, or `alphaTest()` isn't a true no-op when disabled — that
+    would silently discard any sampled alpha below the (default 0?) ref across
+    ALL textures, only hidden today because the test textures use alpha=1. Worth
+    confirming the disabled-alpha-test path is genuinely `compareOp = ALWAYS`.
 
 ---
 
