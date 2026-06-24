@@ -55,11 +55,26 @@ collapses — and dxbc-spirv has **no function-inlining pass** (confirmed:
 recompile on every spec-data change (alpha test, fog, …) — the current path
 keeps those as a runtime CBV (one compile), which is the efficient design.
 
-**Correct fix (deferred — substantial):** (1) an IR pass that inlines the
-sampler-state helper functions so the constant sampler index propagates, then
-(2) specialize ONLY the sampler-type/mode spec constants (not the runtime ones)
-keyed by sampler types, and DCE the Dref path → `texture2d`. Belongs in the
-ported `dxvk_shader_ir.cpp` (the IR path), never the SPIR-V→MSL convert module.
+**Correct fix (deferred — substantial, but now precisely scoped).** The call
+chain is `main → sampleImage(fn) → loadSamplerState(fn) → samplerMode(fn)`. The
+spec-load helpers (`samplerMode`, `loadSamplerState`) are **straight-line**
+(load + `extract_bits` + composite; no control flow); only `sampleImage`/`main`
+have branches. So the fix does NOT need general inlining:
+  1. In the ported `dxvk_shader_ir.cpp`, add `getCodeSpecialized(specData)`:
+     replace each `eDclSpecConstant` with its literal value (proven to work —
+     the MSL showed `extract_bits(4294967292u, …)` after folding).
+  2. Add a **straight-line-only** function-inline step: repeatedly inline any
+     `OpFunctionCall` whose callee body has no control flow (clone body, map
+     params→args + internal defs→fresh, replace the call result). Iterating
+     collapses `samplerMode`→`loadSamplerState`→into `sampleImage`'s body.
+  3. Run the fixpoint Arithmetic+CFG-cleanup+RemoveUnused loop (already
+     prototyped). With `isDepth` now constant inside `sampleImage`, the Dref
+     branch is pruned and SPIRV-Cross emits `texture2d`.
+  Cache the compiled program per (shader, spec-data) — or, to avoid recompiling
+  on every alpha-test/fog change, fold ONLY the sampler-type/mode spec ids and
+  keep the rest as the runtime spec-data CBV. Never touch the SPIR-V→MSL convert
+  module; this all lives in the IR getCode path. A first cut that folds all spec
+  constants is correct but recompiles more than necessary.
 
 ### Phase 1.2 texture binding contract (decoded from generated MSL, for the loop)
 
