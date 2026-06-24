@@ -86,17 +86,43 @@ namespace dxvk {
     uint32_t minStorageBufferAlignment = 0u;
   };
 
-  // Extra information about a shader. Carried so the device/pipeline layers can
-  // read a stage without us executing anything. Kept tiny on purpose.
+  // Feature flags a shader advertises. The IR binding-model pass sets these
+  // from the lowered code; the shim only reads metadata().stage, but the full
+  // set must exist so the pass and getCode compile against the real interface.
+  enum DxvkShaderFlag : uint64_t {
+    HasSampleRateShading,
+    HasTransformFeedback,
+    ExportsPosition,
+    ExportsStencilRef,
+    ExportsViewportIndexLayerFromVertexStage,
+    ExportsSampleMask,
+    UsesFragmentCoverage,
+    UsesSparseResidency,
+    TessellationPoints,
+    SemanticIo,
+  };
+
+  using DxvkShaderFlags = Flags<DxvkShaderFlag>;
+
+  // Extra information about a shader. The IR binding-model pass fills all of
+  // these; the shim's draw path consults only `stage`. Field layout mirrors
+  // dxvk-ref so the ported pass assigns to real members.
   struct DxvkShaderMetadata {
     VkShaderStageFlagBits stage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
-    uint32_t              flatShadingInputs = 0u;
+    DxvkShaderFlags       flags = { };
+    uint32_t              specConstantMask = 0u;
     DxvkShaderIo          inputs  = { };
     DxvkShaderIo          outputs = { };
+    VkPrimitiveTopology   inputTopology  = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    VkPrimitiveTopology   outputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    uint32_t              flatShadingInputs = 0u;
+    int32_t               rasterizedStream  = 0;
+    uint32_t              patchVertexCount  = 0u;
+    std::array<uint32_t, MaxNumXfbBuffers> xfbStrides = { };
   };
 
   // Linkage info passed to getCode() by the (kept) pipeline layer. The shim
-  // ignores it; declared so the virtual signature matches the real DXVK one.
+  // always passes null, but the fields getCode references must exist.
   struct DxvkShaderLinkage {
     bool fsDualSrcBlend  = false;
     bool fsFlatShading   = false;
@@ -106,6 +132,8 @@ namespace dxvk {
     VkPrimitiveTopology   inputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     VkShaderStageFlagBits prevStage     = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
     DxvkShaderIo          prevStageOutputs = { };
+
+    std::array<VkComponentMapping, MaxNumRenderTargets> rtSwizzles = { };
 
     bool eq(const DxvkShaderLinkage&) const { return true; }
     size_t hash() const { return 0u; }
@@ -169,6 +197,13 @@ namespace dxvk {
 
     static uint32_t getCookie(const Rc<DxvkShader>& shader) {
       return shader != nullptr ? uint32_t(shader->getCookie()) : 0u;
+    }
+
+    // Optional SPIR-V dump directory. The shim never dumps, so this is always
+    // empty; the IR shader's convertIr() skips dumping on an empty path.
+    static const std::string& getShaderDumpPath() {
+      static const std::string empty;
+      return empty;
     }
 
   private:

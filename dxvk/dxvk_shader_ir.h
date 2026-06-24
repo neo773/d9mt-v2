@@ -1,51 +1,48 @@
 #pragma once
 
 #include <atomic>
-#include <cstdint>
-#include <ostream>
 #include <string>
-#include <utility>
 #include <vector>
 
-// Real dxbc-spirv headers — the frontend's shader converters derive from
-// DxvkIrShaderConverter and call into ir::Builder/ShaderStage/ScalarType, so we
-// must expose the exact same types. These are kept third-party tooling headers,
-// not part of the shim's Vulkan/Metal surface.
 #include <dxbc/dxbc_api.h>
+
 #include <ir/ir_builder.h>
+
 #include <ir/passes/ir_pass_lower_io.h>
 
 #include "dxvk_shader.h"
 
-// IR shader (shim). The D3D9 frontend builds a DxvkIrShaderConverter subclass
-// and a default DxvkIrShaderCreateInfo, then asks the device to turn them into
-// a Rc<DxvkShader> via createCachedShader. Because the shim renders only a
-// fixed-function triangle through D9mtBackend, the IR is never converted or
-// executed: DxvkIrShader keeps the converter + name and answers trivially.
-// Signatures mirror the real DXVK header so the frontend + device compile
-// unmodified (SHIM_SPEC.md).
+#include "../util/thread.h"
 
 namespace dxvk {
 
-  // Metadata that cannot be inferred from the IR. The frontend default-
-  // constructs this and sets only `.options`.
+  /**
+   * \brief IR shader properties
+   *
+   * Stores some metadata that cannot be inferred from
+   * the IR, as well as some binding model mappings.
+   */
   struct DxvkIrShaderCreateInfo {
+    /// Shader compile options
     DxvkShaderOptions options;
-    uint32_t          flatShadingInputs = 0u;
-    int32_t           rasterizedStream  = 0;
+    /// Mask of user input locations to enable flat shading for
+    uint32_t flatShadingInputs = 0u;
+    /// Rasterized geometry stream
+    int32_t rasterizedStream = 0;
+    /// Streamout parameters
+    small_vector<dxbc_spv::ir::IoXfbInfo, 8u> xfbEntries = { };
 
-    size_t hash() const { return 0u; }
-    bool   eq(const DxvkIrShaderCreateInfo&) const { return true; }
+    size_t hash() const;
+
+    bool eq(const DxvkIrShaderCreateInfo& other) const;
   };
 
 
   /**
-   * \brief Raw shader binary for dxbc-spirv (shim base)
+   * \brief Raw shader binary for dxbc-spirv
    *
-   * The frontend's D3D9ShaderConverter / D3D9SWVPShaderGenerator derive from
-   * this and implement the four virtuals. We keep the real interface and the
-   * intrusive refcount so Rc<DxvkIrShaderConverter> works identically; the shim
-   * just never invokes convertShader() on the render path.
+   * Performs the initial shader conversion and provides a method for
+   * the shader implementation to map resource registers to DXVK bindings.
    */
   class DxvkIrShaderConverter {
 
@@ -60,108 +57,166 @@ namespace dxvk {
         delete this;
     }
 
-    virtual ~DxvkIrShaderConverter() = default;
+    virtual ~DxvkIrShaderConverter();
 
+    /**
+     * \brief Performs initial shader conversion
+     * \param [out] builder IR builder
+     */
     virtual void convertShader(
             dxbc_spv::ir::Builder&    builder) = 0;
 
+    /**
+     * \brief Maps IR binding to internal resource index
+     *
+     * \param [in] stage Shader stage
+     * \param [in] type Descriptor type
+     * \param [in] regSpace Register space
+     * \param [in] regIndex Register index
+     */
     virtual uint32_t determineResourceIndex(
             dxbc_spv::ir::ShaderStage stage,
             dxbc_spv::ir::ScalarType  type,
             uint32_t                  regSpace,
             uint32_t                  regIndex) const = 0;
 
+    /**
+     * \brief Dumps source to the given output file
+     * \param [in] file Output stream
+     */
     virtual void dumpSource(const std::string& path) const = 0;
 
+    /**
+     * \brief Queries shader debug name
+     * \returns Shader debug name
+     */
     virtual std::string getDebugName() const = 0;
 
   private:
 
-    std::atomic<uint32_t> m_useCount = { 0u };
+    std::atomic<uint32_t> m_useCount = { };
 
   };
 
 
   /**
-   * \brief DXBC-SPIRV IR shader (shim)
-   *
-   * Constructed by the device's createCachedShader. Holds the converter +
-   * create-info for identity; produces no code (the triangle pipeline is
-   * prebuilt in D9mtBackend).
+   * \brief DXBC-SPIRV IR shader
    */
   class DxvkIrShader : public DxvkShader {
 
   public:
 
-    // Arbitrary spec-data descriptor set, kept to match the real constant the
-    // frontend references via DxvkIrShader::SpecDataSet.
+    // Arbitrarily chosen number that we know we won't use anywhere else
     static constexpr uint32_t SpecDataSet = 7u;
 
     DxvkIrShader(
       const DxvkIrShaderCreateInfo&   info,
-            Rc<DxvkIrShaderConverter> shader)
-    : m_baseIr(std::move(shader)), m_info(info) {
-      if (m_baseIr != nullptr)
-        m_debugName = m_baseIr->getDebugName();
-      m_metadata.flatShadingInputs = info.flatShadingInputs;
-    }
+            Rc<DxvkIrShaderConverter> shader);
 
-    // Prebuilt-from-cache form (name + serialized IR). Retained for ABI parity;
-    // the shim ignores the IR bytes.
     DxvkIrShader(
             std::string               name,
       const DxvkIrShaderCreateInfo&   info,
             DxvkShaderMetadata        metadata,
             DxvkPipelineLayoutBuilder layout,
-            std::vector<uint8_t>      ir)
-    : m_info(info), m_debugName(std::move(name)),
-      m_layout(std::move(layout)), m_ir(std::move(ir)), m_metadata(metadata) { }
+            std::vector<uint8_t>      ir);
 
-    ~DxvkIrShader() = default;
+    ~DxvkIrShader();
 
+    /**
+     * \brief Queries shader create info
+     * \returns Shader create info
+     */
     DxvkIrShaderCreateInfo getShaderCreateInfo() const {
       return m_info;
     }
 
-    DxvkShaderMetadata getShaderMetadata() {
-      return m_metadata;
-    }
+    /**
+     * \brief Queries shader metadata
+     *
+     * Compiles the shader on demand.
+     * \returns Shader metadata
+     */
+    DxvkShaderMetadata getShaderMetadata();
 
-    void compile() {
-      // No IR conversion in the shim.
-    }
+    /**
+     * \brief Compiles shader to internal IR
+     */
+    void compile();
 
+    /**
+     * \brief Patches code using given info
+     *
+     * Rewrites binding IDs and potentially fixes up other
+     * parts of the code depending on pipeline state.
+     * \param [in] bindings Biding map
+     * \param [in] state Pipeline state info
+     * \returns Uncompressed SPIR-V code buffer
+     */
     SpirvCodeBuffer getCode(
-      const DxvkShaderBindingMap*       /*bindings*/,
-      const DxvkShaderLinkage*          /*linkage*/) {
-      return SpirvCodeBuffer();
-    }
+      const DxvkShaderBindingMap*       bindings,
+      const DxvkShaderLinkage*          linkage);
 
-    DxvkPipelineLayoutBuilder getLayout() {
-      return m_layout;
-    }
+    /**
+     * \brief Queries shader binding layout
+     * \returns Pipeline layout builder
+     */
+    DxvkPipelineLayoutBuilder getLayout();
 
-    void dump(std::ostream&) {
-      // No SPIR-V to dump in the shim.
-    }
+    /**
+     * \brief Dumps SPIR-V binary to a stream
+     * \param [in] outputStream Stream to write to
+     */
+    void dump(std::ostream& outputStream);
 
-    // Empty serialized-IR view; nothing consumes it on the render path.
-    std::pair<const uint8_t*, size_t> getSerializedIr() {
-      return { m_ir.data(), m_ir.size() };
-    }
+    /**
+     * \brief Queries serialized IR
+     */
+    std::pair<const uint8_t*, size_t> getSerializedIr();
 
-    std::string debugName() {
-      return m_debugName;
-    }
+    /**
+     * \brief Retrieves debug name for this shader
+     * \returns Shader debug name
+     */
+    std::string debugName();
 
   private:
 
-    Rc<DxvkIrShaderConverter> m_baseIr;
-    DxvkIrShaderCreateInfo    m_info;
-    std::string               m_debugName;
-    DxvkPipelineLayoutBuilder m_layout;
-    std::vector<uint8_t>      m_ir;
-    DxvkShaderMetadata        m_metadata = { };
+    Rc<DxvkIrShaderConverter>     m_baseIr;
+    std::string                   m_debugName;
+
+    DxvkIrShaderCreateInfo        m_info;
+    DxvkPipelineLayoutBuilder     m_layout;
+
+    dxvk::mutex                   m_mutex;
+
+    std::vector<uint8_t>          m_ir;
+    std::atomic<bool>             m_convertedIr = { false };
+
+    DxvkShaderMetadata            m_metadata = { };
+
+    void convertIr(const char* reason);
+
+    void convertShader();
+
+    void serializeIr(const dxbc_spv::ir::Builder& builder);
+
+    void deserializeIr(dxbc_spv::ir::Builder& builder) const;
+
+    void dumpSource(const std::string& dumpPath);
+
+    void dumpSpv(const std::string& dumpPath);
+
+    static dxbc_spv::ir::PrimitiveType convertPrimitiveType(VkPrimitiveTopology topology);
+
+    static dxbc_spv::ir::IoOutputSwizzle convertOutputSwizzle(VkComponentMapping mapping);
+
+    static dxbc_spv::ir::IoOutputComponent convertOutputComponent(VkComponentSwizzle swizzle, dxbc_spv::ir::IoOutputComponent identity);
+
+    static dxbc_spv::ir::ShaderStage convertShaderStage(VkShaderStageFlagBits stage);
+
+    static dxbc_spv::ir::IoMap convertIoMap(const DxvkShaderIo& io, VkShaderStageFlagBits stage);
+
+    static std::optional<dxbc_spv::ir::BuiltIn> convertBuiltIn(spv::BuiltIn builtIn, VkShaderStageFlagBits stage);
 
   };
 

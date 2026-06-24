@@ -450,10 +450,19 @@ namespace dxvk {
       (void) dstImage; (void) srcImage; (void) region; (void) format; (void) mode; (void) stencilMode;
     }
 
-    // Copies — no-ops (no resource staging path in the shim).
+    // Buffer-to-buffer copy. The frontend's FlushBuffer uploads a mapped
+    // (staging) buffer into the device buffer the draw binds via this. Every
+    // shim buffer is a host-visible coherent Metal allocation, so the Vulkan
+    // staging+transfer dance collapses to a CPU memcpy in the synchronous shim
+    // — without it, MAP_MODE_BUFFER vertex/index buffers reach the GPU as zero.
     void copyBuffer(const Rc<DxvkBuffer>& dstBuffer, VkDeviceSize dstOffset,
                     const Rc<DxvkBuffer>& srcBuffer, VkDeviceSize srcOffset, VkDeviceSize numBytes) {
-      (void) dstBuffer; (void) dstOffset; (void) srcBuffer; (void) srcOffset; (void) numBytes;
+      if (!dstBuffer || !srcBuffer || !numBytes)
+        return;
+      void*       dst = dstBuffer->mapPtr(dstOffset);
+      const void* src = srcBuffer->mapPtr(srcOffset);
+      if (dst && src)
+        std::memcpy(dst, src, numBytes);
     }
     void copyBufferToImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource,
                            VkOffset3D dstOffset, VkExtent3D dstExtent, const Rc<DxvkBuffer>& srcBuffer,

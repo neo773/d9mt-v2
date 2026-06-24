@@ -30,6 +30,31 @@ namespace dxvk {
 
   using DxvkDescriptorFlags = Flags<DxvkDescriptorFlag>;
 
+  // Order-invariant store descriptor (real DXVK uses this to relax barriers).
+  // The Metal shim issues no barriers, but the IR binding-model pass tags UAV
+  // stores with one, so the value type must exist and round-trip bit-exactly.
+  struct DxvkAccessOp {
+    static constexpr uint32_t StoreValueBits = 12u;
+
+    enum OpType : uint16_t {
+      None    = 0x0u, Or = 0x1u, And = 0x2u, Xor = 0x3u, Add = 0x4u,
+      IMin    = 0x5u, IMax = 0x6u, UMin = 0x7u, UMax = 0x8u, Load = 0x9u,
+      StoreF  = 0xdu, StoreUi = 0xeu, StoreSi = 0xfu,
+    };
+
+    DxvkAccessOp() = default;
+    DxvkAccessOp(OpType t) : op(uint16_t(t)) { }
+    DxvkAccessOp(OpType t, uint16_t constant) : op(uint16_t(t) | (constant << 4u)) { }
+
+    uint16_t op = 0u;
+
+    bool operator == (const DxvkAccessOp& t) const { return op == t.op; }
+    bool operator != (const DxvkAccessOp& t) const { return op != t.op; }
+
+    template<typename T, std::enable_if_t<std::is_integral_v<T>, bool> = true>
+    explicit operator T() const { return op; }
+  };
+
   // Mirrors the real struct's public fields. The FF path sets a subset
   // (set/binding/resourceIndex/descriptorType/access/flags/descriptorCount/
   // blockOffset); the rest stay default so the layout is value-copyable.
@@ -42,6 +67,7 @@ namespace dxvk {
     VkImageViewType     viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
     VkAccessFlags       access          = 0u;
     DxvkDescriptorFlags flags           = 0u;
+    DxvkAccessOp        accessOp        = DxvkAccessOp::None;
     uint32_t            blockOffset     = 0u;
   };
 
@@ -80,6 +106,35 @@ namespace dxvk {
     uint32_t getOffset() const { return m_offset; }
     uint32_t getSize() const { return m_size; }
     uint64_t getResourceDwordMask() const { return m_resourceMask; }
+
+    // Push-data block index for a stage: 0 = shared (multi-stage / compute),
+    // else one block per graphics stage. Mirrors real DXVK so the IR pass's
+    // offsets line up with what the shader-conversion module reflects.
+    static uint32_t computeIndex(VkShaderStageFlags stageMask) {
+      if (stageMask & VK_SHADER_STAGE_COMPUTE_BIT)
+        return 0u;
+      uint32_t remainder = stageMask & (stageMask - 1u);
+      return remainder ? 0u : (bit::tzcnt(uint32_t(stageMask)) + 1u);
+    }
+
+    static uint32_t computeBlockOffsetForIndex(uint32_t index) {
+      return index ? MaxSharedPushDataSize + MaxPerStagePushDataSize * (index - 1u) : 0u;
+    }
+
+    static uint32_t computeBlockOffsetForStage(VkShaderStageFlags stageMask) {
+      return computeBlockOffsetForIndex(computeIndex(stageMask));
+    }
+
+    static uint32_t computeBlockSizeForStage(VkShaderStageFlags stageMask) {
+      if (stageMask & VK_SHADER_STAGE_COMPUTE_BIT)
+        return MaxTotalPushDataSize - MaxReservedPushDataSize;
+      if (stageMask & (stageMask - 1u))
+        return MaxSharedPushDataSize;
+      if (stageMask == VK_SHADER_STAGE_FRAGMENT_BIT)
+        return (MaxTotalPushDataSize - MaxReservedPushDataSize)
+             - computeBlockOffsetForStage(VK_SHADER_STAGE_FRAGMENT_BIT);
+      return MaxPerStagePushDataSize;
+    }
 
     bool eq(const DxvkPushDataBlock& o) const {
       return m_stageMask == o.m_stageMask && m_offset == o.m_offset
@@ -150,6 +205,14 @@ namespace dxvk {
     explicit DxvkShaderDescriptor(const DxvkBindingInfo& info)
     : m_info(info) { }
 
+    // Stage-carrying form the IR binding-model pass builds. The shim's read
+    // side (the shader-conversion module) only consults set/binding/resource/
+    // type/flags, so the stage mask is recorded but otherwise unused here.
+    DxvkShaderDescriptor(const DxvkBindingInfo& info, VkShaderStageFlags stages)
+    : m_info(info), m_stages(stages) { }
+
+    VkShaderStageFlags getStageMask() const { return m_stages; }
+
     VkDescriptorType getDescriptorType() const { return m_info.descriptorType; }
     uint32_t getSet() const { return m_info.set; }
     uint32_t getBinding() const { return m_info.binding; }
@@ -163,7 +226,8 @@ namespace dxvk {
 
   private:
 
-    DxvkBindingInfo m_info = { };
+    DxvkBindingInfo    m_info   = { };
+    VkShaderStageFlags m_stages = 0u;
 
   };
 
@@ -189,6 +253,14 @@ namespace dxvk {
     const DxvkShaderBinding* mapBinding(DxvkShaderBinding src) const {
       auto it = m_bindings.find(src);
       return it != m_bindings.end() ? &it->second : nullptr;
+    }
+
+    // The shim never relocates push data (it has no merged Vulkan pipeline
+    // layout), so a push-data offset maps to itself. Present so the IR shader's
+    // ResourceMapping compiles; only reached when a non-null map is passed.
+    uint32_t mapPushData(VkShaderStageFlags stage, uint32_t offset) const {
+      (void) stage;
+      return offset;
     }
 
   private:
@@ -247,10 +319,26 @@ namespace dxvk {
 
     VkShaderStageFlags getStageMask() const { return m_stageMask; }
 
-    // Append `count` bindings (the shim shader passes its create-info bindings).
+    // Append `count` bindings (the FF shim passes its create-info bindings).
     void addBindings(uint32_t count, const DxvkBindingInfo* bindings) {
       for (uint32_t i = 0; i < count; i++)
         m_bindings.emplace_back(bindings[i]);
+    }
+
+    // Pre-wrapped form the IR binding-model pass emits (carries stage mask).
+    void addBindings(uint32_t count, const DxvkShaderDescriptor* bindings) {
+      for (uint32_t i = 0; i < count; i++)
+        m_bindings.push_back(bindings[i]);
+    }
+
+    // The sampler heap / spec-data buffer are declared by the IR pass so the
+    // backend can remap them; the shim only needs to remember the bindings.
+    void addSamplerHeap(const DxvkShaderBinding& binding) {
+      m_samplerHeaps.push_back(binding);
+    }
+
+    void addSpecDataBuffer(const DxvkShaderBinding& binding) {
+      m_specDataBuffers.push_back(binding);
     }
 
     // Record a push-data block at the given block index (0 = shared, 1.. per
@@ -260,6 +348,12 @@ namespace dxvk {
         m_pushData[index] = block;
         m_pushMask |= (1u << index);
       }
+    }
+
+    // Stage-derived form the IR pass emits; the block index follows from its
+    // stage mask (shared block 0 for multi-stage data, else one per stage).
+    void addPushData(const DxvkPushDataBlock& block) {
+      addPushData(DxvkPushDataBlock::computeIndex(block.getStageMask()), block);
     }
 
     DxvkPipelineBindingRange getBindings() const {
@@ -278,6 +372,8 @@ namespace dxvk {
     uint32_t           m_pushMask  = 0u;
     std::vector<DxvkShaderDescriptor> m_bindings;
     std::array<DxvkPushDataBlock, DxvkPushDataBlock::MaxBlockCount> m_pushData = { };
+    std::vector<DxvkShaderBinding> m_samplerHeaps;
+    std::vector<DxvkShaderBinding> m_specDataBuffers;
 
   };
 

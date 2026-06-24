@@ -27,11 +27,13 @@ cp "$D9MTMETAL_BUILD/d9mtmetal.so"    "$WINE_LIB/x86_64-unix/d9mtmetal.so"
 "$WINE" --bottle "$BOTTLE" reg add 'HKCU\Software\Wine\DllOverrides' \
   /v d9mtmetal /d builtin /f >/dev/null 2>&1 || true
 
+EXE="${1:-code.exe}"
 mkdir -p "$TESTDIR"
 rm -f "$TESTDIR/v2.log"
-cp "$V2/build/d3d9.dll" "$V2/build/code.exe" "$TESTDIR/"
-echo "[v2] launching code.exe under wine"
+cp "$V2/build/d3d9.dll" "$TESTDIR/"
+cp "$V2/build/$EXE" "$TESTDIR/"
+echo "[v2] launching $EXE under wine"
 cd "$TESTDIR"
 WINEDLLOVERRIDES="d3d9=n" "$WINE" --bottle "$BOTTLE" \
-  start /unix "$TESTDIR/code.exe" >/dev/null 2>&1 &
+  start /unix "$TESTDIR/$EXE" >/dev/null 2>&1 &
 echo "[v2] launched pid $!"

@@ -18,10 +18,12 @@ namespace {
   // buffer / push / sampler-heap indices SPIRV-Cross assigns. Matches v1.
   constexpr uint32_t VertexBufferBase = 14u;
 
-  // Descriptor set the FF spec-constant buffer lives in (D3D9FFShaderModuleSet
-  // SpecDataSet). Its data comes from setSpecConstants, NOT bindUniformBuffer,
-  // so resources in this set bind the uploaded spec buffer rather than a CBV.
-  constexpr uint32_t SpecDataSet = 3u;
+  // Descriptor sets the spec-constant buffer lives in: the fixed-function
+  // shader module uses set 3, the programmable IR shader uses set 7
+  // (DxvkIrShader::SpecDataSet). Resources in either set are filled from
+  // setSpecConstants, NOT bindUniformBuffer, so they bind the uploaded spec
+  // buffer rather than a CBV.
+  constexpr bool isSpecDataSet(uint32_t set) { return set == 3u || set == 7u; }
 
   void logLine(const char* message) {
     if (FILE* file = std::fopen("C:\\d9mt-test\\v2.log", "a")) {
@@ -178,8 +180,11 @@ namespace dxvk {
           m_specConstantData.data(), uint32_t(m_specConstantData.size()));
       }
     }
-    if (!stage.function)
-      logLine(("shader translate/compile failed: " + shader->debugName()).c_str());
+    if (!stage.function) {
+      const char* where = !stage.translation.ok ? "convert" : !stage.library ? "compile" : "resolve";
+      logLine(("shader fail [" + std::string(where) + "] " + shader->debugName()
+               + " err=" + stage.translation.error).c_str());
+    }
 
     auto& slot = m_compiledStages.emplace(cookie, std::move(stage)).first->second;
     return slot.function ? &slot : nullptr;
@@ -242,10 +247,11 @@ namespace dxvk {
 
 
   uint64_t DxvkContext::uploadSpecData() {
-    if (m_specConstantData.empty())
-      return 0u;
-
-    size_t bytes = m_specConstantData.size() * sizeof(uint32_t);
+    // Always hand back a valid, zeroed buffer even when no spec constants were
+    // set: the translated shaders dereference the spec/common-state buffer
+    // unconditionally (e.g. clipPlaneCount reads it), so a null argument-buffer
+    // slot would fault the GPU and drop the draw. Zero reads as "no clip planes,
+    // default state", which is correct for a shader that set no spec data.
     if (!m_specDataBuffer) {
       m_specDataBuffer = m_backend->createSharedBuffer(
         MaxNumSpecConstants * sizeof(uint32_t), &m_specDataBufferCpu, &m_specDataAddress);
@@ -253,7 +259,10 @@ namespace dxvk {
     if (!m_specDataBufferCpu)
       return 0u;
 
-    std::memcpy(m_specDataBufferCpu, m_specConstantData.data(), bytes);
+    size_t bytes = m_specConstantData.size() * sizeof(uint32_t);
+    std::memset(m_specDataBufferCpu, 0, MaxNumSpecConstants * sizeof(uint32_t));
+    if (bytes)
+      std::memcpy(m_specDataBufferCpu, m_specConstantData.data(), bytes);
     return m_specDataAddress;
   }
 
@@ -300,7 +309,7 @@ namespace dxvk {
         if (!ref.isUniformBuffer)
           continue;
 
-        if (ref.set == SpecDataSet) {
+        if (isSpecDataSet(ref.set)) {
           // Spec-constant buffer: filled from setSpecConstants, not a CBV.
           uint64_t address = uploadSpecData();
           if (address) {
