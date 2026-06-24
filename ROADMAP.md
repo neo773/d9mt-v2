@@ -188,12 +188,19 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     texture binds exactly like a working RGBA8 one. EVERYTHING statically
     inspectable is now identical to the working case, yet the R8 draw writes no
     pixels. The bug is purely in the GPU runtime of sampling an `R8Unorm`
-    texture (most likely the sample returns NaN/inf and the fragment output is
-    dropped). The only way forward is LIVE shader debugging — step the fragment
-    shader on the R8 draw and read the actual sampled value / output — or test a
-    different single-channel format (e.g. force `A8Unorm`(1) instead of
-    `R8Unorm`(10) in the format map) to see if the format value itself is the
-    problem. Static capture analysis is exhausted.
+    texture. **Ran the A8 experiment** (forced `R8_UNORM → A8Unorm`(1)): the quad
+    is STILL invisible. So this is NOT R8-specific — **every single-channel
+    format (R8, A8) produces no fragment output** through this bindless sampling
+    path, while RGBA8 works with everything else identical. The defect is in
+    sampling a 1-channel `texture2d<float>` via the argument-buffer heap.
+  - *Redirected fix (implement next, not more swizzle work):* create A8/L8/A8L8
+    D3D9 textures as a real **RGBA8** Metal texture and expand+swizzle the source
+    bytes on upload in `copyBufferToImage`: L8→(r,r,r,1), A8→(0,0,0,a),
+    A8L8→(r,r,r,g). RGBA8 sampling is proven working, so this sidesteps the
+    single-channel bug entirely (and subsumes the swizzle). Distinguish the three
+    (they share VkFormat `R8_UNORM`/`R8G8_UNORM`) by the view's `packedSwizzle`,
+    captured onto the image at first view creation, or by threading the D3D9
+    format through `createImage`. Static capture analysis is fully exhausted.
 
 ---
 
