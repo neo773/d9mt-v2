@@ -206,4 +206,8 @@ echo "[dxvk] compiling code_blend.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_blend.exe" "$V2/test/code_blend.c" \
   -ld3d9 -luser32 -lgdi32
 
-echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD/code.exe" "$BUILD/code_shader.exe" "$BUILD/code_index.exe" "$BUILD/code_texture.exe" "$BUILD/code_blend.exe"
+echo "[dxvk] compiling code_depth.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_depth.exe" "$V2/test/code_depth.c" \
+  -ld3d9 -luser32 -lgdi32
+
+echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD/code.exe" "$BUILD/code_shader.exe" "$BUILD/code_index.exe" "$BUILD/code_texture.exe" "$BUILD/code_blend.exe" "$BUILD/code_depth.exe"

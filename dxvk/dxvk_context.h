@@ -400,7 +400,9 @@ namespace dxvk {
     }
     void setRasterizerState(const DxvkRasterizerState& rs) { (void) rs; }
     void setMultisampleState(const DxvkMultisampleState& ms) { (void) ms; }
-    void setDepthStencilState(const DxvkDepthStencilState& ds) { (void) ds; }
+    // Capture the depth-stencil state so draw() can bind a matching Metal
+    // depth-stencil state object (resolved + cached at draw time).
+    void setDepthStencilState(const DxvkDepthStencilState& ds) { m_depthStencilState = ds; }
     void setLogicOpState(const DxvkLogicOpState& lo) { (void) lo; }
     // Capture the color-attachment blend state so draw() can fold it into the
     // pipeline. Only attachment 0 (the backbuffer) is consulted by the shim.
@@ -542,6 +544,10 @@ namespace dxvk {
     // Translates the captured D3D9 blend state into Metal pipeline blend state.
     MetalColorBlend buildBlendState() const;
 
+    // Resolves (creating + caching) the Metal depth-stencil state object for the
+    // captured depth state. Returns 0 to leave Metal's default always-pass state.
+    uint64_t resolveDepthStencilState();
+
     // Resolves shaders + PSO and assembles the per-draw buffer/argument/
     // residency bindings into `out` (minus the vertex/index count, which the
     // caller fills). Returns false if the draw cannot proceed. Shared by
@@ -661,6 +667,11 @@ namespace dxvk {
 
     // Color-attachment blend state (setBlendMode); folded into the PSO + its key.
     DxvkBlendMode m_blendMode = { };
+
+    // Depth-stencil state (setDepthStencilState) + a cache of the Metal state
+    // objects built from each distinct (compare op, write enable) combination.
+    DxvkDepthStencilState m_depthStencilState = { };
+    std::unordered_map<uint32_t, uint64_t> m_depthStencilCache;
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value

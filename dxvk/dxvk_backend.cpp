@@ -235,6 +235,16 @@ namespace dxvk {
     return sampler;
   }
 
+  uint64_t D9mtBackend::createDepthStencilState(uint32_t depthCompareFunction,
+                                                bool depthWriteEnabled) {
+    WMTDepthStencilInfo info = {};
+    info.depth_compare_function = WMTCompareFunction(depthCompareFunction);
+    info.depth_write_enabled    = depthWriteEnabled;
+    // Stencil stays at its default (test disabled): the front/back WMTStencilInfo
+    // zero-initialize to a keep/always configuration.
+    return MTLDevice_newDepthStencilState(m_device, &info);
+  }
+
   void D9mtBackend::renderAndPresent(const D9mtDraw& draw, bool clear, uint32_t clearColorArgb) {
     if (!isValid() || !m_layer)
       return;
@@ -417,6 +427,24 @@ namespace dxvk {
     }
     uint64_t drawableTexture = MetalDrawable_texture(m_frameDrawable);
 
+    // Depth buffer (Depth32Float, drawable-sized, GPU-private), created once and
+    // reused. Cleared to the far plane each frame so depth-tested draws start
+    // fresh; draws that never enable depth testing simply ignore it.
+    if (!m_depthTexture && m_width && m_height) {
+      WMTTextureInfo depthInfo = {};
+      depthInfo.pixel_format       = WMTPixelFormatDepth32Float;
+      depthInfo.width              = m_width;
+      depthInfo.height             = m_height;
+      depthInfo.depth              = 1u;
+      depthInfo.array_length       = 1u;
+      depthInfo.type               = WMTTextureType2D;
+      depthInfo.mipmap_level_count = 1u;
+      depthInfo.sample_count       = 1u;
+      depthInfo.usage              = WMTTextureUsageRenderTarget;
+      depthInfo.options            = WMTResourceStorageModePrivate;
+      m_depthTexture = MTLDevice_newTexture(m_device, &depthInfo);
+    }
+
     // Render pass identical to renderAndPresent: clear the drawable (when
     // asked) then load into the open encoder. clearColorArgb is raw D3DCOLOR.
     WMTRenderPassInfo renderPass = {};
@@ -427,6 +455,10 @@ namespace dxvk {
     renderPass.colors[0].clear_color.g = ((clearColorArgb >> 8)  & 0xff) / 255.0;
     renderPass.colors[0].clear_color.b = ((clearColorArgb)       & 0xff) / 255.0;
     renderPass.colors[0].clear_color.a = ((clearColorArgb >> 24) & 0xff) / 255.0;
+    renderPass.depth.texture      = m_depthTexture;
+    renderPass.depth.load_action  = WMTLoadActionClear;
+    renderPass.depth.store_action = WMTStoreActionDontCare;
+    renderPass.depth.clear_depth  = 1.0f;
     renderPass.render_target_width = m_width;
     renderPass.render_target_height = m_height;
     renderPass.default_raster_sample_count = 1;
@@ -453,13 +485,24 @@ namespace dxvk {
     bufferCommands.assign(draw.bindingCount, {});
     residencyCommands.assign(draw.residentCount, {});
 
-    wmtcmd_render_setpso setPipeline = {};
-    wmtcmd_render_draw   drawCmd     = {};
+    wmtcmd_render_setpso  setPipeline = {};
+    wmtcmd_render_setdsso setDepthState = {};
+    wmtcmd_render_draw    drawCmd     = {};
 
     setPipeline.type = WMTRenderCommandSetPSO;
     setPipeline.pso  = draw.pipelineState;
 
     wmtcmd_base* tail = reinterpret_cast<wmtcmd_base*>(&setPipeline);
+
+    // Bind the depth-stencil state when the draw carries one; otherwise the
+    // encoder keeps Metal's default always-pass / no-write depth behavior.
+    if (draw.depthStencilState) {
+      setDepthState.type        = WMTRenderCommandSetDSSO;
+      setDepthState.dsso        = draw.depthStencilState;
+      setDepthState.stencil_ref = 0u;
+      tail->next.set(&setDepthState);
+      tail = reinterpret_cast<wmtcmd_base*>(&setDepthState);
+    }
 
     // Make every argument-buffer-referenced resource resident so the GPU can
     // follow the addresses written into the argument buffers.

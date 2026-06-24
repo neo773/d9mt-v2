@@ -59,6 +59,9 @@ namespace dxvk {
     uint32_t                  indexCount        = 0;
     uint32_t                  indexType         = 0;
     int32_t                   baseVertex        = 0;
+    // Depth-stencil state object bound before the draw (0 = leave the Metal
+    // default: depth test always passes, no depth write).
+    uint64_t                  depthStencilState = 0;
     bool                      clear          = false;
     uint32_t                  clearColorArgb = 0;
   };
@@ -107,6 +110,11 @@ namespace dxvk {
                            uint32_t addressU, uint32_t addressV, uint32_t addressW,
                            uint64_t* gpuResourceIdOut);
 
+    // Creates a depth-stencil state object (compare function is a WMT/Metal
+    // enum value; stencil is left disabled). Returned handle is bound on the
+    // render encoder before a draw.
+    uint64_t createDepthStencilState(uint32_t depthCompareFunction, bool depthWriteEnabled);
+
     // Records one render pass into the next drawable: clear to clearColorArgb
     // (raw D3DCOLOR), draw the given list as a triangle list, present, wait.
     // Uses the hardcoded MSL pipeline (fallback / bring-up path).
@@ -148,6 +156,11 @@ namespace dxvk {
     uint64_t m_pipelineState = 0;
     uint32_t m_width         = 0;
     uint32_t m_height        = 0;
+
+    // Depth attachment shared across frames (cleared each frame). Created lazily
+    // at the drawable size so depth-tested draws have a depth buffer to compare
+    // against; the color-only triangle path leaves the default always-pass state.
+    uint64_t m_depthTexture  = 0;
 
     // Open-frame state (Stage A). Non-zero handles mean a frame is in flight.
     uint64_t m_frameDrawable      = 0;

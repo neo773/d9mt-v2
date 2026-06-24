@@ -119,6 +119,9 @@ namespace dxvk {
     info.colors[0].src_alpha_blend_factor = blend.srcAlpha;
     info.colors[0].dst_alpha_blend_factor = blend.dstAlpha;
     info.colors[0].write_mask             = blend.writeMask;
+    // The frame always binds a Depth32Float attachment, so every pipeline must
+    // declare the matching depth format even when depth testing is disabled.
+    info.depth_pixel_format               = 252u;  // WMTPixelFormatDepth32Float
     info.raster_sample_count              = 1u;
 
     uint32_t attributeCount = uint32_t(vertexLayout.attributes.size());

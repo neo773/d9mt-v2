@@ -273,6 +273,26 @@ namespace dxvk {
   }
 
 
+  uint64_t DxvkContext::resolveDepthStencilState() {
+    // VkCompareOp and the Metal compare function share the same NEVER..ALWAYS
+    // ordering. With depth testing off, the comparison is forced to ALWAYS so
+    // fragments are never depth-rejected; depth writes still follow the state.
+    bool     write   = m_depthStencilState.depthWrite();
+    uint32_t compare = m_depthStencilState.depthTest()
+      ? uint32_t(m_depthStencilState.depthCompareOp())
+      : 7u;  // WMTCompareFunctionAlways
+
+    uint32_t key = (compare << 1) | (write ? 1u : 0u);
+    auto cached = m_depthStencilCache.find(key);
+    if (cached != m_depthStencilCache.end())
+      return cached->second;
+
+    uint64_t state = m_backend->createDepthStencilState(compare, write);
+    m_depthStencilCache.emplace(key, state);
+    return state;
+  }
+
+
   uint64_t DxvkContext::uploadPushData(const MslReflection& reflection, uint32_t slot) {
     if (!reflection.pushDataSize)
       return 0u;
@@ -554,13 +574,14 @@ namespace dxvk {
     if (fragmentStage)
       bindArgumentBuffers(fragmentStage->translation.reflection, true, 1u, bindings, residentBuffers);
 
-    pipelineDraw.pipelineState   = pipeline;
-    pipelineDraw.bindings        = bindings.data();
-    pipelineDraw.bindingCount    = uint32_t(bindings.size());
-    pipelineDraw.residentBuffers = residentBuffers.data();
-    pipelineDraw.residentCount   = uint32_t(residentBuffers.size());
-    pipelineDraw.clear           = m_clearPending;
-    pipelineDraw.clearColorArgb  = m_clearColorArgb;
+    pipelineDraw.pipelineState     = pipeline;
+    pipelineDraw.bindings          = bindings.data();
+    pipelineDraw.bindingCount      = uint32_t(bindings.size());
+    pipelineDraw.residentBuffers   = residentBuffers.data();
+    pipelineDraw.residentCount     = uint32_t(residentBuffers.size());
+    pipelineDraw.depthStencilState = resolveDepthStencilState();
+    pipelineDraw.clear             = m_clearPending;
+    pipelineDraw.clearColorArgb    = m_clearColorArgb;
     return true;
   }
 
