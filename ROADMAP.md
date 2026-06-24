@@ -165,6 +165,12 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     about binding an R8 texture's argument-buffer descriptor makes the sample (or
     a dependent value) collapse the geometry or output — compare the R8 vs RGBA8
     `@rps0` vertex/fragment MSL and the bound argument buffers side by side.
+    The bound vertex buffer was ALSO verified correct from the capture (the exact
+    -0.7..0.7 quad at 20-byte stride), so geometry input is eliminated too — the
+    only thing left is what the shaders compute at runtime. Note: gpudebug's
+    `fetch` is replay-based but DID read the R8 texture's pixels correctly (the
+    swizzled-view fetch showed a clean grayscale ramp), so the blank drawable is
+    not a replay artifact — the draw genuinely writes nothing.
 
 ---
 
