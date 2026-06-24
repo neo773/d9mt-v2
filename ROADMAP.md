@@ -21,6 +21,11 @@ delta and a regression target.
 - [x] **Phase 1.1 — programmable SM3 shaders** — ported the real DXVK
       `DxvkIrShader` (dxbc-spirv IR→SPIR-V + binding-model lowering) over the
       stub; `code_shader.exe` renders the RGB triangle. (`2f414cd`)
+- [x] **Phase 1.2 — textures + samplers, color-correct** — real MTLTextures +
+      upload, bindless sampler heap, residency; and the `depth2d`→`texture2d`
+      fix (IR spec-constant fold + a straight-line function inliner + DCE in
+      `getCodeSpecialized`) so color samplers return RGBA. `code_texture.exe`
+      renders the red/blue checkerboard. (`a03abbd`, `e6db176`)
 - [x] **Phase 1.3 — index buffers + drawIndexed** — `code_index.exe`
       renders via `DrawIndexedPrimitive`. (`712c11f`)
 - [x] **Phase 1.4 — dynamic state into the PSO** — blend state
@@ -29,69 +34,18 @@ delta and a regression target.
       `7a901bf`). Minor follow-ups: non-triangle topology classes, RT-format in
       the PSO key (both fixed today: triangle list, BGRA8 backbuffer).
 
-### Phase 1.2 status — infrastructure DONE, color blocked on depth2d
+### Phase 1.2 notes (DONE)
 
-Texture binding works end-to-end (verified: `code_texture.exe` renders the
-8×8 checkerboard, sharp point-filtered, correct UVs). Implemented: real
-MTLTexture creation + `replaceRegion` upload (`copyBufferToImage`), sampler
-creation + bindless sampler heap, texture argument-buffer descriptors,
-residency, and `getSamplerHeapSet()` so the converter finds the heap.
-
-**Remaining blocker — `depth2d` returns one channel.** The uber-PS has a
-`sample_compare` (shadow) path guarded by `isDepth = samplerMode >= Dref`.
-SPIRV-Cross sees the Dref op and emits `depth2d<float>`, whose `.sample()`
-returns only the red channel (red/blue checker shows as black/white). To get
-`texture2d`, the Dref op must be eliminated from the SPIR-V before SPIRV-Cross.
-
-Investigated (and reverted) an IR spec-constant fold: replacing each
-`eDclSpecConstant` with its concrete value and running Arithmetic+CFG+RemoveUnused
-to DCE the dead branch. **It does not work alone** because the D3D9 converter
-emits sampler-state reads through *helper functions* (`samplerMode(uint index)`
-= `extract_bits(specValue, index*2, 2)`); after folding, the value is constant
-but the bit-extract is still parameterized by the function arg, so it never
-collapses — and dxbc-spirv has **no function-inlining pass** (confirmed:
-`FunctionCleanupPass` only removes unused params; `SpirvBuilder` emits real
-`OpFunctionCall`). Folding *all* spec constants also wrongly forces a shader
-recompile on every spec-data change (alpha test, fog, …) — the current path
-keeps those as a runtime CBV (one compile), which is the efficient design.
-
-**Correct fix (deferred — substantial, but now precisely scoped).** The call
-chain is `main → sampleImage(fn) → loadSamplerState(fn) → samplerMode(fn)`. The
-spec-load helpers (`samplerMode`, `loadSamplerState`) are **straight-line**
-(load + `extract_bits` + composite; no control flow); only `sampleImage`/`main`
-have branches. So the fix does NOT need general inlining:
-  1. In the ported `dxvk_shader_ir.cpp`, add `getCodeSpecialized(specData)`:
-     replace each `eDclSpecConstant` with its literal value (proven to work —
-     the MSL showed `extract_bits(4294967292u, …)` after folding).
-  2. Add a **straight-line-only** function-inline step: repeatedly inline any
-     `OpFunctionCall` whose callee body has no control flow (clone body, map
-     params→args + internal defs→fresh, replace the call result). Iterating
-     collapses `samplerMode`→`loadSamplerState`→into `sampleImage`'s body.
-  3. Run the fixpoint Arithmetic+CFG-cleanup+RemoveUnused loop (already
-     prototyped). With `isDepth` now constant inside `sampleImage`, the Dref
-     branch is pruned and SPIRV-Cross emits `texture2d`.
-  Cache the compiled program per (shader, spec-data) — or, to avoid recompiling
-  on every alpha-test/fog change, fold ONLY the sampler-type/mode spec ids and
-  keep the rest as the runtime spec-data CBV. Never touch the SPIR-V→MSL convert
-  module; this all lives in the IR getCode path. A first cut that folds all spec
-  constants is correct but recompiles more than necessary.
-
-### Phase 1.2 texture binding contract (decoded from generated MSL, for the loop)
-
-The convert module already reflects textures/samplers/heaps; the gap is the
-backend (app textures are stubbed — no MTLTexture). The PS MSL expects:
-- `buffer(0)` = sampler heap: device AB of `spvDescriptor<sampler>` (sampler
-  `gpu_resource_id`s), indexed by a 16-bit field in push data (`s0_s0_sPad`).
-- `buffer(2)` id(0) = the texture descriptor (texture `gpu_resource_id` in the
-  set-2 AB), accessed directly (not heap-indexed).
-- `buffer(7)` specData `psSamplerTypes`/`psSamplerModes` select sample mode;
-  `samplerType==3` returns black.
-- winemetal: `MTLDevice_newTexture`/`newSamplerState` (out `gpu_resource_id`),
-  `MTLTexture_replaceRegion` (upload), `WMTRenderCommandUseResource` (residency).
-- WATCH: SPIRV-Cross emitted `depth2d<float>` for the color sampler — the D3D9
-  sampler-type (shadow vs color) spec/permutation likely needs to flip it to
-  `texture2d`. Verify with `code_texture.exe` (checkerboard) and chase if the
-  quad is grayscale/black.
+How the texture path works, for reference. The PS samples through a bindless
+model: `buffer(0)` = sampler heap (device AB of sampler resource IDs, indexed
+by a push-data field); `buffer(2)` id(0) = the texture descriptor (texture
+resource ID in the set-2 AB). winemetal: `MTLDevice_newTexture`/`newSamplerState`
+(out `gpu_resource_id`), `MTLTexture_replaceRegion` (upload), `useResource`
+(residency). The `depth2d`→`texture2d` color fix lives entirely in the IR path
+(`DxvkIrShader::getCodeSpecialized`): fold spec constants, inline straight-line
+sampler-state helpers, DCE the dead shadow branch — never the convert module.
+Follow-up perf: specialize only the sampler-type spec ids (not alpha/fog) to cut
+the per-spec-data recompiles the all-spec fold currently causes.
 
 What A+B are NOT: the Vulkan-ectomy. They were the prerequisite + hygiene. The
 real Vulkan removal is Phases 3–4 below, deliberately held until there's a real
