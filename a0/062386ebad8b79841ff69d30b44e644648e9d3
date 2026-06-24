@@ -1,0 +1,30 @@
+test/code_alpha.c
+  s_85f47c9b3164ad::t_5a4a7c73fa8933 1-8,15-16,20,24,59,61,66,72-75,78-79,82-94,101-103,118
+  s_85f47c9b3164ad::t_62575806b4f9b9 18-19,21
+test/asm_shader.c
+  s_85f47c9b3164ad::t_2c5892240e4260 1-55
+scripts/assemble-shaders.sh
+  s_85f47c9b3164ad::t_20eda77524c5d2 1-23
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_cf0980540e0dff 190-192
+test/shaders/alpha_ps.asm
+  s_85f47c9b3164ad::t_a73f48c3faf383 1-5
+test/alpha_ps_bytecode.inc
+  s_85f47c9b3164ad::t_a73f48c3faf383 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "a0062386ebad8b79841ff69d30b44e644648e9d3",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
