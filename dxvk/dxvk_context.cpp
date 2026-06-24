@@ -502,36 +502,46 @@ namespace dxvk {
   bool DxvkContext::prepareDraw(D9mtPipelineDraw& pipelineDraw) {
     // Translate + compile the bound shaders (cached). The vertex shader is
     // mandatory; the fragment shader is optional (depth-only passes have none).
-    const CompiledShaderStage* vertexStage   = resolveStage(m_boundVertexShader);
-    const CompiledShaderStage* fragmentStage = resolveStage(m_boundFragmentShader);
+    const CompiledShaderStage* vertexStage;
+    const CompiledShaderStage* fragmentStage;
+    {
+      TraceScope resolveScope(TraceZone::ResolveShader);
+      vertexStage   = resolveStage(m_boundVertexShader);
+      fragmentStage = resolveStage(m_boundFragmentShader);
+    }
     if (!vertexStage)
       return false;
 
-    MetalVertexLayout layout = buildVertexLayout();
-    MetalColorBlend   blend  = buildBlendState();
-
-    // Pipeline cache keyed by the shader pair plus the blend state — the same
-    // shaders drawn opaque vs alpha-blended need distinct pipelines. The shader
-    // cookies and the 32-bit packed blend bits are mixed into one key.
-    uint32_t blendBits = 0u;
-    std::memcpy(&blendBits, &m_blendMode, sizeof(blendBits));
-    uint64_t key = (uint64_t(DxvkShader::getCookie(m_boundVertexShader)) << 32)
-                 |  uint64_t(DxvkShader::getCookie(m_boundFragmentShader));
-    key ^= uint64_t(blendBits) * 0x9E3779B97F4A7C15ull;
     uint64_t pipeline = 0;
-    auto cachedPipeline = m_pipelineStates.find(key);
-    if (cachedPipeline != m_pipelineStates.end()) {
-      pipeline = cachedPipeline->second;
-    } else {
-      pipeline = metalBuildRenderPipeline(m_backend->device(),
-        vertexStage->function, fragmentStage ? fragmentStage->function : 0u,
-        layout, /* MTLPixelFormatBGRA8Unorm */ 80u, blend);
-      m_pipelineStates.emplace(key, pipeline);
-      if (!pipeline)
-        logLine("render pipeline build failed");
+    {
+      TraceScope pipelineScope(TraceZone::BuildPipeline);
+      MetalVertexLayout layout = buildVertexLayout();
+      MetalColorBlend   blend  = buildBlendState();
+
+      // Pipeline cache keyed by the shader pair plus the blend state — the same
+      // shaders drawn opaque vs alpha-blended need distinct pipelines. The
+      // shader cookies and the 32-bit packed blend bits are mixed into one key.
+      uint32_t blendBits = 0u;
+      std::memcpy(&blendBits, &m_blendMode, sizeof(blendBits));
+      uint64_t key = (uint64_t(DxvkShader::getCookie(m_boundVertexShader)) << 32)
+                   |  uint64_t(DxvkShader::getCookie(m_boundFragmentShader));
+      key ^= uint64_t(blendBits) * 0x9E3779B97F4A7C15ull;
+      auto cachedPipeline = m_pipelineStates.find(key);
+      if (cachedPipeline != m_pipelineStates.end()) {
+        pipeline = cachedPipeline->second;
+      } else {
+        pipeline = metalBuildRenderPipeline(m_backend->device(),
+          vertexStage->function, fragmentStage ? fragmentStage->function : 0u,
+          layout, /* MTLPixelFormatBGRA8Unorm */ 80u, blend);
+        m_pipelineStates.emplace(key, pipeline);
+        if (!pipeline)
+          logLine("render pipeline build failed");
+      }
     }
     if (!pipeline)
       return false;
+
+    TraceScope bindScope(TraceZone::BindResources);
 
     // Bind the vertex stream (binding 0 at VertexBufferBase) and each stage's
     // push block at its reflected index.
@@ -602,6 +612,7 @@ namespace dxvk {
     if (!m_backend || !count || !draws)
       return;
 
+    TraceScope drawScope(TraceZone::Draw);
     D9mtPipelineDraw pipelineDraw;
     if (!prepareDraw(pipelineDraw))
       return;
@@ -610,6 +621,7 @@ namespace dxvk {
     m_backend->beginFrame(m_clearPending, m_clearColorArgb);
     m_backend->appendDraw(pipelineDraw);
     m_clearPending = false;
+    FrameTrace::countDraw();
   }
 
 
@@ -619,6 +631,7 @@ namespace dxvk {
     if (!m_backend || !count || !draws || !m_indexBuffer.handle)
       return;
 
+    TraceScope drawScope(TraceZone::Draw);
     D9mtPipelineDraw pipelineDraw;
     if (!prepareDraw(pipelineDraw))
       return;
@@ -635,6 +648,7 @@ namespace dxvk {
     m_backend->beginFrame(m_clearPending, m_clearColorArgb);
     m_backend->appendDraw(pipelineDraw);
     m_clearPending = false;
+    FrameTrace::countDraw();
   }
 
 }

@@ -9,6 +9,8 @@
 // metal-cpp (that is host tooling). See SHIM_SPEC.md §4.
 #include "winemetal.h"
 
+#include "dxvk_trace.h"   // per-frame CPU draw-path profiler (D9MT_TRACE)
+
 // Generated at build time from the embedded triangle MSL:
 //   d9mt_triangle_metallib[] + d9mt_triangle_metallib_len.
 // Built into build/triangle_metallib.h; the build adds that dir to -I.
@@ -472,6 +474,8 @@ namespace dxvk {
     if (!m_frameOpen || !m_frameEncoder || !draw.pipelineState)
       return;
 
+    TraceScope appendScope(TraceZone::AppendDraw);
+
     // Same POD command chain as renderAndPresent(D9mtPipelineDraw): set pipeline
     // -> make resources resident -> bind every buffer -> draw. The buffer/
     // residency packets live in scratch with stable addresses (sized up front)
@@ -565,10 +569,13 @@ namespace dxvk {
         return;  // still couldn't open (e.g. no drawable) — nothing to present.
     }
 
-    MTLCommandEncoder_endEncoding(m_frameEncoder);
-    MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
-    MTLCommandBuffer_commit(m_frameCommandBuffer);
-    MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
+    {
+      TraceScope presentScope(TraceZone::Present);
+      MTLCommandEncoder_endEncoding(m_frameEncoder);
+      MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
+      MTLCommandBuffer_commit(m_frameCommandBuffer);
+      MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
+    }
 
     if (m_framePool)
       NSObject_release(m_framePool);
@@ -576,6 +583,9 @@ namespace dxvk {
     // Reset frame state — zero handles mean no frame is in flight.
     m_frameDrawable = m_frameCommandBuffer = m_frameEncoder = m_framePool = 0;
     m_frameOpen = false;
+
+    // Emit the per-frame CPU breakdown (no-op unless D9MT_TRACE is set).
+    FrameTrace::endFrame();
   }
 
 }

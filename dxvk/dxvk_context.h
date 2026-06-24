@@ -29,6 +29,7 @@
 #include "dxvk_include.h"   // util layer + real Vk types/enums
 
 #include "dxvk_backend.h"   // D9mtBackend, D9mtDraw
+#include "dxvk_trace.h"     // per-frame CPU draw-path profiler (D9MT_TRACE)
 #include "dxvk_shader_convert.h"         // MslShader (cached translation)
 #include "dxvk_metal_shader_pipeline.h"  // MetalVertexLayout (PSO assembly)
 #include "dxvk_buffer.h"    // DxvkBufferSlice (Metal buffer handle + offset)
