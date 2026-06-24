@@ -132,21 +132,25 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     float _66 = _62.w;                 // sampled .a
     if (!alphaTest(_66)) discard_fragment();
     ```
-    Metal samples an `R8Unorm` texture's missing alpha as **0**, so every
-    fragment fails `alphaTest` and is discarded. `code_texture` survives only
-    because its RGBA alpha is 1. **So the rrr1 swizzle is not optional — it
-    forces alpha=1 and is what makes L8 visible at all**, confirming the
-    swizzled-view path is correct; it still needs `newTextureView`'s
-    `gpu_resource_id` to be valid (attempt 1's "black"). Verification gotcha:
-    `code_l8` GPU captures are flaky (retry until a frame with the 1600×1200
-    `CAMetalLayer Drawable` appears), and the trace-log frame counter lags so a
-    low count is not a hang.
-  - *Latent bug to check:* `code_l8` does NOT enable `D3DRS_ALPHATESTENABLE`, yet
-    the shader still discards on alpha. Either the FF/alpha-test spec constant
-    defaults to enabled, or `alphaTest()` isn't a true no-op when disabled — that
-    would silently discard any sampled alpha below the (default 0?) ref across
-    ALL textures, only hidden today because the test textures use alpha=1. Worth
-    confirming the disabled-alpha-test path is genuinely `compareOp = ALWAYS`.
+    the shader discards on `!alphaTest(sampled.w)`. That LOOKED like the cause
+    (R8 samples missing alpha as 0) — but reading the captured shader, the
+    disabled-alpha-test path compiles `alphaTest` to literally `return true;`,
+    so the discard never fires and there is **no latent alpha-test bug**. So the
+    alpha test is NOT why the L8 quad is invisible.
+  - *Still open — the actual cause is unidentified.* Confirmed facts: R8 does not
+    fault (command-buffer status OK), the draw executes (`drawPrimitives`
+    vertexCount 6) and presents to the 1600×1200 drawable, `useResource @tex0`
+    (the R8 texture) is resident, `alphaTest` returns true — yet the drawable
+    holds only the clear color (no quad, not even black). `code_texture` (RGBA8,
+    identical geometry/shader/viewport) renders. So sampling an R8 texture
+    produces no visible fragments for a reason not yet found. Remaining leads to
+    check next: the viewport/scissor for the R8 draw (capture showed
+    `setScissorRect` and a different `setViewport` raw value than the RGBA8 case
+    — verify it's not a zero-area rect), the color write mask, and whether the
+    R8 sample returns a value equal to the clear. Verification gotcha: `code_l8`
+    captures are flaky (retry until the 1600×1200 `CAMetalLayer Drawable`
+    appears) and the trace-log frame counter lags, so a low count is not a hang.
+    The rrr1 swizzle is still needed for luminance correctness regardless.
 
 ---
 
