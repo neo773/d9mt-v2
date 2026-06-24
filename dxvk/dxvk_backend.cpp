@@ -368,13 +368,19 @@ namespace dxvk {
 
     // Same POD command chain as renderAndPresent(D9mtPipelineDraw): set pipeline
     // -> make resources resident -> bind every buffer -> draw. The buffer/
-    // residency packets live in vectors with stable addresses (sized up front)
+    // residency packets live in scratch with stable addresses (sized up front)
     // so the `next` links stay valid until encodeCommands consumes them.
     // encodeCommands appends onto the still-open encoder — no end/present here.
+    //
+    // The scratch is function-static (the shim replays draws on one thread): its
+    // capacity persists across draws, so a steady draw stream allocates nothing.
+    static std::vector<wmtcmd_render_setbuffer>   bufferCommands;
+    static std::vector<wmtcmd_render_useresource> residencyCommands;
+    bufferCommands.assign(draw.bindingCount, {});
+    residencyCommands.assign(draw.residentCount, {});
+
     wmtcmd_render_setpso setPipeline = {};
     wmtcmd_render_draw   drawCmd     = {};
-    std::vector<wmtcmd_render_setbuffer>    bufferCommands(draw.bindingCount);
-    std::vector<wmtcmd_render_useresource>  residencyCommands(draw.residentCount);
 
     setPipeline.type = WMTRenderCommandSetPSO;
     setPipeline.pso  = draw.pipelineState;

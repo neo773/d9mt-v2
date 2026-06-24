@@ -363,7 +363,13 @@ namespace dxvk {
     // buffer where bound, else a shared zero buffer (the FF null stream for
     // unused attributes — Metal drops the draw if any referenced index is
     // unbound, and the frontend never binds that stream).
-    std::vector<D9mtBufferBinding> bindings;
+    // Reuse persistent scratch (capacity survives clear()) so a steady draw
+    // stream allocates nothing per draw.
+    std::vector<D9mtBufferBinding>& bindings = m_drawBindings;
+    std::vector<uint64_t>&          residentBuffers = m_drawResidentBuffers;
+    bindings.clear();
+    residentBuffers.clear();
+
     for (const DxvkVertexInput& input : m_vertexBindings) {
       uint32_t streamBinding = input.binding().binding;
       auto bound = m_vertexBuffers.find(streamBinding);
@@ -392,7 +398,6 @@ namespace dxvk {
     // Argument buffers carrying the FF constant buffers (transform, clip planes,
     // spec data) the translated shaders read from descriptor sets 2/3. The
     // buffers they point to must be made resident (residentBuffers).
-    std::vector<uint64_t> residentBuffers;
     bindArgumentBuffers(vertexStage->translation.reflection, false, 0u, bindings, residentBuffers);
     if (fragmentStage)
       bindArgumentBuffers(fragmentStage->translation.reflection, true, 1u, bindings, residentBuffers);

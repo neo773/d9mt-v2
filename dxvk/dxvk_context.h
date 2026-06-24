@@ -571,6 +571,11 @@ namespace dxvk {
     uint64_t m_zeroVertexBuffer    = 0;
     void*    m_zeroVertexBufferCpu = nullptr;
 
+    // Persistent per-draw scratch (cleared, not freed, each draw → no per-draw
+    // heap allocation once capacity settles).
+    std::vector<D9mtBufferBinding> m_drawBindings;
+    std::vector<uint64_t>          m_drawResidentBuffers;
+
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value
 
