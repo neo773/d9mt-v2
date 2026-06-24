@@ -101,10 +101,27 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     and `A8L8` → `VK_FORMAT_R8G8_UNORM`, neither of which is in
     `metalPixelFormatFromVulkan`, so those textures currently get no Metal
     texture at all. Each also carries a D3D9 component swizzle (`L8`=rrr1,
-    `A8`=000r, `A8L8`=rrrg). winemetal's format-encoded swizzles (R001/RGB1/
-    GBAR) can't express rrr1/000r, so the clean path is **upload-time channel
-    expansion**: create an RGBA8 Metal texture and expand the R8/RG8 source per
-    the frontend's `VkComponentMapping` in `copyBufferToImage`/`uploadTexture`.
+    `A8`=000r, `A8L8`=rrrg) — a *view* property (`DxvkImageViewKey::packedSwizzle`,
+    `unpackSwizzle()`). The clean path: (1) add `R8_UNORM`→`R8Unorm`(10) and
+    `R8G8_UNORM`→`RG8Unorm`(30) to `metalPixelFormatFromVulkan` so the base
+    texture is created; (2) in `DxvkImageView`, when `packedSwizzle` is
+    non-identity, lazily build a swizzled Metal view via
+    `MTLTexture_newTextureView(base, fmt, type, 0,levels, 0,slices, swizzle, &id)`
+    and return its `gpuResourceId` for sampling. This matches Metal's per-view
+    swizzle natively — no upload-time pixel expansion needed.
+  - *Attempt 1 (reverted, not committed):* implemented the above end-to-end
+    (`createTextureView` backend wrapper + lazy swizzled view in `createView` +
+    `code_l8.exe` gradient test). The base texture creates correctly as
+    `R8Unorm` and the swizzled view fetches as a grayscale ramp in the capture,
+    BUT the rendered quad came out **black**. Residency is the suspect: the view
+    aliases the base's storage, so `gpuResourceId()` must point at the view
+    while `metalTexture()` (what `bindResourceImageView` makes resident via
+    `useResource`) must stay the BASE texture — making only the view resident
+    leaves the pixels off-GPU. That fix was applied but still read black, so the
+    remaining suspect is `MTLTexture_newTextureView`'s out `gpu_resource_id`
+    (verify it's non-zero and lands in the argument buffer). Note: the
+    single-frame GPU capture consistently fails to include the l8 color drawable
+    — verify with a screenshot, or fix the capture's multi-frame hang first.
 
 ---
 
