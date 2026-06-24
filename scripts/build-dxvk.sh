@@ -187,6 +187,9 @@ $MINGW-g++ -shared -o "$BUILD/d3d9.dll" \
   -static -static-libgcc -static-libstdc++ \
   -Wl,--enable-stdcall-fixup
 
+echo "[dxvk] compiling asm_shader.exe (D3DXAssembleShader tool for test shaders)"
+$MINGW-gcc -O2 -o "$BUILD/asm_shader.exe" "$V2/test/asm_shader.c" -ld3dx9_43
+
 echo "[dxvk] compiling code.exe"
 $MINGW-gcc -O2 -o "$BUILD/code.exe" "$V2/test/code.c" -ld3d9 -luser32 -lgdi32
 
