@@ -1,0 +1,36 @@
+dxvk/dxvk_shader_ir.h
+  s_85f47c9b3164ad::t_54e74c8fa89ca6 160-170
+dxvk/dxvk_shader.h
+  s_85f47c9b3164ad::t_774fd0e8dde43f 195-204
+dxvk/dxvk_shader_ir.cpp
+  s_85f47c9b3164ad::t_a90dedaa8b826f 2260-2265
+  s_85f47c9b3164ad::t_8e80592da77d41 2270-2271,2274-2275
+  s_85f47c9b3164ad::t_d93d7f161fa34d 1-2
+  s_85f47c9b3164ad::t_0064b2f77c6feb 5-9
+  s_85f47c9b3164ad::t_354bdb51120aba 2147-2184,2186-2189,2191-2238,2248,2251,2255-2259,2266-2269,2272-2273,2276-2354
+  s_85f47c9b3164ad::t_3d0675f522ba51 2190
+  s_85f47c9b3164ad::t_bd83dad3f0522c 2252-2254
+  s_85f47c9b3164ad::t_ce2b8a4eaf3ab0 2185
+  s_85f47c9b3164ad::t_40b87d218fbcd9 2239-2247,2249-2250
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_3d919ad62c5237 201
+  s_85f47c9b3164ad::t_69e80698e4b032 161-165,167-172,177-181
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_2a349c76797886 579-582
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "e6db176c7f436aaf507395d29a34cf071faf646e",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
