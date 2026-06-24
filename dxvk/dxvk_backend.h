@@ -89,6 +89,24 @@ namespace dxvk {
     uint64_t createSharedBuffer(uint64_t byteCount, void** cpuPointerOut,
                                 uint64_t* gpuAddressOut = nullptr);
 
+    // Creates a 2D sampled texture in the given winemetal pixel format and
+    // returns its MTLTexture handle; writes the texture's gpuResourceID (for
+    // an argument-buffer descriptor) to gpuResourceIdOut.
+    uint64_t createSampledTexture(uint32_t width, uint32_t height,
+                                  uint32_t metalPixelFormat, uint64_t* gpuResourceIdOut);
+
+    // Uploads a tightly-packed mip-0 region into a texture (replaceRegion).
+    void uploadTexture(uint64_t texture, uint32_t x, uint32_t y,
+                       uint32_t width, uint32_t height,
+                       const void* data, uint32_t bytesPerRow);
+
+    // Creates a sampler from already-translated Metal sampler parameters and
+    // returns its handle; writes the sampler's gpuResourceID (for the sampler
+    // heap) to gpuResourceIdOut. Filters/address modes are winemetal enums.
+    uint64_t createSampler(uint32_t minFilter, uint32_t magFilter, uint32_t mipFilter,
+                           uint32_t addressU, uint32_t addressV, uint32_t addressW,
+                           uint64_t* gpuResourceIdOut);
+
     // Records one render pass into the next drawable: clear to clearColorArgb
     // (raw D3DCOLOR), draw the given list as a triangle list, present, wait.
     // Uses the hardcoded MSL pipeline (fallback / bring-up path).

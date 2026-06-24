@@ -24,6 +24,26 @@ delta and a regression target.
 - [x] **Phase 1.3 — index buffers + drawIndexed** — `code_index.exe`
       renders via `DrawIndexedPrimitive`. (`712c11f`)
 
+### Phase 1.2 status — infrastructure DONE, color blocked on depth2d
+
+Texture binding works end-to-end (verified: `code_texture.exe` renders the
+8×8 checkerboard, sharp point-filtered, correct UVs). Implemented: real
+MTLTexture creation + `replaceRegion` upload (`copyBufferToImage`), sampler
+creation + bindless sampler heap, texture argument-buffer descriptors,
+residency, and `getSamplerHeapSet()` so the converter finds the heap.
+
+**Remaining blocker — `depth2d` returns one channel.** The uber-PS contains a
+`sample_compare` (shadow) path guarded by a *runtime* `samplerMode` (spec
+constants are lowered to a CBV in `DxvkIrShader::getCode` via
+`lowerSpecConstantsToCbv` when linkage is null). SPIRV-Cross therefore sees a
+Dref use and emits `depth2d<float>`, whose `.sample()` returns only the red
+channel (red/blue checker shows as black/white). Fix: prune the shadow path so
+SPIRV-Cross emits `texture2d`. The clean approach is an IR-level permutation —
+in the ported `dxvk_shader_ir.cpp`, replace the sampler-mode/type spec-constant
+SSA values with literals for the bound sampler state (so `legalizeIr` DCE kills
+the dead Dref branch), keyed into the shader cache by those values. Do NOT
+touch the SPIR-V→MSL convert module; the fix belongs in the IR getCode path.
+
 ### Phase 1.2 texture binding contract (decoded from generated MSL, for the loop)
 
 The convert module already reflects textures/samplers/heaps; the gap is the

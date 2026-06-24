@@ -161,6 +161,80 @@ namespace dxvk {
     return buffer;
   }
 
+  uint64_t D9mtBackend::createSampledTexture(uint32_t width, uint32_t height,
+                                             uint32_t metalPixelFormat,
+                                             uint64_t* gpuResourceIdOut) {
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = 0;
+
+    WMTTextureInfo info = {};
+    info.pixel_format       = WMTPixelFormat(metalPixelFormat);
+    info.width              = width;
+    info.height             = height;
+    info.depth              = 1u;
+    info.array_length       = 1u;
+    info.type               = WMTTextureType2D;
+    info.mipmap_level_count = 1u;
+    info.sample_count       = 1u;
+    info.usage              = WMTTextureUsageShaderRead;
+    // Managed storage so replaceRegion can stage CPU pixels into the texture.
+    info.options            = WMTResourceStorageModeManaged;
+
+    uint64_t texture = MTLDevice_newTexture(m_device, &info);
+    if (!texture) {
+      logLine("createSampledTexture: newTexture failed");
+      return 0;
+    }
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = info.gpu_resource_id;   // filled by MTLDevice_newTexture
+    return texture;
+  }
+
+  void D9mtBackend::uploadTexture(uint64_t texture, uint32_t x, uint32_t y,
+                                  uint32_t width, uint32_t height,
+                                  const void* data, uint32_t bytesPerRow) {
+    if (!texture || !data)
+      return;
+    WMTOrigin origin = { x, y, 0u };
+    WMTSize   size   = { width, height, 1u };
+    WMTMemoryPointer ptr = {};
+    ptr.set(const_cast<void*>(data));
+    MTLTexture_replaceRegion(texture, origin, size, 0u, 0u, ptr,
+                             bytesPerRow, uint64_t(bytesPerRow) * height);
+  }
+
+  uint64_t D9mtBackend::createSampler(uint32_t minFilter, uint32_t magFilter,
+                                      uint32_t mipFilter, uint32_t addressU,
+                                      uint32_t addressV, uint32_t addressW,
+                                      uint64_t* gpuResourceIdOut) {
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = 0;
+
+    WMTSamplerInfo info = {};
+    info.min_filter        = WMTSamplerMinMagFilter(minFilter);
+    info.mag_filter        = WMTSamplerMinMagFilter(magFilter);
+    info.mip_filter        = WMTSamplerMipFilter(mipFilter);
+    info.s_address_mode    = WMTSamplerAddressMode(addressU);
+    info.t_address_mode    = WMTSamplerAddressMode(addressV);
+    info.r_address_mode    = WMTSamplerAddressMode(addressW);
+    info.compare_function  = WMTCompareFunctionNever;
+    info.lod_min_clamp     = 0.0f;
+    info.lod_max_clamp     = 1000.0f;
+    info.max_anisotroy     = 1u;
+    info.normalized_coords = true;
+    // Samplers live in the bindless heap, so they must be argument-buffer-usable.
+    info.support_argument_buffers = true;
+
+    uint64_t sampler = MTLDevice_newSamplerState(m_device, &info);
+    if (!sampler) {
+      logLine("createSampler: newSamplerState failed");
+      return 0;
+    }
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = info.gpu_resource_id;
+    return sampler;
+  }
+
   void D9mtBackend::renderAndPresent(const D9mtDraw& draw, bool clear, uint32_t clearColorArgb) {
     if (!isValid() || !m_layer)
       return;

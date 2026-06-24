@@ -25,6 +25,7 @@
 
 #include "dxvk_hash.h"     // DxvkHashState (DxvkImageViewKey::hash)
 #include "dxvk_include.h"
+#include "dxvk_backend.h"  // D9mtBackend (real Metal texture creation)
 #include "dxvk_buffer.h"   // DxvkResourceAllocation (reused for image storage)
 #include "dxvk_format.h"   // DxvkFormatInfo / lookupFormatInfo (formatInfo())
 
@@ -166,11 +167,31 @@ namespace dxvk {
         m_debugName = createInfo.debugName;
     }
 
-    // Form used by DxvkDevice::createImage(info, backend&). App textures are
-    // inert in the shim (no Metal texture allocated); the backbuffer path sets a
-    // real texture later via setMetalTexture(). The backend is unused here.
-    DxvkImage(const DxvkImageCreateInfo& createInfo, D9mtBackend& /*backend*/)
-    : DxvkImage(createInfo, 0u) { }
+    // Form used by DxvkDevice::createImage(info, backend&). Sampled 2D textures
+    // get a real Metal texture so the GPU can sample them; the backbuffer / RT
+    // path leaves the texture null here and sets it later via setMetalTexture().
+    DxvkImage(const DxvkImageCreateInfo& createInfo, D9mtBackend& backend)
+    : DxvkImage(createInfo, 0u) {
+      uint32_t metalFormat = metalPixelFormatFromVulkan(createInfo.format);
+      bool isSampled2D = (createInfo.usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+                      && createInfo.type == VK_IMAGE_TYPE_2D
+                      && createInfo.extent.width && createInfo.extent.height;
+      if (isSampled2D && metalFormat) {
+        m_metalTexture = backend.createSampledTexture(
+          createInfo.extent.width, createInfo.extent.height, metalFormat, &m_gpuResourceId);
+      }
+    }
+
+    // Maps the D3D9-frontend VkFormat to a winemetal pixel format for sampled
+    // textures. Only the formats app textures commonly use are mapped; an
+    // unmapped format yields 0 (the image stays a stub, sampling reads zero).
+    static uint32_t metalPixelFormatFromVulkan(VkFormat format) {
+      switch (format) {
+        case VK_FORMAT_B8G8R8A8_UNORM: return 80u;  // WMTPixelFormatBGRA8Unorm
+        case VK_FORMAT_R8G8B8A8_UNORM: return 70u;  // WMTPixelFormatRGBA8Unorm
+        default:                       return 0u;
+      }
+    }
 
     /**
      * \brief Image properties
@@ -208,6 +229,12 @@ namespace dxvk {
      */
     void setMetalTexture(uint64_t texture) {
       m_metalTexture = texture;
+    }
+
+    // Texture's argument-buffer resource ID (0 for stubs / render targets).
+    // Written into a set's argument buffer so a shader can sample this texture.
+    uint64_t gpuResourceId() const {
+      return m_gpuResourceId;
     }
 
     /**
@@ -287,6 +314,7 @@ namespace dxvk {
 
     DxvkImageCreateInfo        m_info         = { };
     uint64_t                   m_metalTexture = 0u;
+    uint64_t                   m_gpuResourceId = 0u;
     Rc<DxvkResourceAllocation> m_storage;
     std::string                m_debugName;
 
@@ -364,6 +392,11 @@ namespace dxvk {
      */
     uint64_t metalTexture() const {
       return m_image != nullptr ? m_image->metalTexture() : 0u;
+    }
+
+    // Argument-buffer resource ID of the underlying texture (for sampling).
+    uint64_t gpuResourceId() const {
+      return m_image != nullptr ? m_image->gpuResourceId() : 0u;
     }
 
   private:

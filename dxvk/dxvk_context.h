@@ -35,6 +35,7 @@
 #include "dxvk_constant_state.h"  // complete pipeline dynamic/constant-state types
 #include "dxvk_gpu_query.h" // DxvkQuery / DxvkEvent stand-ins (begin/endQuery)
 #include "dxvk_image.h"     // DxvkImage / DxvkImageView (backbuffer Metal texture)
+#include "dxvk_sampler.h"   // DxvkSampler / DxvkSamplerKey (bound sampler state)
 #include "dxvk_shader.h"    // DxvkShader (opaque, ignored)
 
 namespace dxvk {
@@ -295,16 +296,28 @@ namespace dxvk {
       (void) stages; (void) slot; (void) offset; (void) length;
     }
 
+    // Record the texture bound at `slot`: its argument-buffer resource ID (the
+    // value written into a descriptor set's argument buffer so the shader can
+    // sample it) and its Metal handle (made resident so the GPU may read it).
     void bindResourceImageView(VkShaderStageFlags stages, uint32_t slot, Rc<DxvkImageView>&& view) {
-      (void) stages; (void) slot; (void) view;
+      (void) stages;
+      BoundTexture& bound = m_textures[slot];
+      bound.resourceId = view != nullptr ? view->gpuResourceId() : 0u;
+      bound.handle     = view != nullptr ? view->metalTexture()  : 0u;
     }
 
     void bindResourceBufferView(VkShaderStageFlags stages, uint32_t slot, Rc<DxvkBufferView>&& view) {
       (void) stages; (void) slot; (void) view;
     }
 
+    // Record the D3D9 sampler state bound at `slot`. The Metal sampler object is
+    // created lazily and cached at draw time (see resolveSampler).
     void bindResourceSampler(VkShaderStageFlags stages, uint32_t slot, Rc<DxvkSampler>&& sampler) {
-      (void) stages; (void) slot; (void) sampler;
+      (void) stages;
+      if (sampler != nullptr)
+        m_samplerKeys[slot] = sampler->key();
+      else
+        m_samplerKeys.erase(slot);
     }
 
     void bindXfbBuffer(uint32_t binding, DxvkBufferSlice&& buffer, DxvkBufferSlice&& counter) {
@@ -469,12 +482,24 @@ namespace dxvk {
       if (dst && src)
         std::memcpy(dst, src, numBytes);
     }
+    // Uploads tightly-packed pixels from a staging buffer into a real Metal
+    // texture. The frontend packs mip data into the staging buffer (no row
+    // padding here), so bytes-per-row is width * element size. Only mip 0 of a
+    // 2D texture is handled — enough for the app textures the shim samples.
     void copyBufferToImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource,
                            VkOffset3D dstOffset, VkExtent3D dstExtent, const Rc<DxvkBuffer>& srcBuffer,
                            VkDeviceSize srcOffset, VkDeviceSize rowAlignment, VkDeviceSize sliceAlignment,
                            VkFormat srcFormat) {
-      (void) dstImage; (void) dstSubresource; (void) dstOffset; (void) dstExtent;
-      (void) srcBuffer; (void) srcOffset; (void) rowAlignment; (void) sliceAlignment; (void) srcFormat;
+      (void) dstSubresource; (void) rowAlignment; (void) sliceAlignment; (void) srcFormat;
+      if (!dstImage || !srcBuffer || !dstImage->metalTexture())
+        return;
+      const void* src = srcBuffer->mapPtr(srcOffset);
+      const DxvkFormatInfo* fmt = dstImage->formatInfo();
+      if (!src || !fmt || !fmt->elementSize)
+        return;
+      m_backend->uploadTexture(dstImage->metalTexture(),
+        uint32_t(dstOffset.x), uint32_t(dstOffset.y),
+        dstExtent.width, dstExtent.height, src, dstExtent.width * fmt->elementSize);
     }
     void copyImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource, VkOffset3D dstOffset,
                    const Rc<DxvkImage>& srcImage, VkImageSubresourceLayers srcSubresource, VkOffset3D srcOffset,
@@ -591,6 +616,33 @@ namespace dxvk {
     // Vulkan index type the frontend decoded from the D3D9 format.
     struct BoundIndexBuffer { uint64_t handle = 0; uint64_t offset = 0; VkIndexType type = VK_INDEX_TYPE_UINT16; };
     BoundIndexBuffer m_indexBuffer;
+
+    // Textures bound per DXVK slot (bindResourceImageView): the resource ID goes
+    // into a descriptor set's argument buffer; the handle is made resident.
+    struct BoundTexture { uint64_t resourceId = 0; uint64_t handle = 0; };
+    std::unordered_map<uint32_t, BoundTexture> m_textures;
+
+    // D3D9 sampler state bound per DXVK slot, plus a cache of the Metal sampler
+    // objects created from each distinct key (keyed by the key's hash).
+    std::unordered_map<uint32_t, DxvkSamplerKey> m_samplerKeys;
+    struct MetalSampler { uint64_t handle = 0; uint64_t resourceId = 0; };
+    std::unordered_map<size_t, MetalSampler> m_samplerCache;
+
+    // Per-stage sampler-heap argument buffers (keyed by stageKey), holding the
+    // sampler resource IDs the translated shader indexes by a push-data value.
+    std::unordered_map<uint32_t, ArgumentBuffer> m_samplerHeaps;
+
+    // Resolves (creating + caching) the Metal sampler for a bound slot's key.
+    MetalSampler resolveSampler(uint32_t slot);
+
+    // Builds the sampler heap for one stage, injects each sampler's heap index
+    // into the stage's push buffer, and appends the heap binding.
+    void bindSamplerHeap(
+      const MslReflection&             reflection,
+            bool                       fragmentStage,
+            uint32_t                   stageKey,
+            void*                      pushBufferCpu,
+            std::vector<D9mtBufferBinding>& bindings);
 
     // Shared zeroed buffer bound to FF null vertex streams (unused attributes).
     uint64_t m_zeroVertexBuffer    = 0;

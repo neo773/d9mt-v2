@@ -366,6 +366,13 @@ namespace dxvk {
     uint32_t getPushDataMask() const { return m_pushMask; }
     DxvkPushDataBlock getPushDataBlock(uint32_t index) const { return m_pushData[index]; }
 
+    // Descriptor set the bindless sampler heap was declared in (addSamplerHeap),
+    // or ~0u if the shader uses no samplers. The shader-conversion module needs
+    // this to locate the heap's [[buffer]] index from SPIRV-Cross.
+    uint32_t getSamplerHeapSet() const {
+      return m_samplerHeaps.empty() ? ~0u : m_samplerHeaps.front().getSet();
+    }
+
   private:
 
     VkShaderStageFlags m_stageMask = 0u;

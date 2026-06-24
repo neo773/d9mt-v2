@@ -165,11 +165,13 @@ namespace dxvk {
 
     CompiledShaderStage stage;
     // Translate (no binding remap — the shim runs no Vulkan pipeline) then
-    // compile + specialize. samplerHeapSet ~0u: the FF triangle binds no
-    // textures, so the heap is never referenced.
+    // compile + specialize. The sampler-heap set comes from the shader's layout
+    // so the converter can locate the heap's buffer index (or ~0u if no
+    // samplers, e.g. the FF triangle).
     SpirvCodeBuffer code = shader->getCode(nullptr, nullptr);
+    DxvkPipelineLayoutBuilder layout = shader->getLayout();
     stage.translation = convertSpirvToMsl(
-      code, shader->getLayout(), shader->metadata().stage, ~0u);
+      code, layout, shader->metadata().stage, layout.getSamplerHeapSet());
 
     if (stage.translation.ok) {
       uint64_t device = m_backend->device();
@@ -306,27 +308,111 @@ namespace dxvk {
       for (const MslResourceRef& ref : reflection.resources) {
         if (ref.set != set || ref.abId >= entryCount)
           continue;
-        if (!ref.isUniformBuffer)
-          continue;
 
-        if (isSpecDataSet(ref.set)) {
-          // Spec-constant buffer: filled from setSpecConstants, not a CBV.
-          uint64_t address = uploadSpecData();
-          if (address) {
-            slots[ref.abId] = address;
-            residentBuffers.push_back(m_specDataBuffer);
+        if (ref.isUniformBuffer) {
+          if (isSpecDataSet(ref.set)) {
+            // Spec-constant buffer: filled from setSpecConstants, not a CBV.
+            uint64_t address = uploadSpecData();
+            if (address) {
+              slots[ref.abId] = address;
+              residentBuffers.push_back(m_specDataBuffer);
+            }
+          } else {
+            auto bound = m_uniformBuffers.find(ref.slot);
+            if (bound != m_uniformBuffers.end() && bound->second.address) {
+              slots[ref.abId] = bound->second.address;
+              residentBuffers.push_back(bound->second.handle);
+            }
           }
-        } else {
-          auto bound = m_uniformBuffers.find(ref.slot);
-          if (bound != m_uniformBuffers.end() && bound->second.address) {
-            slots[ref.abId] = bound->second.address;
-            residentBuffers.push_back(bound->second.handle);
+        } else if (ref.type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+          // Texture descriptor: the argument-buffer slot holds the texture's
+          // resource ID; the texture itself must be made resident.
+          auto tex = m_textures.find(ref.slot);
+          if (tex != m_textures.end() && tex->second.resourceId) {
+            slots[ref.abId] = tex->second.resourceId;
+            if (tex->second.handle)
+              residentBuffers.push_back(tex->second.handle);
           }
         }
       }
 
       bindings.push_back({ argumentBuffer.buffer, 0u, set, fragmentStage });
     }
+  }
+
+
+  DxvkContext::MetalSampler DxvkContext::resolveSampler(uint32_t slot) {
+    auto keyIt = m_samplerKeys.find(slot);
+    if (keyIt == m_samplerKeys.end())
+      return {};
+
+    const DxvkSamplerKey& key = keyIt->second;
+    size_t hash = key.hash();
+    auto cached = m_samplerCache.find(hash);
+    if (cached != m_samplerCache.end())
+      return cached->second;
+
+    // Vulkan address modes (REPEAT=0, MIRRORED=1, CLAMP_TO_EDGE=2,
+    // CLAMP_TO_BORDER=3, MIRROR_CLAMP=4) map onto the winemetal enum, which
+    // orders them differently.
+    auto toMetalAddress = [](uint32_t vk) -> uint32_t {
+      switch (vk) {
+        case 0u: return 2u;  // Repeat
+        case 1u: return 3u;  // MirrorRepeat
+        case 2u: return 0u;  // ClampToEdge
+        case 3u: return 5u;  // ClampToBorderColor
+        case 4u: return 1u;  // MirrorClampToEdge
+        default: return 0u;
+      }
+    };
+    // VkFilter and VkSamplerMipmapMode (NEAREST=0 / LINEAR=1) match the
+    // winemetal min/mag enum; mip uses NotMipmapped(0)/Nearest(1)/Linear(2).
+    uint32_t mipFilter = key.u.p.mipMode ? 2u : 1u;
+
+    MetalSampler sampler;
+    sampler.handle = m_backend->createSampler(
+      key.u.p.minFilter, key.u.p.magFilter, mipFilter,
+      toMetalAddress(key.u.p.addressU), toMetalAddress(key.u.p.addressV),
+      toMetalAddress(key.u.p.addressW), &sampler.resourceId);
+
+    m_samplerCache.emplace(hash, sampler);
+    return sampler;
+  }
+
+
+  void DxvkContext::bindSamplerHeap(
+    const MslReflection&             reflection,
+          bool                       fragmentStage,
+          uint32_t                   stageKey,
+          void*                      pushBufferCpu,
+          std::vector<D9mtBufferBinding>& bindings) {
+    if (reflection.samplerHeapIndex < 0 || reflection.samplers.empty())
+      return;
+
+    ArgumentBuffer& heap = m_samplerHeaps[stageKey];
+    if (!heap.buffer)
+      heap.buffer = m_backend->createSharedBuffer(16u * 8u, &heap.cpu);
+    if (!heap.cpu)
+      return;
+
+    auto* heapSlots = static_cast<uint64_t*>(heap.cpu);
+    std::memset(heapSlots, 0, 16u * sizeof(uint64_t));
+
+    // Each declared sampler takes a dense heap index; its Metal resource ID goes
+    // into that heap slot and the index is written into the push buffer at the
+    // dword the shader reads it from (reflected blockOffset).
+    for (uint32_t i = 0; i < reflection.samplers.size() && i < 16u; i++) {
+      const MslSamplerRef& ref = reflection.samplers[i];
+      MetalSampler sampler = resolveSampler(ref.slot);
+      heapSlots[i] = sampler.resourceId;
+      if (pushBufferCpu) {
+        auto* index = reinterpret_cast<uint16_t*>(
+          static_cast<uint8_t*>(pushBufferCpu) + ref.blockOffset);
+        *index = uint16_t(i);
+      }
+    }
+
+    bindings.push_back({ heap.buffer, 0u, uint32_t(reflection.samplerHeapIndex), fragmentStage });
   }
 
 
@@ -396,6 +482,12 @@ namespace dxvk {
         bindings.push_back({ push, 0u,
           uint32_t(fragmentStage->translation.reflection.pushBufferIndex), true });
     }
+
+    // Bindless sampler heaps. Must follow uploadPushData: the heap index is
+    // injected into each stage's push buffer (where the shader reads it).
+    bindSamplerHeap(vertexStage->translation.reflection, false, 0u, m_pushUploadBufferCpu[0], bindings);
+    if (fragmentStage)
+      bindSamplerHeap(fragmentStage->translation.reflection, true, 1u, m_pushUploadBufferCpu[1], bindings);
 
     // Argument buffers carrying the FF constant buffers (transform, clip planes,
     // spec data) the translated shaders read from descriptor sets 2/3. The

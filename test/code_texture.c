@@ -115,7 +115,7 @@ int main(void) {
     for (int y = 0; y < TEX; y++) {
       DWORD *row = (DWORD *)((BYTE *)lr.pBits + y * lr.Pitch);
       for (int x = 0; x < TEX; x++)
-        row[x] = ((x ^ y) & 1) ? 0xFFFFFFFF : 0xFFFF00FF;
+        row[x] = ((x ^ y) & 1) ? 0xFFE00000 : 0xFF0000E0;  /* red / blue checker */
     }
     IDirect3DTexture9_UnlockRect(tex, 0);
   }
