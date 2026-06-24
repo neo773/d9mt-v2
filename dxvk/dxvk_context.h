@@ -34,6 +34,7 @@
 #include "dxvk_metal_shader_pipeline.h"  // MetalVertexLayout (PSO assembly)
 #include "dxvk_buffer.h"    // DxvkBufferSlice (Metal buffer handle + offset)
 #include "dxvk_constant_state.h"  // complete pipeline dynamic/constant-state types
+#include "dxvk_dynamic_state.h"   // DxvkViewport + DxvkDynamicState (per-draw state)
 #include "dxvk_gpu_query.h" // DxvkQuery / DxvkEvent stand-ins (begin/endQuery)
 #include "dxvk_image.h"     // DxvkImage / DxvkImageView (backbuffer Metal texture)
 #include "dxvk_sampler.h"   // DxvkSampler / DxvkSamplerKey (bound sampler state)
@@ -156,11 +157,6 @@ namespace dxvk {
     }
   };
 
-  // Viewport + scissor pair. Stored but unused by the NDC triangle path.
-  struct DxvkViewport {
-    VkViewport viewport = { };
-    VkRect2D   scissor  = { };
-  };
 
 
   /**
@@ -386,12 +382,12 @@ namespace dxvk {
 
     // Remaining recorded state setters: pure no-ops on the FF triangle path.
     void setBlendConstants(DxvkBlendConstants blendConstants) { (void) blendConstants; }
-    void setDepthBias(DxvkDepthBias depthBias) { m_depthBias = depthBias; }
+    void setDepthBias(DxvkDepthBias depthBias) { m_dynamicState.setDepthBias(depthBias); }
     void setDepthBiasRepresentation(DxvkDepthBiasRepresentation r) { (void) r; }
     void setDepthBounds(DxvkDepthBounds depthBounds) { (void) depthBounds; }
-    void setStencilReference(uint32_t reference) { m_stencilReference = reference; }
+    void setStencilReference(uint32_t reference) { m_dynamicState.setStencilReference(reference); }
     void setInputAssemblyState(const DxvkInputAssemblyState& ia) {
-      m_inputTopology = ia.primitiveTopology();
+      m_dynamicState.setPrimitiveTopology(ia.primitiveTopology());
     }
     // Capture the D3D9 vertex declaration so draw() can build the Metal vertex
     // descriptor (attributes feed shader [[attribute(location)]]; bindings give
@@ -401,7 +397,7 @@ namespace dxvk {
       m_vertexAttributes.assign(attributes, attributes + attributeCount);
       m_vertexBindings.assign(bindings, bindings + bindingCount);
     }
-    void setRasterizerState(const DxvkRasterizerState& rs) { m_rasterizerState = rs; }
+    void setRasterizerState(const DxvkRasterizerState& rs) { m_dynamicState.setRasterizerState(rs); }
     void setMultisampleState(const DxvkMultisampleState& ms) { (void) ms; }
     // Capture the depth-stencil state so draw() can bind a matching Metal
     // depth-stencil state object (resolved + cached at draw time).
@@ -684,18 +680,10 @@ namespace dxvk {
     // objects built from each distinct (compare op, write enable) combination.
     DxvkDepthStencilState m_depthStencilState = { };
     std::unordered_map<uint64_t, uint64_t> m_depthStencilCache;
-    uint32_t m_stencilReference = 0;
 
-    // Viewport + scissor (setViewports). D3D9 binds a single pair.
-    DxvkViewport m_viewport    = { };
-    bool         m_hasViewport = false;
-
-    // Primitive topology (setInputAssemblyState); default triangle list.
-    VkPrimitiveTopology m_inputTopology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    // Rasterizer state (setRasterizerState): cull mode, winding, fill, bias.
-    DxvkRasterizerState m_rasterizerState = { };
-    DxvkDepthBias       m_depthBias       = { };
+    // Per-draw dynamic render state (viewport/scissor, topology, rasterizer,
+    // depth bias, stencil reference). Owns its storage + Vulkan->Metal mapping.
+    DxvkDynamicState m_dynamicState;
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value
