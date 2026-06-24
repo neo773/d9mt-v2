@@ -1,0 +1,25 @@
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_de194b24934bde 445-447
+scripts/run-apitrace.sh
+  s_85f47c9b3164ad::t_dc745cb699f1ae 20-22,24,27,31,34
+  s_85f47c9b3164ad::t_51b5f38a7e7f77 32
+  s_85f47c9b3164ad::t_c488103eb2c9f4 1-19,23,25-26,28-30,33
+scripts/run-gpucapture.sh
+  s_85f47c9b3164ad::t_4ee091cf3a2f03 1-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "85fae55ad61bc5c563792e5c73ad940fedccb51b",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
