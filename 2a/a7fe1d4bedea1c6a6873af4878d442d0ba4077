@@ -1,0 +1,27 @@
+dxvk/dxvk_device.cpp
+  s_85f47c9b3164ad::t_6dd5444d8336b1 80-82,84
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_8d23a261a3acc7 92-114
+  s_85f47c9b3164ad::t_de934fdfd0338a 129
+  s_85f47c9b3164ad::t_64d76eb513410f 124-128,130-132
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_371352fb281794 409-410
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_07eaccbd9609e4 315-441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "2aa7fe1d4bedea1c6a6873af4878d442d0ba4077",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
