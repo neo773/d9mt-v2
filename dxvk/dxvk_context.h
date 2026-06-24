@@ -258,8 +258,13 @@ namespace dxvk {
     // the live path. Signatures copied from dxvk-ref/dxvk_context.h.
     // ---------------------------------------------------------------------
 
+    // Remember the bound index buffer's Metal handle + byte offset + type so
+    // drawIndexed() can issue an indexed Metal draw. An empty slice (the
+    // frontend's unbind) clears it, after which drawIndexed is a no-op.
     void bindIndexBuffer(DxvkBufferSlice&& buffer, VkIndexType indexType) {
-      (void) buffer; (void) indexType;
+      m_indexBuffer.handle = buffer.defined() ? buffer.bufferHandle() : 0u;
+      m_indexBuffer.offset = buffer.defined() ? buffer.offset()       : 0u;
+      m_indexBuffer.type   = indexType;
     }
 
     void bindIndexBufferRange(VkDeviceSize offset, VkDeviceSize length, VkIndexType indexType) {
@@ -306,9 +311,9 @@ namespace dxvk {
       (void) binding; (void) buffer; (void) counter;
     }
 
-    void drawIndexed(uint32_t count, const VkDrawIndexedIndirectCommand* draws) {
-      (void) count; (void) draws;
-    }
+    // Indexed draw: same bind path as draw(), but fetches indices from the
+    // bound index buffer (see bindIndexBuffer). Defined in the .cpp.
+    void drawIndexed(uint32_t count, const VkDrawIndexedIndirectCommand* draws);
 
     void drawIndirect(VkDeviceSize offset, uint32_t count, uint32_t stride, bool unroll) {
       (void) offset; (void) count; (void) stride; (void) unroll;
@@ -506,6 +511,12 @@ namespace dxvk {
     // Builds the Metal vertex descriptor from the captured D3D9 input layout.
     MetalVertexLayout buildVertexLayout() const;
 
+    // Resolves shaders + PSO and assembles the per-draw buffer/argument/
+    // residency bindings into `out` (minus the vertex/index count, which the
+    // caller fills). Returns false if the draw cannot proceed. Shared by
+    // draw() and drawIndexed().
+    bool prepareDraw(D9mtPipelineDraw& out);
+
     // Copies the dwords a stage's push blocks reference out of the constant
     // store into the per-stage upload buffer (slot 0 = vertex, 1 = fragment, so
     // the two stages' push data don't clobber each other); returns the handle.
@@ -575,6 +586,11 @@ namespace dxvk {
     // unused attributes — leaving one unbound makes Metal drop the draw.
     struct BoundVertexStream { uint64_t handle = 0; uint64_t offset = 0; };
     std::unordered_map<uint32_t, BoundVertexStream> m_vertexBuffers;
+
+    // Bound index buffer (bindIndexBuffer): Metal handle + byte offset + the
+    // Vulkan index type the frontend decoded from the D3D9 format.
+    struct BoundIndexBuffer { uint64_t handle = 0; uint64_t offset = 0; VkIndexType type = VK_INDEX_TYPE_UINT16; };
+    BoundIndexBuffer m_indexBuffer;
 
     // Shared zeroed buffer bound to FF null vertex streams (unused attributes).
     uint64_t m_zeroVertexBuffer    = 0;

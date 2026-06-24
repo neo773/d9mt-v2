@@ -411,13 +411,29 @@ namespace dxvk {
       tail = reinterpret_cast<wmtcmd_base*>(&cmd);
     }
 
-    drawCmd.type           = WMTRenderCommandDraw;
-    drawCmd.primitive_type = WMTPrimitiveTypeTriangle;
-    drawCmd.vertex_start   = 0;
-    drawCmd.vertex_count   = draw.vertexCount;
-    drawCmd.instance_count = 1;
-    drawCmd.base_instance  = 0;
-    tail->next.set(&drawCmd);
+    // Indexed draws fetch from the bound index buffer; linear draws emit a
+    // plain vertex range. Both append onto the same open encoder.
+    wmtcmd_render_draw_indexed indexedCmd = {};
+    if (draw.indexBuffer) {
+      indexedCmd.type                = WMTRenderCommandDrawIndexed;
+      indexedCmd.primitive_type      = WMTPrimitiveTypeTriangle;
+      indexedCmd.index_type          = WMTIndexType(draw.indexType);
+      indexedCmd.index_count         = draw.indexCount;
+      indexedCmd.index_buffer        = draw.indexBuffer;
+      indexedCmd.index_buffer_offset = draw.indexBufferOffset;
+      indexedCmd.instance_count      = 1;
+      indexedCmd.base_vertex         = draw.baseVertex;
+      indexedCmd.base_instance       = 0;
+      tail->next.set(&indexedCmd);
+    } else {
+      drawCmd.type           = WMTRenderCommandDraw;
+      drawCmd.primitive_type = WMTPrimitiveTypeTriangle;
+      drawCmd.vertex_start   = 0;
+      drawCmd.vertex_count   = draw.vertexCount;
+      drawCmd.instance_count = 1;
+      drawCmd.base_instance  = 0;
+      tail->next.set(&drawCmd);
+    }
 
     MTLRenderCommandEncoder_encodeCommands(
         m_frameEncoder, reinterpret_cast<const wmtcmd_base*>(&setPipeline));

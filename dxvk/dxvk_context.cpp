@@ -330,20 +330,13 @@ namespace dxvk {
   }
 
 
-  void DxvkContext::draw(
-            uint32_t              count,
-      const VkDrawIndirectCommand* draws) {
-    if (!m_backend || !count || !draws)
-      return;
-
-    const VkDrawIndirectCommand& d = draws[0];
-
+  bool DxvkContext::prepareDraw(D9mtPipelineDraw& pipelineDraw) {
     // Translate + compile the bound shaders (cached). The vertex shader is
     // mandatory; the fragment shader is optional (depth-only passes have none).
     const CompiledShaderStage* vertexStage   = resolveStage(m_boundVertexShader);
     const CompiledShaderStage* fragmentStage = resolveStage(m_boundFragmentShader);
     if (!vertexStage)
-      return;
+      return false;
 
     MetalVertexLayout layout = buildVertexLayout();
 
@@ -364,7 +357,7 @@ namespace dxvk {
         logLine("render pipeline build failed");
     }
     if (!pipeline)
-      return;
+      return false;
 
     // Bind the vertex stream (binding 0 at VertexBufferBase) and each stage's
     // push block at its reflected index.
@@ -411,18 +404,55 @@ namespace dxvk {
     if (fragmentStage)
       bindArgumentBuffers(fragmentStage->translation.reflection, true, 1u, bindings, residentBuffers);
 
-    D9mtPipelineDraw pipelineDraw;
     pipelineDraw.pipelineState   = pipeline;
     pipelineDraw.bindings        = bindings.data();
     pipelineDraw.bindingCount    = uint32_t(bindings.size());
     pipelineDraw.residentBuffers = residentBuffers.data();
     pipelineDraw.residentCount   = uint32_t(residentBuffers.size());
-    pipelineDraw.vertexCount     = d.vertexCount;
     pipelineDraw.clear           = m_clearPending;
     pipelineDraw.clearColorArgb  = m_clearColorArgb;
+    return true;
+  }
+
+
+  void DxvkContext::draw(
+            uint32_t              count,
+      const VkDrawIndirectCommand* draws) {
+    if (!m_backend || !count || !draws)
+      return;
+
+    D9mtPipelineDraw pipelineDraw;
+    if (!prepareDraw(pipelineDraw))
+      return;
+
+    pipelineDraw.vertexCount = draws[0].vertexCount;
     m_backend->beginFrame(m_clearPending, m_clearColorArgb);
     m_backend->appendDraw(pipelineDraw);
+    m_clearPending = false;
+  }
 
+
+  void DxvkContext::drawIndexed(
+            uint32_t                     count,
+      const VkDrawIndexedIndirectCommand* draws) {
+    if (!m_backend || !count || !draws || !m_indexBuffer.handle)
+      return;
+
+    D9mtPipelineDraw pipelineDraw;
+    if (!prepareDraw(pipelineDraw))
+      return;
+
+    const VkDrawIndexedIndirectCommand& d = draws[0];
+    // The index buffer's element size (2 or 4 bytes) advances firstIndex into a
+    // byte offset on top of the slice's own offset.
+    uint32_t indexSize = m_indexBuffer.type == VK_INDEX_TYPE_UINT32 ? 4u : 2u;
+    pipelineDraw.indexCount        = d.indexCount;
+    pipelineDraw.indexBuffer       = m_indexBuffer.handle;
+    pipelineDraw.indexBufferOffset = m_indexBuffer.offset + uint64_t(d.firstIndex) * indexSize;
+    pipelineDraw.indexType         = m_indexBuffer.type == VK_INDEX_TYPE_UINT32 ? 1u : 0u;
+    pipelineDraw.baseVertex        = d.vertexOffset;
+    m_backend->beginFrame(m_clearPending, m_clearColorArgb);
+    m_backend->appendDraw(pipelineDraw);
     m_clearPending = false;
   }
 

@@ -50,6 +50,15 @@ namespace dxvk {
     const uint64_t*           residentBuffers = nullptr;
     uint32_t                  residentCount   = 0;
     uint32_t                  vertexCount    = 0;
+    // Indexed draw: when indexBuffer is non-zero, the draw fetches indexCount
+    // indices of indexType (0 = uint16, 1 = uint32) from indexBuffer at
+    // indexBufferOffset, adding baseVertex to each. Otherwise it is a linear
+    // draw of vertexCount vertices.
+    uint64_t                  indexBuffer       = 0;
+    uint64_t                  indexBufferOffset = 0;
+    uint32_t                  indexCount        = 0;
+    uint32_t                  indexType         = 0;
+    int32_t                   baseVertex        = 0;
     bool                      clear          = false;
     uint32_t                  clearColorArgb = 0;
   };

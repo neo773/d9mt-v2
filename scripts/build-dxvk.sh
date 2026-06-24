@@ -194,4 +194,8 @@ echo "[dxvk] compiling code_shader.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_shader.exe" "$V2/test/code_shader.c" \
   -ld3d9 -luser32 -lgdi32
 
-echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD/code.exe" "$BUILD/code_shader.exe"
+echo "[dxvk] compiling code_index.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_index.exe" "$V2/test/code_index.c" \
+  -ld3d9 -luser32 -lgdi32
+
+echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD/code.exe" "$BUILD/code_shader.exe" "$BUILD/code_index.exe"
