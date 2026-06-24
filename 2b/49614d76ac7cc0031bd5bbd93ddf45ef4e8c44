@@ -1,0 +1,32 @@
+dxvk/dxvk_metal_shader_pipeline.cpp
+  s_85f47c9b3164ad::t_abf2514b737db7 103-104,113-122
+test/code_blend.c
+  s_85f47c9b3164ad::t_c55a302a94ff08 1-144
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_59709a57b6a21f 205-209
+dxvk/dxvk_metal_shader_pipeline.h
+  s_85f47c9b3164ad::t_0572ae147e2060 65-78,80-81,87-88
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_a55fcf42bea5bd 405-406,408-409
+  s_85f47c9b3164ad::t_e01f1b16bcf8be 662-664
+  s_85f47c9b3164ad::t_4b4882f1a4f1f7 542-544
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_60cb6941f5c69a 223-275
+  s_85f47c9b3164ad::t_cf158de872ddb6 481,483-487,490,498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "2b49614d76ac7cc0031bd5bbd93ddf45ef4e8c44",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
