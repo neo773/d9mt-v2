@@ -1,0 +1,27 @@
+test/texquad_ps_bytecode.inc
+  s_85f47c9b3164ad::t_54c906da7c5147 1-15
+test/code_texture.c
+  s_85f47c9b3164ad::t_8df68d17fbcd7b 1-162
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_dc1ae94ed6cf09 201-205
+test/texquad_vs_bytecode.inc
+  s_85f47c9b3164ad::t_54c906da7c5147 1-25
+ROADMAP.md
+  s_85f47c9b3164ad::t_efc48c3f824bc4 21-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "4a340f1cdf7e566ad290ed24bed605d955206833",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
