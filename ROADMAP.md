@@ -171,6 +171,15 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     `fetch` is replay-based but DID read the R8 texture's pixels correctly (the
     swizzled-view fetch showed a clean grayscale ramp), so the blank drawable is
     not a replay artifact — the draw genuinely writes nothing.
+  - *Definitive isolation:* `code_alpha.exe` uses a CONSTANT-output PS
+    (`mov oC0, c0`, ignores the texture) over the SAME quad geometry and renders
+    green fine. So geometry, viewport, depth, raster, and present are all proven
+    good — the bug is specifically `texquad_ps` **sampling the R8 texture**. Most
+    likely the R8 texture's bindless argument-buffer descriptor is malformed
+    (wrong texture type / unregistered `gpu_resource_id`), so the sample returns
+    NaN/garbage and the fragment writes nothing. Start the next session by
+    diffing the bound argument buffer (`@buf*` at the fragment texture index) and
+    the `gpu_resource_id` for an R8 vs an RGBA8 texture in the capture.
 
 ---
 
