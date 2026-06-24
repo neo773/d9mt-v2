@@ -1,0 +1,58 @@
+dxvk/dxvk_shader_io.h
+  s_85f47c9b3164ad::t_ee63fce9889a26 4,6,10-14,16-52,55-60,65,67,69-75,77-84,87-133,136-145
+test/shadertri_vs_bytecode.inc
+  s_85f47c9b3164ad::t_b4cd5b88d61410 1-25
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_125e04861587fd 453-457,460-465
+test/code_index.c
+  s_85f47c9b3164ad::t_9f946c2cce3af8 1-151
+dxvk/dxvk_pipelayout.h
+  s_85f47c9b3164ad::t_ae65ed4716b897 258-265
+  s_85f47c9b3164ad::t_c814ab8f651ce7 110-138
+  s_85f47c9b3164ad::t_dc66aa0507c8e5 375-376
+  s_85f47c9b3164ad::t_5a8d8a3a83f299 322,328-341
+  s_85f47c9b3164ad::t_936b1e81ce5904 208-215
+  s_85f47c9b3164ad::t_273957fff12ad3 342,353-358
+  s_85f47c9b3164ad::t_e176a7d21d6dca 229-230
+  s_85f47c9b3164ad::t_a61ecf41576593 33-57,70
+test/shadertri_ps_bytecode.inc
+  s_85f47c9b3164ad::t_b4cd5b88d61410 1-14
+dxvk/dxvk_shader.h
+  s_85f47c9b3164ad::t_965cd59ea9b602 89-109,112-113,116-121,125,136
+  s_85f47c9b3164ad::t_b2d99c18c3f31d 202-208
+test/code_shader.c
+  s_85f47c9b3164ad::t_d8fd0cec17b76e 1-142
+scripts/run.sh
+  s_85f47c9b3164ad::t_70f1e600e2fe7f 30,33-35,38
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_c77e0c00a57477 250-254,262-265
+  s_85f47c9b3164ad::t_9f138cea53cdaf 312
+  s_85f47c9b3164ad::t_94a358a5d30b16 183,186
+  s_85f47c9b3164ad::t_c1e1b6ae4676e0 21-26
+  s_85f47c9b3164ad::t_d0f4a88d8b2a98 184-185
+  s_85f47c9b3164ad::t_0561e3676ab56b 187
+dxvk/dxvk_shader_ir.cpp
+  s_85f47c9b3164ad::t_ee63fce9889a26 1-2471
+dxvk/dxvk_shader_ir.h
+  s_85f47c9b3164ad::t_ee63fce9889a26 8,10,15,19-24,26,28-35,37,42,44-45,60,62-65,69-76,83-86,89-92,97,103,109,114,121,123,125-128,133-180,182,184-185,187-188,190,192-193,195,197-217,219
+dxvk/dxvk_shader_io.cpp
+  s_85f47c9b3164ad::t_ee63fce9889a26 1-149
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_cc895b6d7df622 193-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "2f414cdfc065eac16f13efe7ef634660de71d8c5",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
