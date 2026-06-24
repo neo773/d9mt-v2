@@ -33,6 +33,12 @@ delta and a regression target.
       depth/stencil testing (`code_depth.exe`, near-blue occludes far-red,
       `7a901bf`). Minor follow-ups: non-triangle topology classes, RT-format in
       the PSO key (both fixed today: triangle list, BGRA8 backbuffer).
+- [x] **Phase 2 — per-frame CPU profiler** — `dxvk_trace.h`, zone breakdown at
+      Present when `D9MT_TRACE=1`. (`0d102b8`) Baseline (single-draw test): after
+      warmup, per-draw CPU is negligible (resolveShader/buildPipeline/
+      bindResources/appendDraw all ~0, caches hit); the Stage-A blocking present
+      (GPU wait, ~0.75ms) dominates. Re-measure on a real many-draw frame before
+      cutting — that's where bindResources/appendDraw scaling will show.
 
 ### Phase 1.2 notes (DONE)
 
