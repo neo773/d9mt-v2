@@ -1,0 +1,38 @@
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_6b99161f03f31c 514-517
+  s_85f47c9b3164ad::t_241a235ecb1495 562
+  s_85f47c9b3164ad::t_d3271923bef7d8 250-253,257-268
+  s_85f47c9b3164ad::t_4faf36536c2372 481-484,487
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_50c0d955031dfd 640
+  s_85f47c9b3164ad::t_bc3fe27ab9945e 306-327,332
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_f4ded17ea6b00e 220-222
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_5ba1882ee7c0f1 684-685
+  s_85f47c9b3164ad::t_2d658f6ae150be 392
+dxvk/dxvk_metal_shader_pipeline.cpp
+  s_85f47c9b3164ad::t_747d8199a645dc 122-126
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_062ee2202e70a1 131-139
+  s_85f47c9b3164ad::t_5007922ef65972 66
+test/code_stencil.c
+  s_85f47c9b3164ad::t_3e9246c423f2e5 89
+  s_85f47c9b3164ad::t_b4fbfb606bcae4 1-88,90-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "bcbecdd631d85ec0bb11fc48df567583a97f7e51",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
