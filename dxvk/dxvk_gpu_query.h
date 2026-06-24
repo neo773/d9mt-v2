@@ -45,14 +45,23 @@ namespace dxvk {
     DxvkQueryData() : statistic{} { }
   };
 
-  // Opaque GPU query. The shim reports every query Available with zeroed data,
-  // so games waiting on occlusion/timestamp results never stall.
+  // Opaque GPU query, always Available so games never stall waiting on a result.
+  //
+  // Occlusion reports a large non-zero sample count ("conservatively visible")
+  // rather than zero: a zero result reads as "fully occluded", so games that
+  // gate drawing on occlusion queries (GTA IV's culling, lens-flare visibility)
+  // would skip visible geometry. Reporting visible keeps rendering correct at
+  // the cost of the culling optimization — the standard fallback when real GPU
+  // occlusion counting is unavailable. (Metal does support visibility-result
+  // counting; wiring it here needs per-query buffer slots plus a flush on
+  // GetData to avoid the synchronous-present deadlock — a later refinement.)
   class DxvkQuery : public RcObject {
 
   public:
 
     DxvkGpuQueryStatus getData(DxvkQueryData& data) {
       data = DxvkQueryData();
+      data.occlusion.samplesPassed = ~0ull;
       return DxvkGpuQueryStatus::Available;
     }
 
