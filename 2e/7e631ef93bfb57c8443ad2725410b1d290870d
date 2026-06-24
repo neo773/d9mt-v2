@@ -1,0 +1,22 @@
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_2f3dd957aa1829 634
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_30a216e13e9460 234-241
+  s_85f47c9b3164ad::t_862267dcf5fb90 149-151,155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "2e7e631ef93bfb57c8443ad2725410b1d290870d",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
