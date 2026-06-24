@@ -100,7 +100,8 @@ namespace dxvk {
           uint64_t                  vertexFunction,
           uint64_t                  fragmentFunction,
     const MetalVertexLayout&        vertexLayout,
-          uint32_t                  colorPixelFormat) {
+          uint32_t                  colorPixelFormat,
+    const MetalColorBlend&          blend) {
     if (!device || !vertexFunction)
       return 0u;
 
@@ -109,9 +110,16 @@ namespace dxvk {
     info.vertex_function   = vertexFunction;
     info.fragment_function = fragmentFunction;
 
-    info.colors[0].pixel_format = colorPixelFormat;
-    info.colors[0].write_mask   = 0xFu;   // MTLColorWriteMaskAll (RGBA)
-    info.raster_sample_count    = 1u;
+    info.colors[0].pixel_format           = colorPixelFormat;
+    info.colors[0].blending_enabled       = blend.enabled ? 1u : 0u;
+    info.colors[0].rgb_blend_op           = blend.rgbOp;
+    info.colors[0].alpha_blend_op         = blend.alphaOp;
+    info.colors[0].src_rgb_blend_factor   = blend.srcRgb;
+    info.colors[0].dst_rgb_blend_factor   = blend.dstRgb;
+    info.colors[0].src_alpha_blend_factor = blend.srcAlpha;
+    info.colors[0].dst_alpha_blend_factor = blend.dstAlpha;
+    info.colors[0].write_mask             = blend.writeMask;
+    info.raster_sample_count              = 1u;
 
     uint32_t attributeCount = uint32_t(vertexLayout.attributes.size());
     uint32_t streamCount    = uint32_t(vertexLayout.streams.size());

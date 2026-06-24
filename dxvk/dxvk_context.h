@@ -402,8 +402,11 @@ namespace dxvk {
     void setMultisampleState(const DxvkMultisampleState& ms) { (void) ms; }
     void setDepthStencilState(const DxvkDepthStencilState& ds) { (void) ds; }
     void setLogicOpState(const DxvkLogicOpState& lo) { (void) lo; }
+    // Capture the color-attachment blend state so draw() can fold it into the
+    // pipeline. Only attachment 0 (the backbuffer) is consulted by the shim.
     void setBlendMode(uint32_t attachment, const DxvkBlendMode& blendMode) {
-      (void) attachment; (void) blendMode;
+      if (attachment == 0)
+        m_blendMode = blendMode;
     }
     void setBarrierControl(DxvkBarrierControlFlags control) { (void) control; }
 
@@ -536,6 +539,9 @@ namespace dxvk {
     // Builds the Metal vertex descriptor from the captured D3D9 input layout.
     MetalVertexLayout buildVertexLayout() const;
 
+    // Translates the captured D3D9 blend state into Metal pipeline blend state.
+    MetalColorBlend buildBlendState() const;
+
     // Resolves shaders + PSO and assembles the per-draw buffer/argument/
     // residency bindings into `out` (minus the vertex/index count, which the
     // caller fills). Returns false if the draw cannot proceed. Shared by
@@ -652,6 +658,9 @@ namespace dxvk {
     // heap allocation once capacity settles).
     std::vector<D9mtBufferBinding> m_drawBindings;
     std::vector<uint64_t>          m_drawResidentBuffers;
+
+    // Color-attachment blend state (setBlendMode); folded into the PSO + its key.
+    DxvkBlendMode m_blendMode = { };
 
     bool     m_clearPending   = false;  // a clearRenderTarget was recorded
     uint32_t m_clearColorArgb = 0;      // raw D3DCOLOR-style ARGB clear value

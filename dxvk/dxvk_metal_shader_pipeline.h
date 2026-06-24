@@ -62,14 +62,29 @@ namespace dxvk {
     const uint32_t*                         specData,
           uint32_t                          specDataCount);
 
+  // Color-attachment blend state for a render pipeline, in Metal/WMT enum
+  // values (the caller maps from Vulkan). The defaults describe an opaque draw:
+  // blending off, all channels written — i.e. source replaces destination.
+  struct MetalColorBlend {
+    bool     enabled   = false;
+    uint32_t rgbOp     = 0;    // MTLBlendOperationAdd
+    uint32_t alphaOp   = 0;
+    uint32_t srcRgb    = 1;    // MTLBlendFactorOne
+    uint32_t dstRgb    = 0;    // MTLBlendFactorZero
+    uint32_t srcAlpha  = 1;
+    uint32_t dstAlpha  = 0;
+    uint32_t writeMask = 0xFu; // all channels
+  };
+
   // Build a retained MTLRenderPipelineState from the given functions, vertex
-  // layout, and single color attachment format (MTLPixelFormat raw value) via
-  // the d9mtmetal unixlib. Returns 0 on failure.
+  // layout, single color attachment format (MTLPixelFormat raw value), and
+  // color blend state via the d9mtmetal unixlib. Returns 0 on failure.
   uint64_t metalBuildRenderPipeline(
           uint64_t                  device,
           uint64_t                  vertexFunction,
           uint64_t                  fragmentFunction,
     const MetalVertexLayout&        vertexLayout,
-          uint32_t                  colorPixelFormat);
+          uint32_t                  colorPixelFormat,
+    const MetalColorBlend&          blend);
 
 }

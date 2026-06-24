@@ -220,6 +220,59 @@ namespace dxvk {
   }
 
 
+  MetalColorBlend DxvkContext::buildBlendState() const {
+    // Vulkan and Metal order their blend-factor enums differently (Vulkan groups
+    // all color factors before the alpha ones; Metal interleaves), so map each.
+    auto toMetalFactor = [](VkBlendFactor f) -> uint32_t {
+      switch (f) {
+        case VK_BLEND_FACTOR_ZERO:                     return 0u;
+        case VK_BLEND_FACTOR_ONE:                      return 1u;
+        case VK_BLEND_FACTOR_SRC_COLOR:                return 2u;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR:      return 3u;
+        case VK_BLEND_FACTOR_SRC_ALPHA:                return 4u;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA:      return 5u;
+        case VK_BLEND_FACTOR_DST_COLOR:                return 6u;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR:      return 7u;
+        case VK_BLEND_FACTOR_DST_ALPHA:                return 8u;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:      return 9u;
+        case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:       return 10u;
+        case VK_BLEND_FACTOR_CONSTANT_COLOR:           return 11u;
+        case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR: return 12u;
+        case VK_BLEND_FACTOR_CONSTANT_ALPHA:           return 13u;
+        case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA: return 14u;
+        case VK_BLEND_FACTOR_SRC1_COLOR:               return 15u;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR:     return 16u;
+        case VK_BLEND_FACTOR_SRC1_ALPHA:               return 17u;
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA:     return 18u;
+        default:                                       return 1u;
+      }
+    };
+    // VkBlendOp and MTLBlendOperation share the same Add/Subtract/Reverse/Min/Max
+    // ordering for the basic ops D3D9 exposes.
+    auto toMetalOp = [](VkBlendOp op) -> uint32_t {
+      switch (op) {
+        case VK_BLEND_OP_ADD:              return 0u;
+        case VK_BLEND_OP_SUBTRACT:         return 1u;
+        case VK_BLEND_OP_REVERSE_SUBTRACT: return 2u;
+        case VK_BLEND_OP_MIN:              return 3u;
+        case VK_BLEND_OP_MAX:              return 4u;
+        default:                           return 0u;
+      }
+    };
+
+    MetalColorBlend blend;
+    blend.enabled   = m_blendMode.blendEnable();
+    blend.rgbOp     = toMetalOp(m_blendMode.colorBlendOp());
+    blend.alphaOp   = toMetalOp(m_blendMode.alphaBlendOp());
+    blend.srcRgb    = toMetalFactor(m_blendMode.colorSrcFactor());
+    blend.dstRgb    = toMetalFactor(m_blendMode.colorDstFactor());
+    blend.srcAlpha  = toMetalFactor(m_blendMode.alphaSrcFactor());
+    blend.dstAlpha  = toMetalFactor(m_blendMode.alphaDstFactor());
+    blend.writeMask = uint32_t(m_blendMode.writeMask()) & 0xFu;
+    return blend;
+  }
+
+
   uint64_t DxvkContext::uploadPushData(const MslReflection& reflection, uint32_t slot) {
     if (!reflection.pushDataSize)
       return 0u;
@@ -425,11 +478,16 @@ namespace dxvk {
       return false;
 
     MetalVertexLayout layout = buildVertexLayout();
+    MetalColorBlend   blend  = buildBlendState();
 
-    // Pipeline cache keyed by the shader pair (the FF triangle's layout is
-    // stable; a layout hash is added when variable-layout draws appear).
+    // Pipeline cache keyed by the shader pair plus the blend state — the same
+    // shaders drawn opaque vs alpha-blended need distinct pipelines. The shader
+    // cookies and the 32-bit packed blend bits are mixed into one key.
+    uint32_t blendBits = 0u;
+    std::memcpy(&blendBits, &m_blendMode, sizeof(blendBits));
     uint64_t key = (uint64_t(DxvkShader::getCookie(m_boundVertexShader)) << 32)
                  |  uint64_t(DxvkShader::getCookie(m_boundFragmentShader));
+    key ^= uint64_t(blendBits) * 0x9E3779B97F4A7C15ull;
     uint64_t pipeline = 0;
     auto cachedPipeline = m_pipelineStates.find(key);
     if (cachedPipeline != m_pipelineStates.end()) {
@@ -437,7 +495,7 @@ namespace dxvk {
     } else {
       pipeline = metalBuildRenderPipeline(m_backend->device(),
         vertexStage->function, fragmentStage ? fragmentStage->function : 0u,
-        layout, /* MTLPixelFormatBGRA8Unorm */ 80u);
+        layout, /* MTLPixelFormatBGRA8Unorm */ 80u, blend);
       m_pipelineStates.emplace(key, pipeline);
       if (!pipeline)
         logLine("render pipeline build failed");
