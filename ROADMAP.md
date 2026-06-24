@@ -180,13 +180,20 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     NaN/garbage and the fragment writes nothing. Start the next session by
     diffing the bound argument buffer (`@buf*` at the fragment texture index) and
     the `gpu_resource_id` for an R8 vs an RGBA8 texture in the capture.
-    Data captured so far: the R8 texture (`@tex0`) is correctly created
-    (`R8Unorm`, 16×16, `ShaderRead`, `Managed`); the fragment texture descriptor
-    buffer (`s0_s0_2d` lives in descriptor-set buffer(2)) holds the value `2`,
-    and the sampler heap buffer(0) holds `29`. Capture a RGBA8 `code_texture`
-    frame and compare those two descriptor values + each texture's
-    `gpu_resource_id` — if R8's differs in a way that doesn't resolve to a live
-    texture, the bindless registration of R8 textures is the bug.
+    Data captured: the R8 texture (`@tex0`) is correctly created (`R8Unorm`,
+    16×16, `ShaderRead`, `Managed`); the fragment texture descriptor (buffer(2))
+    holds `2` and the sampler heap (buffer(0)) holds `29`. **Compared against a
+    captured RGBA8 `code_texture` frame — its texture descriptor is ALSO `2`,
+    identical.** So the bindless descriptor/binding is NOT the bug either: an R8
+    texture binds exactly like a working RGBA8 one. EVERYTHING statically
+    inspectable is now identical to the working case, yet the R8 draw writes no
+    pixels. The bug is purely in the GPU runtime of sampling an `R8Unorm`
+    texture (most likely the sample returns NaN/inf and the fragment output is
+    dropped). The only way forward is LIVE shader debugging — step the fragment
+    shader on the R8 draw and read the actual sampled value / output — or test a
+    different single-channel format (e.g. force `A8Unorm`(1) instead of
+    `R8Unorm`(10) in the format map) to see if the format value itself is the
+    problem. Static capture analysis is exhausted.
 
 ---
 
