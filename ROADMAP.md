@@ -180,6 +180,13 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     NaN/garbage and the fragment writes nothing. Start the next session by
     diffing the bound argument buffer (`@buf*` at the fragment texture index) and
     the `gpu_resource_id` for an R8 vs an RGBA8 texture in the capture.
+    Data captured so far: the R8 texture (`@tex0`) is correctly created
+    (`R8Unorm`, 16×16, `ShaderRead`, `Managed`); the fragment texture descriptor
+    buffer (`s0_s0_2d` lives in descriptor-set buffer(2)) holds the value `2`,
+    and the sampler heap buffer(0) holds `29`. Capture a RGBA8 `code_texture`
+    frame and compare those two descriptor values + each texture's
+    `gpu_resource_id` — if R8's differs in a way that doesn't resolve to a live
+    texture, the bindless registration of R8 textures is the bug.
 
 ---
 
