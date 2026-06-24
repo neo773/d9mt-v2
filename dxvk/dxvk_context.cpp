@@ -158,17 +158,27 @@ namespace dxvk {
     if (shader == nullptr)
       return nullptr;
 
+    // Specialize against the current spec-constant data (D3D9 sampler types,
+    // alpha-test op, …) so dead paths fold out — notably the shadow-sample path
+    // that would otherwise force a depth2d texture. The compiled result is
+    // therefore cached per (shader, spec-data), like a driver recompiling a
+    // specialized pipeline when spec constants change.
     uint32_t cookie = uint32_t(shader->getCookie());
-    auto cached = m_compiledStages.find(cookie);
+    uint32_t specHash = uint32_t(bit::fnv1a_hash(
+      reinterpret_cast<const char*>(m_specConstantData.data()),
+      m_specConstantData.size() * sizeof(uint32_t)));
+    uint64_t cacheKey = (uint64_t(cookie) << 32) | specHash;
+
+    auto cached = m_compiledStages.find(cacheKey);
     if (cached != m_compiledStages.end())
       return cached->second.function ? &cached->second : nullptr;
 
     CompiledShaderStage stage;
-    // Translate (no binding remap — the shim runs no Vulkan pipeline) then
-    // compile + specialize. The sampler-heap set comes from the shader's layout
-    // so the converter can locate the heap's buffer index (or ~0u if no
-    // samplers, e.g. the FF triangle).
-    SpirvCodeBuffer code = shader->getCode(nullptr, nullptr);
+    // Translate the specialized SPIR-V. The sampler-heap set comes from the
+    // shader's layout so the converter can locate the heap's buffer index (or
+    // ~0u if no samplers, e.g. the FF triangle).
+    SpirvCodeBuffer code = shader->getCodeSpecialized(
+      m_specConstantData.data(), uint32_t(m_specConstantData.size()));
     DxvkPipelineLayoutBuilder layout = shader->getLayout();
     stage.translation = convertSpirvToMsl(
       code, layout, shader->metadata().stage, layout.getSamplerHeapSet());
@@ -188,7 +198,7 @@ namespace dxvk {
                + " err=" + stage.translation.error).c_str());
     }
 
-    auto& slot = m_compiledStages.emplace(cookie, std::move(stage)).first->second;
+    auto& slot = m_compiledStages.emplace(cacheKey, std::move(stage)).first->second;
     return slot.function ? &slot : nullptr;
   }
 

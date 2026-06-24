@@ -1,4 +1,11 @@
+#include <cstdio>
+
 #include <ir/ir_serialize.h>
+
+#include <ir/passes/ir_pass_arithmetic.h>
+#include <ir/passes/ir_pass_cfg_cleanup.h>
+#include <ir/passes/ir_pass_remove_unused.h>
+#include <ir/passes/ir_pass_ssa.h>
 
 #include <spirv/spirv_builder.h>
 
@@ -2133,6 +2140,214 @@ namespace dxvk {
     dxbc_spv::spirv::SpirvBuilder spirvBuilder(irBuilder, mapping, options);
     spirvBuilder.buildSpirvBinary();
 
+    return SpirvCodeBuffer(spirvBuilder.getSpirvBinary());
+  }
+
+
+  namespace {
+
+    using namespace dxbc_spv;
+
+    // Replaces every specialization constant with its concrete value so the IR
+    // can be constant-folded. This is the first step of specializing a shader
+    // for a particular pipeline state (e.g. baking D3D9 sampler types).
+    void foldSpecConstants(ir::Builder& builder, const uint32_t* specData, uint32_t specCount) {
+      std::vector<std::pair<ir::SsaDef, uint32_t>> specs;
+      for (auto iter = builder.getDeclarations().first;
+                iter != builder.getDeclarations().second; ++iter) {
+        if (iter->getOpCode() != ir::OpCode::eDclSpecConstant)
+          continue;
+        uint32_t specId = uint32_t(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+        specs.emplace_back(iter->getDef(), specId < specCount ? specData[specId] : 0u);
+      }
+
+      for (const auto& [specDef, value] : specs) {
+        bool isBool = builder.getOp(specDef).getType().getBaseType(0u).getBaseType() == ir::ScalarType::eBool;
+        ir::SsaDef constant = isBool ? builder.makeConstant(value != 0u)
+                                     : builder.makeConstant(value);
+
+        util::small_vector<ir::SsaDef, 64u> uses;
+        builder.getUses(specDef, uses);
+        for (auto use : uses) {
+          auto useOp = builder.getOp(use);
+          if (useOp.isDeclarative())
+            continue;
+          for (uint32_t i = 0; i < useOp.getFirstLiteralOperandIndex(); i++) {
+            if (ir::SsaDef(useOp.getOperand(i)) == specDef)
+              useOp.setOperand(i, constant);
+          }
+          builder.rewriteOp(use, std::move(useOp));
+        }
+      }
+    }
+
+    bool functionIsStraightLine(ir::Builder& builder, ir::SsaDef function) {
+      auto iter = builder.iter(function);
+      for (++iter; iter->getOpCode() != ir::OpCode::eFunctionEnd; ++iter) {
+        switch (iter->getOpCode()) {
+          case ir::OpCode::eBranch:
+          case ir::OpCode::eBranchConditional:
+          case ir::OpCode::ePhi:
+          case ir::OpCode::eSwitch:
+          case ir::OpCode::eScopedIf:
+          case ir::OpCode::eScopedElse:
+          case ir::OpCode::eScopedEndIf:
+          case ir::OpCode::eScopedLoop:
+          case ir::OpCode::eScopedLoopBreak:
+          case ir::OpCode::eScopedLoopContinue:
+          case ir::OpCode::eScopedEndLoop:
+          case ir::OpCode::eScopedSwitch:
+          case ir::OpCode::eScopedSwitchBreak:
+          case ir::OpCode::eScopedSwitchCase:
+          case ir::OpCode::eScopedSwitchDefault:
+          case ir::OpCode::eScopedEndSwitch:
+            return false;
+          default:
+            break;
+        }
+      }
+      return true;
+    }
+
+    bool functionIsEntryPoint(ir::Builder& builder, ir::SsaDef function) {
+      util::small_vector<ir::SsaDef, 8u> uses;
+      builder.getUses(function, uses);
+      for (auto use : uses) {
+        if (builder.getOp(use).getOpCode() == ir::OpCode::eEntryPoint)
+          return true;
+      }
+      return false;
+    }
+
+    // Inlines one straight-line function at a single call site: clones the body
+    // with parameters substituted by the call arguments, then redirects the
+    // call result to the cloned return value.
+    void inlineCallSite(ir::Builder& builder, ir::SsaDef function, ir::SsaDef call) {
+      ir::Op functionOp = builder.getOp(function);
+      ir::Op callOp     = builder.getOp(call);
+
+      std::unordered_map<uint32_t, ir::SsaDef> map;
+      uint32_t paramCount = functionOp.getFirstLiteralOperandIndex();
+      for (uint32_t i = 0; i < paramCount; i++)
+        map[ir::SsaDef(functionOp.getOperand(i)).getId()] = ir::SsaDef(callOp.getOperand(i + 1u));
+
+      auto remap = [&](ir::SsaDef d) -> ir::SsaDef {
+        auto it = map.find(d.getId());
+        return it != map.end() ? it->second : d;
+      };
+
+      // Snapshot the body op defs up front: adding cloned ops below mutates the
+      // builder and would invalidate a live body iterator (SSA defs stay valid).
+      std::vector<ir::SsaDef> bodyDefs;
+      {
+        auto iter = builder.iter(function);
+        for (++iter; iter->getOpCode() != ir::OpCode::eFunctionEnd; ++iter)
+          bodyDefs.push_back(iter->getDef());
+      }
+
+      ir::SsaDef returnValue;
+      for (ir::SsaDef oldDef : bodyDefs) {
+        ir::Op op = builder.getOp(oldDef);
+
+        if (op.getOpCode() == ir::OpCode::eLabel) {
+          // Entry block marker — inlined code needs no label.
+        } else if (op.getOpCode() == ir::OpCode::eParamLoad) {
+          map[oldDef.getId()] = remap(ir::SsaDef(op.getOperand(1u)));
+        } else if (op.getOpCode() == ir::OpCode::eReturn) {
+          if (op.getOperandCount() > 0u)
+            returnValue = remap(ir::SsaDef(op.getOperand(0u)));
+        } else {
+          // Copy the op whole (preserving type, flags and literal operands) and
+          // only rewrite its SSA operands through the param/clone map.
+          ir::Op cloned = op;
+          uint32_t firstLiteral = cloned.getFirstLiteralOperandIndex();
+          for (uint32_t i = 0; i < firstLiteral; i++)
+            cloned.setOperand(i, remap(ir::SsaDef(cloned.getOperand(i))));
+          map[oldDef.getId()] = builder.addBefore(call, std::move(cloned));
+        }
+      }
+
+      // rewriteDef redirects the call's uses to the inlined value AND removes
+      // the call; a void helper has no result, so remove its call directly.
+      if (returnValue)
+        builder.rewriteDef(call, returnValue);
+      else
+        builder.remove(call);
+    }
+
+    // Inlines all straight-line (control-flow-free) helper functions into their
+    // callers, iterating so chained helpers collapse. This lets constant
+    // arguments propagate across calls — in particular the folded D3D9 sampler
+    // mode reaches the sample logic, so its dead shadow-compare path can be
+    // eliminated and the texture compiles as a color texture, not a depth one.
+    void inlineStraightLineFunctions(ir::Builder& builder) {
+      bool changed = true;
+      while (changed) {
+        changed = false;
+
+        std::vector<ir::SsaDef> functions;
+        for (auto iter = builder.getCode().first; iter != builder.getCode().second; ++iter) {
+          if (iter->getOpCode() == ir::OpCode::eFunction)
+            functions.push_back(iter->getDef());
+        }
+
+        for (ir::SsaDef function : functions) {
+          if (functionIsEntryPoint(builder, function) || !functionIsStraightLine(builder, function))
+            continue;
+
+          util::small_vector<ir::SsaDef, 16u> uses;
+          builder.getUses(function, uses);
+          for (auto use : uses) {
+            if (builder.getOp(use).getOpCode() != ir::OpCode::eFunctionCall)
+              continue;
+            inlineCallSite(builder, function, use);
+            changed = true;
+          }
+        }
+      }
+    }
+
+  }
+
+
+  SpirvCodeBuffer DxvkIrShader::getCodeSpecialized(
+    const uint32_t* specData, uint32_t specCount) {
+    convertIr("getCodeSpecialized()");
+
+    dxbc_spv::ir::Builder irBuilder;
+    deserializeIr(irBuilder);
+
+    // Bake the spec constants, inline the now-constant sampler-state helpers so
+    // the values propagate to the sample logic, then fold + eliminate the dead
+    // code that exposes (run to a fixpoint so chained expressions collapse).
+    foldSpecConstants(irBuilder, specData, specCount);
+    inlineStraightLineFunctions(irBuilder);
+
+    dxbc_spv::ir::ArithmeticPass::Options arithmeticOptions;
+    while (true) {
+      bool progress = false;
+      progress |= dxbc_spv::ir::ArithmeticPass::runPass(irBuilder, arithmeticOptions);
+      progress |= dxbc_spv::ir::CleanupControlFlowPass::runPass(irBuilder);
+      progress |= dxbc_spv::ir::SsaConstructionPass::runResolveTrivialPhiPass(irBuilder);
+      if (!progress)
+        break;
+      dxbc_spv::ir::RemoveUnusedPass::runPass(irBuilder);
+    }
+    dxbc_spv::ir::RemoveUnusedPass::runPass(irBuilder);
+
+    // Set up SPIR-V options identically to getCode (no linkage on this path).
+    dxbc_spv::spirv::SpirvBuilder::Options options = { };
+    options.includeDebugNames = true;
+    options.nvRawAccessChains = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsNvRawAccessChains);
+    options.supportsZeroInfNanPreserveF16 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve16);
+    options.supportsZeroInfNanPreserveF32 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve32);
+    options.supportsZeroInfNanPreserveF64 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve64);
+    options.maxCbvSize = m_info.options.maxUniformBufferSize;
+    options.maxCbvCount = m_info.options.maxUniformBufferCount;
+
+    DxvkShaderResourceMapping mapping(m_metadata.stage, nullptr);
+    dxbc_spv::spirv::SpirvBuilder spirvBuilder(irBuilder, mapping, options);
+    spirvBuilder.buildSpirvBinary();
     return SpirvCodeBuffer(spirvBuilder.getSpirvBinary());
   }
 

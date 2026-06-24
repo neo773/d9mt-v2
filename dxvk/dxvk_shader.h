@@ -192,6 +192,16 @@ namespace dxvk {
       const DxvkShaderBindingMap*       bindings,
       const DxvkShaderLinkage*          linkage) = 0;
 
+    // Returns SPIR-V with specialization constants folded to concrete values.
+    // IR shaders override this to bake D3D9 sampler types (so color samplers
+    // become texture2d, not depth2d); precompiled-SPIR-V shaders (fixed
+    // function) carry no spec constants, so the default ignores the values.
+    virtual SpirvCodeBuffer getCodeSpecialized(
+      const uint32_t* specData, uint32_t specCount) {
+      (void) specData; (void) specCount;
+      return getCode(nullptr, nullptr);
+    }
+
     virtual void        dump(std::ostream&) = 0;
     virtual std::string debugName() = 0;
 

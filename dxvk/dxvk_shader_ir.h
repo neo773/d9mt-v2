@@ -157,6 +157,18 @@ namespace dxvk {
       const DxvkShaderLinkage*          linkage);
 
     /**
+     * \brief Patches code with specialization constants folded in
+     *
+     * Bakes the given spec-constant values into the IR, inlines the resulting
+     * straight-line helper functions and eliminates the dead code that exposes,
+     * then emits SPIR-V. Used by the Metal backend to specialize D3D9 sampler
+     * types so color samplers compile to \c texture2d rather than \c depth2d.
+     */
+    SpirvCodeBuffer getCodeSpecialized(
+      const uint32_t* specData,
+            uint32_t  specCount);
+
+    /**
      * \brief Queries shader binding layout
      * \returns Pipeline layout builder
      */

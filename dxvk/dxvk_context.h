@@ -576,8 +576,10 @@ namespace dxvk {
     // into one renderAndPresent() call at draw() time.
     D9mtBackend*   m_backend = nullptr;
 
-    // Translated+compiled programs, keyed by shader cookie (process-lifetime).
-    std::unordered_map<uint32_t, CompiledShaderStage> m_compiledStages;
+    // Translated+compiled programs, keyed by (shader cookie, spec-data hash): a
+    // shader specialized against different spec-constant values compiles to a
+    // distinct MSL program (e.g. color vs shadow sampler types).
+    std::unordered_map<uint64_t, CompiledShaderStage> m_compiledStages;
     // Render pipeline states, keyed by (vs cookie, fs cookie, layout) hash.
     std::unordered_map<uint64_t, uint64_t> m_pipelineStates;
 
