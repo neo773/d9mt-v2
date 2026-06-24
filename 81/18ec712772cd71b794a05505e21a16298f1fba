@@ -1,0 +1,32 @@
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_7d222dca54aa9a 568-579
+  s_85f47c9b3164ad::t_ac3dff88a98731 546-551
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_84907fc02502df 226-228
+test/code_cull.c
+  s_85f47c9b3164ad::t_1bfa7959d0974e 1-64,68-106
+  s_85f47c9b3164ad::t_5b092d202d4cf9 65-67
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_4a0b70a6bb1130 656-670
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_6540b5cc3039a8 79-82
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_5762a3890e4a58 404
+  s_85f47c9b3164ad::t_9f4974229b475c 696-698
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "8118ec712772cd71b794a05505e21a16298f1fba",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
