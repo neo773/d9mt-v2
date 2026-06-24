@@ -151,6 +151,20 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     captures are flaky (retry until the 1600×1200 `CAMetalLayer Drawable`
     appears) and the trace-log frame counter lags, so a low count is not a hang.
     The rrr1 swizzle is still needed for luminance correctness regardless.
+  - *Exhaustively ruled out (all verified equal to the working RGBA8 case):* a
+    driver-side log shows the R8 draw's viewport `(0,0 800×600)` and scissor
+    `(0,0 800×600)` are full (scaled ×2 for Retina, `bbPass=1`); the captured
+    `@rps0` has `blendEnabled:no` + `writeMask:RGBA`; `@dss0` is
+    `depthCompare:Always` + stencil `Always/Keep`; `alphaTest` compiles to
+    `return true`. So viewport, scissor, write mask, blend, depth, stencil, and
+    alpha discard are all eliminated. The only unchecked layer is **shader
+    execution**: the vertex-shader output clip positions (are the R8 draw's
+    vertices actually on-screen?) and the fragment sample value. Next step is
+    shader-level inspection (gpudebug shader debug / dump the post-VS positions),
+    NOT re-checking fixed-function state. Strong remaining hypothesis: something
+    about binding an R8 texture's argument-buffer descriptor makes the sample (or
+    a dependent value) collapse the geometry or output — compare the R8 vs RGBA8
+    `@rps0` vertex/fragment MSL and the bound argument buffers side by side.
 
 ---
 
