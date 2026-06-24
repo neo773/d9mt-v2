@@ -1,0 +1,28 @@
+test/shaders/alpha_ps.asm
+  s_85f47c9b3164ad::t_84557319f395f0 2-3
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_4da1f042da8e9e 215-220
+test/alpha_ps_bytecode.inc
+  s_85f47c9b3164ad::t_84557319f395f0 1
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_89b477b31c8b99 435-464
+  s_85f47c9b3164ad::t_c21b267f9ec0cb 495-496,498
+  s_85f47c9b3164ad::t_df591bd0038514 13
+  s_85f47c9b3164ad::t_013b077b33c85b 716
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "26669451ce70520f5b4f87500a90273310a7830c",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
