@@ -389,7 +389,7 @@ namespace dxvk {
     void setDepthBias(DxvkDepthBias depthBias) { (void) depthBias; }
     void setDepthBiasRepresentation(DxvkDepthBiasRepresentation r) { (void) r; }
     void setDepthBounds(DxvkDepthBounds depthBounds) { (void) depthBounds; }
-    void setStencilReference(uint32_t reference) { (void) reference; }
+    void setStencilReference(uint32_t reference) { m_stencilReference = reference; }
     void setInputAssemblyState(const DxvkInputAssemblyState& ia) { (void) ia; }
     // Capture the D3D9 vertex declaration so draw() can build the Metal vertex
     // descriptor (attributes feed shader [[attribute(location)]]; bindings give
@@ -681,7 +681,8 @@ namespace dxvk {
     // Depth-stencil state (setDepthStencilState) + a cache of the Metal state
     // objects built from each distinct (compare op, write enable) combination.
     DxvkDepthStencilState m_depthStencilState = { };
-    std::unordered_map<uint32_t, uint64_t> m_depthStencilCache;
+    std::unordered_map<uint64_t, uint64_t> m_depthStencilCache;
+    uint32_t m_stencilReference = 0;
 
     // Viewport + scissor (setViewports). D3D9 binds a single pair.
     DxvkViewport m_viewport    = { };

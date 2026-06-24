@@ -303,12 +303,33 @@ namespace dxvk {
       ? uint32_t(m_depthStencilState.depthCompareOp())
       : 7u;  // WMTCompareFunctionAlways
 
-    uint32_t key = (compare << 1) | (write ? 1u : 0u);
+    bool stencil = m_depthStencilState.stencilTest();
+    DxvkStencilOp frontOp = m_depthStencilState.stencilOpFront();
+    DxvkStencilOp backOp  = m_depthStencilState.stencilOpBack();
+
+    auto toFace = [](const DxvkStencilOp& op) {
+      D9mtBackend::StencilFace face;
+      face.failOp          = uint32_t(op.failOp());
+      face.passOp          = uint32_t(op.passOp());
+      face.depthFailOp     = uint32_t(op.depthFailOp());
+      face.compareFunction = uint32_t(op.compareOp());
+      face.readMask        = op.compareMask();
+      face.writeMask       = op.writeMask();
+      return face;
+    };
+    D9mtBackend::StencilFace front = toFace(frontOp);
+    D9mtBackend::StencilFace back  = toFace(backOp);
+
+    // Key on the whole depth-stencil state (depth + both stencil faces); the
+    // stencil reference is dynamic and bound separately, so it is excluded.
+    uint64_t key = bit::fnv1a_hash(
+      reinterpret_cast<const char*>(&m_depthStencilState), sizeof(m_depthStencilState));
+    key = (key << 1) | (write ? 1u : 0u);
     auto cached = m_depthStencilCache.find(key);
     if (cached != m_depthStencilCache.end())
       return cached->second;
 
-    uint64_t state = m_backend->createDepthStencilState(compare, write);
+    uint64_t state = m_backend->createDepthStencilState(compare, write, stencil, front, back);
     m_depthStencilCache.emplace(key, state);
     return state;
   }
@@ -616,6 +637,7 @@ namespace dxvk {
     pipelineDraw.residentBuffers   = residentBuffers.data();
     pipelineDraw.residentCount     = uint32_t(residentBuffers.size());
     pipelineDraw.depthStencilState = resolveDepthStencilState();
+    pipelineDraw.stencilReference  = m_stencilReference;
     if (m_hasViewport) {
       const VkViewport& vp = m_viewport.viewport;
       // DXVK emits a negative-height viewport (Vulkan's bottom-left y-flip

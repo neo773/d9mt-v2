@@ -247,12 +247,25 @@ namespace dxvk {
   }
 
   uint64_t D9mtBackend::createDepthStencilState(uint32_t depthCompareFunction,
-                                                bool depthWriteEnabled) {
+                                                bool depthWriteEnabled,
+                                                bool stencilEnabled,
+                                                const StencilFace& front,
+                                                const StencilFace& back) {
     WMTDepthStencilInfo info = {};
     info.depth_compare_function = WMTCompareFunction(depthCompareFunction);
     info.depth_write_enabled    = depthWriteEnabled;
-    // Stencil stays at its default (test disabled): the front/back WMTStencilInfo
-    // zero-initialize to a keep/always configuration.
+
+    auto fillFace = [stencilEnabled](WMTStencilInfo& dst, const StencilFace& src) {
+      dst.enabled                  = stencilEnabled;
+      dst.stencil_fail_op          = WMTStencilOperation(src.failOp);
+      dst.depth_stencil_pass_op    = WMTStencilOperation(src.passOp);
+      dst.depth_fail_op            = WMTStencilOperation(src.depthFailOp);
+      dst.stencil_compare_function = WMTCompareFunction(src.compareFunction);
+      dst.read_mask                = src.readMask;
+      dst.write_mask               = src.writeMask;
+    };
+    fillFace(info.front_stencil, front);
+    fillFace(info.back_stencil, back);
     return MTLDevice_newDepthStencilState(m_device, &info);
   }
 
@@ -465,12 +478,13 @@ namespace dxvk {
       colorTexture = MetalDrawable_texture(m_frameDrawable);
     }
 
-    // Depth buffer (Depth32Float, drawable-sized, GPU-private), created once and
-    // reused. Cleared to the far plane at each pass so depth-tested draws start
-    // fresh; draws that never enable depth testing simply ignore it.
+    // Depth+stencil buffer (Depth32Float_Stencil8, drawable-sized, GPU-private),
+    // created once and reused. Cleared at each pass so depth/stencil-tested draws
+    // start fresh; draws that enable neither simply ignore it. A combined format
+    // (not plain Depth32Float) so stencil-test state has a stencil plane to use.
     if (!m_depthTexture && m_width && m_height) {
       WMTTextureInfo depthInfo = {};
-      depthInfo.pixel_format       = WMTPixelFormatDepth32Float;
+      depthInfo.pixel_format       = WMTPixelFormatDepth32Float_Stencil8;
       depthInfo.width              = m_width;
       depthInfo.height             = m_height;
       depthInfo.depth              = 1u;
@@ -497,6 +511,10 @@ namespace dxvk {
     renderPass.depth.load_action  = WMTLoadActionClear;
     renderPass.depth.store_action = WMTStoreActionDontCare;
     renderPass.depth.clear_depth  = 1.0f;
+    renderPass.stencil.texture      = m_depthTexture;  // same combined attachment
+    renderPass.stencil.load_action  = WMTLoadActionClear;
+    renderPass.stencil.store_action = WMTStoreActionDontCare;
+    renderPass.stencil.clear_stencil = 0u;
     renderPass.render_target_width = m_width;
     renderPass.render_target_height = m_height;
     renderPass.default_raster_sample_count = 1;
@@ -541,7 +559,7 @@ namespace dxvk {
     if (draw.depthStencilState) {
       setDepthState.type        = WMTRenderCommandSetDSSO;
       setDepthState.dsso        = draw.depthStencilState;
-      setDepthState.stencil_ref = 0u;
+      setDepthState.stencil_ref = draw.stencilReference;
       tail->next.set(&setDepthState);
       tail = reinterpret_cast<wmtcmd_base*>(&setDepthState);
     }

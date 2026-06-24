@@ -63,6 +63,7 @@ namespace dxvk {
     // Depth-stencil state object bound before the draw (0 = leave the Metal
     // default: depth test always passes, no depth write).
     uint64_t                  depthStencilState = 0;
+    uint32_t                  stencilReference  = 0;
     // Viewport (pixel rect + [minZ,maxZ] depth range) and scissor rect bound
     // before the draw. hasViewport/hasScissor false leaves Metal's default
     // (full render target). Decoupled from winemetal types to keep this header
@@ -127,7 +128,15 @@ namespace dxvk {
     // Creates a depth-stencil state object (compare function is a WMT/Metal
     // enum value; stencil is left disabled). Returned handle is bound on the
     // render encoder before a draw.
-    uint64_t createDepthStencilState(uint32_t depthCompareFunction, bool depthWriteEnabled);
+    // Per-face stencil config. The op/compare values are Vulkan enums, which
+    // share their numeric encoding with the winemetal/Metal equivalents.
+    struct StencilFace {
+      uint32_t failOp = 0, passOp = 0, depthFailOp = 0, compareFunction = 7; // Always
+      uint8_t  readMask = 0xff, writeMask = 0xff;
+    };
+    uint64_t createDepthStencilState(uint32_t depthCompareFunction, bool depthWriteEnabled,
+                                     bool stencilEnabled,
+                                     const StencilFace& front, const StencilFace& back);
 
     // Selects the color render target for subsequent draws: a swapchain
     // backbuffer texture (see registerBackbufferTexture) renders into the
