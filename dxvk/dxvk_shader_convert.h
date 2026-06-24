@@ -25,6 +25,22 @@
 
 namespace dxvk {
 
+  // Base offset of a push-data region in the D3D9 constant store. The frontend
+  // writes every push block at its own local offset 0, distinguishing them only
+  // by stage, so the shared block (no stage flags, or all graphics stages) and
+  // each single-stage block must occupy disjoint regions or they clobber each
+  // other. The shared block starts the store; each single-stage block gets its
+  // own slot after it, keyed by stage bit. Both the writer (DxvkContext::pushData)
+  // and the reader (the reflection's srcOffset) use this so they agree.
+  inline uint32_t pushRegionBaseForStages(VkShaderStageFlags stages) {
+    if (stages == 0u || (stages & (stages - 1u)))
+      return 0u;  // shared region (all stages)
+    uint32_t bit = 0u;
+    while (!(stages & (1u << bit)))
+      bit++;
+    return MaxSharedPushDataSize + MaxPerStagePushDataSize * bit;
+  }
+
   // One argument-buffer-resident resource (UBO / SSBO / sampled image). `abId`
   // is SPIRV-Cross's automatic MSL binding inside the set-0 argument buffer;
   // `slot` is the DXVK resource slot the draw binds from.

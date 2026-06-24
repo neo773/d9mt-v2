@@ -355,10 +355,12 @@ namespace dxvk {
     // constant store at absolute `offset`. draw() later copies the dwords each
     // shader's push blocks reference into a Metal buffer bound at its push index.
     void pushData(VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data) {
-      (void) stages;
-      if (m_pushConstantStore.size() < offset + size)
-        m_pushConstantStore.resize(offset + size, 0u);
-      std::memcpy(m_pushConstantStore.data() + offset, data, size);
+      // Route each push block to its stage region so per-stage blocks never
+      // clobber the shared block (they all arrive at local offset 0).
+      uint32_t storeOffset = pushRegionBaseForStages(stages) + offset;
+      if (m_pushConstantStore.size() < storeOffset + size)
+        m_pushConstantStore.resize(storeOffset + size, 0u);
+      std::memcpy(m_pushConstantStore.data() + storeOffset, data, size);
     }
 
 

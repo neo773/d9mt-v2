@@ -152,7 +152,10 @@ namespace dxvk {
       MslPushBlock info;
       info.dstOffset    = block.getOffset();
       info.size         = block.getSize();
-      info.srcOffset    = pushDataBlockSrcOffset(index);
+      // Source from the same stage region the frontend wrote into, so per-stage
+      // blocks read their own data instead of a clobbered shared region. The
+      // frontend writes each whole block at its region's local offset 0.
+      info.srcOffset    = pushRegionBaseForStages(block.getStageMask());
       info.resourceMask = block.getResourceDwordMask();
       out.reflection.pushBlocks.push_back(info);
 
