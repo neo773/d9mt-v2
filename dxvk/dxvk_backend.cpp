@@ -442,7 +442,9 @@ namespace dxvk {
     if (FILE* f = std::fopen(trigger, "rb")) {
       std::fclose(f);
       std::remove(trigger);
-      static const char path[] = "C:\\d9mt-test\\frame.gputrace";
+      // The unix d9mtmetal side builds an NSURL via fileURLWithPath, so this
+      // must be a unix filesystem path, not a Windows C:\ path.
+      static const char path[] = "/tmp/d9mt-frame.gputrace";
       d9mt_capture_params p = {};
       p.action   = 1u;
       p.queue    = m_queue;
