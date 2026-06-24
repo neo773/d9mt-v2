@@ -23,11 +23,11 @@ delta and a regression target.
       stub; `code_shader.exe` renders the RGB triangle. (`2f414cd`)
 - [x] **Phase 1.3 — index buffers + drawIndexed** — `code_index.exe`
       renders via `DrawIndexedPrimitive`. (`712c11f`)
-- [~] **Phase 1.4 — dynamic state into the PSO key** — blend state done
-      (`code_blend.exe` renders olive = correct SrcAlpha/InvSrcAlpha over green);
-      keyed into the PSO cache. (`2b49614`) Follow-ups: depth/stencil test
-      (needs a depth attachment — no depth buffer in the shim yet), topology
-      classes, RT-format key.
+- [x] **Phase 1.4 — dynamic state into the PSO** — blend state
+      (`code_blend.exe`, olive = SrcAlpha/InvSrcAlpha, `2b49614`) and
+      depth/stencil testing (`code_depth.exe`, near-blue occludes far-red,
+      `7a901bf`). Minor follow-ups: non-triangle topology classes, RT-format in
+      the PSO key (both fixed today: triangle list, BGRA8 backbuffer).
 
 ### Phase 1.2 status — infrastructure DONE, color blocked on depth2d
 
