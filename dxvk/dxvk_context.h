@@ -444,8 +444,12 @@ namespace dxvk {
     }
 
     // Resource maintenance — no-ops for app textures/buffers off the triangle path.
+    // Only the swapchain calls this — for its backbuffers. Register each one's
+    // Metal texture so the backend routes draws bound to it into the drawable.
     void initImage(const Rc<DxvkImage>& image, VkImageLayout initialLayout) {
-      (void) image; (void) initialLayout;
+      (void) initialLayout;
+      if (m_backend && image != nullptr)
+        m_backend->registerBackbufferTexture(image->metalTexture());
     }
     void invalidateBuffer(const Rc<DxvkBuffer>& buffer, Rc<DxvkResourceAllocation>&& slice) {
       (void) buffer; (void) slice;

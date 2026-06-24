@@ -181,8 +181,12 @@ namespace dxvk {
     info.mipmap_level_count = mipLevels ? mipLevels : 1u;
     info.sample_count       = 1u;
     info.usage              = WMTTextureUsage(metalUsage);
-    // Managed storage so replaceRegion can stage CPU pixels into the texture.
-    info.options            = WMTResourceStorageModeManaged;
+    // Render targets are GPU-only (Private); they are written by the GPU and
+    // sampled by it, never CPU-uploaded. Plain sampled textures use Managed so
+    // replaceRegion can stage CPU pixels into them.
+    info.options            = (metalUsage & 4u)  // WMTTextureUsageRenderTarget
+      ? WMTResourceStorageModePrivate
+      : WMTResourceStorageModeManaged;
 
     uint64_t texture = MTLDevice_newTexture(m_device, &info);
     if (!texture) {
@@ -407,33 +411,60 @@ namespace dxvk {
   // appendDraw accumulates draws into that single encoder, and
   // endFrameAndPresent ends/presents/commits/waits once.
 
+  void D9mtBackend::registerBackbufferTexture(uint64_t texture) {
+    if (texture)
+      m_backbufferTextures.insert(texture);
+  }
+
+  void D9mtBackend::setColorTarget(uint64_t texture) {
+    if (texture == m_targetTexture)
+      return;
+    // End the current render pass so the next draw opens a fresh pass against
+    // the new target on the same command buffer.
+    if (m_frameEncoder) {
+      MTLCommandEncoder_endEncoding(m_frameEncoder);
+      m_frameEncoder = 0;
+      m_frameOpen = false;
+    }
+    m_targetTexture = texture;
+  }
+
   void D9mtBackend::beginFrame(bool clear, uint32_t clearColorArgb) {
     // Remember the clear request so a draw-less (clear-only) frame can still
     // present a cleared image when endFrameAndPresent opens the frame itself.
     m_pendingClear = clear;
     m_pendingClearColor = clearColorArgb;
 
-    // Idempotent within a frame: only the first call per frame opens the
-    // encoder; later beginFrame calls (e.g. one before every draw) are no-ops.
+    // Idempotent within a render pass: only the first call opens the encoder;
+    // later calls (e.g. one before every draw) are no-ops until a target switch.
     if (m_frameOpen)
       return;
     if (!m_layer)
       return;
 
-    // One autorelease pool held across the whole frame (released at frame end).
-    m_framePool = NSAutoreleasePool_alloc_init();
+    // The autorelease pool + command buffer span the whole frame (all render
+    // passes); created once, on the first pass.
+    if (!m_framePool)
+      m_framePool = NSAutoreleasePool_alloc_init();
+    if (!m_frameCommandBuffer)
+      m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
 
-    m_frameDrawable = MetalLayer_nextDrawable(m_layer);
-    if (!m_frameDrawable) {
-      // No drawable available — leave the frame closed and drop this pool.
-      NSObject_release(m_framePool);
-      m_framePool = 0;
-      return;
+    // The backbuffer renders into the swapchain drawable (acquired once per
+    // frame, presented at the end); an offscreen target renders into its own
+    // texture and is never presented.
+    uint64_t colorTexture;
+    if (m_targetTexture && !m_backbufferTextures.count(m_targetTexture)) {
+      colorTexture = m_targetTexture;  // offscreen render-to-texture target
+    } else {
+      if (!m_frameDrawable)
+        m_frameDrawable = MetalLayer_nextDrawable(m_layer);
+      if (!m_frameDrawable)
+        return;  // no drawable available — leave the pass closed.
+      colorTexture = MetalDrawable_texture(m_frameDrawable);
     }
-    uint64_t drawableTexture = MetalDrawable_texture(m_frameDrawable);
 
     // Depth buffer (Depth32Float, drawable-sized, GPU-private), created once and
-    // reused. Cleared to the far plane each frame so depth-tested draws start
+    // reused. Cleared to the far plane at each pass so depth-tested draws start
     // fresh; draws that never enable depth testing simply ignore it.
     if (!m_depthTexture && m_width && m_height) {
       WMTTextureInfo depthInfo = {};
@@ -453,7 +484,7 @@ namespace dxvk {
     // Render pass identical to renderAndPresent: clear the drawable (when
     // asked) then load into the open encoder. clearColorArgb is raw D3DCOLOR.
     WMTRenderPassInfo renderPass = {};
-    renderPass.colors[0].texture = drawableTexture;
+    renderPass.colors[0].texture = colorTexture;
     renderPass.colors[0].load_action = clear ? WMTLoadActionClear : WMTLoadActionLoad;
     renderPass.colors[0].store_action = WMTStoreActionStore;
     renderPass.colors[0].clear_color.r = ((clearColorArgb >> 16) & 0xff) / 255.0;
@@ -468,7 +499,6 @@ namespace dxvk {
     renderPass.render_target_height = m_height;
     renderPass.default_raster_sample_count = 1;
 
-    m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
     m_frameEncoder = MTLCommandBuffer_renderCommandEncoder(m_frameCommandBuffer, &renderPass);
     m_frameOpen = true;
     m_residentThisFrame.clear();
@@ -570,18 +600,25 @@ namespace dxvk {
   }
 
   void D9mtBackend::endFrameAndPresent() {
-    // Clear-only frame: nobody opened the encoder, so open one now using the
-    // last clear seen by beginFrame so the cleared image still gets presented.
-    if (!m_frameOpen) {
+    // Clear-only / no-draw frame: nothing opened a pass, so open a backbuffer
+    // pass now using the last clear seen so the cleared image still presents.
+    if (!m_frameCommandBuffer) {
+      m_targetTexture = 0;
       beginFrame(m_pendingClear, m_pendingClearColor);
-      if (!m_frameOpen)
-        return;  // still couldn't open (e.g. no drawable) — nothing to present.
     }
 
-    {
-      TraceScope presentScope(TraceZone::Present);
+    // End the last render pass of the frame.
+    if (m_frameEncoder) {
       MTLCommandEncoder_endEncoding(m_frameEncoder);
-      MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
+      m_frameEncoder = 0;
+      m_frameOpen = false;
+    }
+
+    if (m_frameCommandBuffer) {
+      TraceScope presentScope(TraceZone::Present);
+      // Present only if a backbuffer pass acquired the drawable.
+      if (m_frameDrawable)
+        MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
       MTLCommandBuffer_commit(m_frameCommandBuffer);
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
     }
@@ -589,9 +626,11 @@ namespace dxvk {
     if (m_framePool)
       NSObject_release(m_framePool);
 
-    // Reset frame state — zero handles mean no frame is in flight.
+    // Reset frame state — zero handles mean no frame is in flight. The target
+    // returns to the backbuffer for the next frame.
     m_frameDrawable = m_frameCommandBuffer = m_frameEncoder = m_framePool = 0;
     m_frameOpen = false;
+    m_targetTexture = 0;
 
     // Emit the per-frame CPU breakdown (no-op unless D9MT_TRACE is set).
     FrameTrace::endFrame();

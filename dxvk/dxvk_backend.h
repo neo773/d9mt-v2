@@ -119,6 +119,18 @@ namespace dxvk {
     // render encoder before a draw.
     uint64_t createDepthStencilState(uint32_t depthCompareFunction, bool depthWriteEnabled);
 
+    // Selects the color render target for subsequent draws: a swapchain
+    // backbuffer texture (see registerBackbufferTexture) renders into the
+    // drawable, any other texture into that offscreen render-to-texture target.
+    // Switching targets ends the current render pass; the next draw opens a new
+    // pass against the new target.
+    void setColorTarget(uint64_t texture);
+
+    // Records a swapchain backbuffer's texture so setColorTarget can recognise
+    // it and route its draws to the presentable drawable. Called when the
+    // swapchain initializes its backbuffers.
+    void registerBackbufferTexture(uint64_t texture);
+
     // Records one render pass into the next drawable: clear to clearColorArgb
     // (raw D3DCOLOR), draw the given list as a triangle list, present, wait.
     // Uses the hardcoded MSL pipeline (fallback / bring-up path).
@@ -165,6 +177,14 @@ namespace dxvk {
     // at the drawable size so depth-tested draws have a depth buffer to compare
     // against; the color-only triangle path leaves the default always-pass state.
     uint64_t m_depthTexture  = 0;
+
+    // Current color render target. The frontend binds a real texture for
+    // color[0] even for the backbuffer, so backbuffer textures are registered
+    // explicitly (registerBackbufferTexture); a bound backbuffer maps to the
+    // drawable (which the shim renders into and presents), any other texture to
+    // an offscreen render-to-texture target.
+    uint64_t                     m_targetTexture = 0;
+    std::unordered_set<uint64_t> m_backbufferTextures;
 
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many

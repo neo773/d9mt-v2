@@ -214,4 +214,8 @@ echo "[dxvk] compiling code_dxt.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_dxt.exe" "$V2/test/code_dxt.c" \
   -ld3d9 -luser32 -lgdi32
 
+echo "[dxvk] compiling code_rtt.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_rtt.exe" "$V2/test/code_rtt.c" \
+  -ld3d9 -luser32 -lgdi32
+
 echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD"/code*.exe

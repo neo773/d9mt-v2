@@ -89,11 +89,22 @@ namespace dxvk {
             DxvkRenderTargets&&   targets,
             VkImageAspectFlags    feedbackLoop) {
     (void) feedbackLoop;
-    // The backbuffer color target is color[0]. The backend presents to the next
-    // drawable, so we only need to know a target was bound; the actual Metal
-    // texture is resolved by the backend at present time. We keep the move to
-    // honour the rvalue contract and drop it (no per-RT state needed yet).
-    (void) targets;
+    // Select the color[0] target. An offscreen render target view carries a real
+    // Metal texture; the backbuffer view has none (it renders to the drawable),
+    // so a zero handle tells the backend to use the swapchain drawable.
+    uint64_t targetTexture = targets.color[0].view != nullptr
+      ? targets.color[0].view->metalTexture() : 0u;
+    if (m_backend) {
+      // A clear recorded for the current target is normally applied lazily by
+      // the next draw's render pass; if the target switches first with no draw
+      // (a clear-only pass, e.g. clearing a render target before rendering
+      // elsewhere), flush it now so the clear reaches that target.
+      if (m_clearPending) {
+        m_backend->beginFrame(m_clearPending, m_clearColorArgb);
+        m_clearPending = false;
+      }
+      m_backend->setColorTarget(targetTexture);
+    }
   }
 
 
