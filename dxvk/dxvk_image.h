@@ -177,9 +177,15 @@ namespace dxvk {
                       && createInfo.type == VK_IMAGE_TYPE_2D
                       && createInfo.extent.width && createInfo.extent.height;
       if (isSampled2D && metalFormat) {
+        // ShaderRead, plus RenderTarget when this is also a color attachment
+        // (a render-to-texture target). The backbuffer is a color attachment
+        // but NOT sampled, so it stays texture-less here and uses the drawable.
+        uint32_t metalUsage = 1u;  // WMTTextureUsageShaderRead
+        if (createInfo.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+          metalUsage |= 4u;        // WMTTextureUsageRenderTarget
         m_metalTexture = backend.createSampledTexture(
           createInfo.extent.width, createInfo.extent.height,
-          createInfo.mipLevels, metalFormat, &m_gpuResourceId);
+          createInfo.mipLevels, metalFormat, metalUsage, &m_gpuResourceId);
       }
     }
 

@@ -166,6 +166,7 @@ namespace dxvk {
   uint64_t D9mtBackend::createSampledTexture(uint32_t width, uint32_t height,
                                              uint32_t mipLevels,
                                              uint32_t metalPixelFormat,
+                                             uint32_t metalUsage,
                                              uint64_t* gpuResourceIdOut) {
     if (gpuResourceIdOut)
       *gpuResourceIdOut = 0;
@@ -179,7 +180,7 @@ namespace dxvk {
     info.type               = WMTTextureType2D;
     info.mipmap_level_count = mipLevels ? mipLevels : 1u;
     info.sample_count       = 1u;
-    info.usage              = WMTTextureUsageShaderRead;
+    info.usage              = WMTTextureUsage(metalUsage);
     // Managed storage so replaceRegion can stage CPU pixels into the texture.
     info.options            = WMTResourceStorageModeManaged;
 
