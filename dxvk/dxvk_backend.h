@@ -93,14 +93,14 @@ namespace dxvk {
     uint64_t createSharedBuffer(uint64_t byteCount, void** cpuPointerOut,
                                 uint64_t* gpuAddressOut = nullptr);
 
-    // Creates a 2D sampled texture in the given winemetal pixel format and
-    // returns its MTLTexture handle; writes the texture's gpuResourceID (for
-    // an argument-buffer descriptor) to gpuResourceIdOut.
-    uint64_t createSampledTexture(uint32_t width, uint32_t height,
+    // Creates a 2D sampled texture (mipLevels mips) in the given winemetal pixel
+    // format and returns its MTLTexture handle; writes the texture's
+    // gpuResourceID (for an argument-buffer descriptor) to gpuResourceIdOut.
+    uint64_t createSampledTexture(uint32_t width, uint32_t height, uint32_t mipLevels,
                                   uint32_t metalPixelFormat, uint64_t* gpuResourceIdOut);
 
-    // Uploads a tightly-packed mip-0 region into a texture (replaceRegion).
-    void uploadTexture(uint64_t texture, uint32_t x, uint32_t y,
+    // Uploads a tightly-packed region into one mip level of a texture.
+    void uploadTexture(uint64_t texture, uint32_t mipLevel, uint32_t x, uint32_t y,
                        uint32_t width, uint32_t height,
                        const void* data, uint32_t bytesPerRow);
 

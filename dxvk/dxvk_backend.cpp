@@ -164,6 +164,7 @@ namespace dxvk {
   }
 
   uint64_t D9mtBackend::createSampledTexture(uint32_t width, uint32_t height,
+                                             uint32_t mipLevels,
                                              uint32_t metalPixelFormat,
                                              uint64_t* gpuResourceIdOut) {
     if (gpuResourceIdOut)
@@ -176,7 +177,7 @@ namespace dxvk {
     info.depth              = 1u;
     info.array_length       = 1u;
     info.type               = WMTTextureType2D;
-    info.mipmap_level_count = 1u;
+    info.mipmap_level_count = mipLevels ? mipLevels : 1u;
     info.sample_count       = 1u;
     info.usage              = WMTTextureUsageShaderRead;
     // Managed storage so replaceRegion can stage CPU pixels into the texture.
@@ -192,7 +193,8 @@ namespace dxvk {
     return texture;
   }
 
-  void D9mtBackend::uploadTexture(uint64_t texture, uint32_t x, uint32_t y,
+  void D9mtBackend::uploadTexture(uint64_t texture, uint32_t mipLevel,
+                                  uint32_t x, uint32_t y,
                                   uint32_t width, uint32_t height,
                                   const void* data, uint32_t bytesPerRow) {
     if (!texture || !data)
@@ -201,8 +203,8 @@ namespace dxvk {
     WMTSize   size   = { width, height, 1u };
     WMTMemoryPointer ptr = {};
     ptr.set(const_cast<void*>(data));
-    MTLTexture_replaceRegion(texture, origin, size, 0u, 0u, ptr,
-                             bytesPerRow, uint64_t(bytesPerRow) * height);
+    // bytes-per-image is 0 for a 2D (non-array) texture region.
+    MTLTexture_replaceRegion(texture, origin, size, mipLevel, 0u, ptr, bytesPerRow, 0u);
   }
 
   uint64_t D9mtBackend::createSampler(uint32_t minFilter, uint32_t magFilter,

@@ -489,23 +489,26 @@ namespace dxvk {
         std::memcpy(dst, src, numBytes);
     }
     // Uploads tightly-packed pixels from a staging buffer into a real Metal
-    // texture. The frontend packs mip data into the staging buffer (no row
-    // padding here), so bytes-per-row is width * element size. Only mip 0 of a
-    // 2D texture is handled — enough for the app textures the shim samples.
+    // texture (mip 0..N of a 2D texture). The frontend packs the data with no
+    // row padding, so bytes-per-row is one row of blocks: for block-compressed
+    // formats (BC/DXT) that is ceil(width / blockWidth) * blockBytes, which
+    // reduces to width * elementSize for uncompressed formats.
     void copyBufferToImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource,
                            VkOffset3D dstOffset, VkExtent3D dstExtent, const Rc<DxvkBuffer>& srcBuffer,
                            VkDeviceSize srcOffset, VkDeviceSize rowAlignment, VkDeviceSize sliceAlignment,
                            VkFormat srcFormat) {
-      (void) dstSubresource; (void) rowAlignment; (void) sliceAlignment; (void) srcFormat;
+      (void) rowAlignment; (void) sliceAlignment; (void) srcFormat;
       if (!dstImage || !srcBuffer || !dstImage->metalTexture())
         return;
       const void* src = srcBuffer->mapPtr(srcOffset);
       const DxvkFormatInfo* fmt = dstImage->formatInfo();
       if (!src || !fmt || !fmt->elementSize)
         return;
-      m_backend->uploadTexture(dstImage->metalTexture(),
-        uint32_t(dstOffset.x), uint32_t(dstOffset.y),
-        dstExtent.width, dstExtent.height, src, dstExtent.width * fmt->elementSize);
+      uint32_t blockWidth   = fmt->blockSize.width ? fmt->blockSize.width : 1u;
+      uint32_t blocksPerRow = (dstExtent.width + blockWidth - 1u) / blockWidth;
+      m_backend->uploadTexture(dstImage->metalTexture(), dstSubresource.mipLevel,
+        uint32_t(dstOffset.x), uint32_t(dstOffset.y), dstExtent.width, dstExtent.height,
+        src, uint32_t(blocksPerRow * fmt->elementSize));
     }
     void copyImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource, VkOffset3D dstOffset,
                    const Rc<DxvkImage>& srcImage, VkImageSubresourceLayers srcSubresource, VkOffset3D srcOffset,

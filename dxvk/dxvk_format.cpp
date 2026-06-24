@@ -49,6 +49,21 @@ namespace dxvk {
     set(VK_FORMAT_R8G8B8A8_SRGB, DxvkFormatInfo {
       4, rgba, VK_IMAGE_ASPECT_COLOR_BIT, DxvkFormatFlag::ColorSpaceSrgb });
 
+    // Block-compressed formats (D3DFMT_DXT1/2/3/4/5 -> BC1/2/3). The element
+    // size is the bytes per 4x4 block: 8 for BC1, 16 for BC2/BC3.
+    set(VK_FORMAT_BC1_RGBA_UNORM_BLOCK, DxvkFormatInfo {
+      8, rgba, VK_IMAGE_ASPECT_COLOR_BIT, 0, { 4, 4, 1 } });
+    set(VK_FORMAT_BC1_RGBA_SRGB_BLOCK, DxvkFormatInfo {
+      8, rgba, VK_IMAGE_ASPECT_COLOR_BIT, DxvkFormatFlag::ColorSpaceSrgb, { 4, 4, 1 } });
+    set(VK_FORMAT_BC2_UNORM_BLOCK, DxvkFormatInfo {
+      16, rgba, VK_IMAGE_ASPECT_COLOR_BIT, 0, { 4, 4, 1 } });
+    set(VK_FORMAT_BC2_SRGB_BLOCK, DxvkFormatInfo {
+      16, rgba, VK_IMAGE_ASPECT_COLOR_BIT, DxvkFormatFlag::ColorSpaceSrgb, { 4, 4, 1 } });
+    set(VK_FORMAT_BC3_UNORM_BLOCK, DxvkFormatInfo {
+      16, rgba, VK_IMAGE_ASPECT_COLOR_BIT, 0, { 4, 4, 1 } });
+    set(VK_FORMAT_BC3_SRGB_BLOCK, DxvkFormatInfo {
+      16, rgba, VK_IMAGE_ASPECT_COLOR_BIT, DxvkFormatFlag::ColorSpaceSrgb, { 4, 4, 1 } });
+
     // Packed 16-bit color formats the swapchain may select.
     set(VK_FORMAT_R5G6B5_UNORM_PACK16, DxvkFormatInfo {
       2, rgba, VK_IMAGE_ASPECT_COLOR_BIT });

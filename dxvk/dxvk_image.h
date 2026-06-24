@@ -178,7 +178,8 @@ namespace dxvk {
                       && createInfo.extent.width && createInfo.extent.height;
       if (isSampled2D && metalFormat) {
         m_metalTexture = backend.createSampledTexture(
-          createInfo.extent.width, createInfo.extent.height, metalFormat, &m_gpuResourceId);
+          createInfo.extent.width, createInfo.extent.height,
+          createInfo.mipLevels, metalFormat, &m_gpuResourceId);
       }
     }
 
@@ -187,9 +188,17 @@ namespace dxvk {
     // unmapped format yields 0 (the image stays a stub, sampling reads zero).
     static uint32_t metalPixelFormatFromVulkan(VkFormat format) {
       switch (format) {
-        case VK_FORMAT_B8G8R8A8_UNORM: return 80u;  // WMTPixelFormatBGRA8Unorm
-        case VK_FORMAT_R8G8B8A8_UNORM: return 70u;  // WMTPixelFormatRGBA8Unorm
-        default:                       return 0u;
+        case VK_FORMAT_B8G8R8A8_UNORM:      return 80u;   // WMTPixelFormatBGRA8Unorm
+        case VK_FORMAT_B8G8R8A8_SRGB:       return 81u;   // WMTPixelFormatBGRA8Unorm_sRGB
+        case VK_FORMAT_R8G8B8A8_UNORM:      return 70u;   // WMTPixelFormatRGBA8Unorm
+        case VK_FORMAT_R8G8B8A8_SRGB:       return 71u;   // WMTPixelFormatRGBA8Unorm_sRGB
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return 130u; // WMTPixelFormatBC1_RGBA
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:  return 131u; // WMTPixelFormatBC1_RGBA_sRGB
+        case VK_FORMAT_BC2_UNORM_BLOCK:      return 132u; // WMTPixelFormatBC2_RGBA
+        case VK_FORMAT_BC2_SRGB_BLOCK:       return 133u; // WMTPixelFormatBC2_RGBA_sRGB
+        case VK_FORMAT_BC3_UNORM_BLOCK:      return 134u; // WMTPixelFormatBC3_RGBA
+        case VK_FORMAT_BC3_SRGB_BLOCK:       return 135u; // WMTPixelFormatBC3_RGBA_sRGB
+        default:                             return 0u;
       }
     }
 
