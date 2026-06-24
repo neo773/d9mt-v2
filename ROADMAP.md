@@ -18,6 +18,28 @@ delta and a regression target.
 - [x] **Stage A** — frame-scoped present: one drawable/encoder per frame,
       present once at `Present()`, per-draw GPU stall gone. (`2aa7fe1`)
 - [x] **Stage B** — zero per-draw heap allocations (reused scratch). (`b056014`)
+- [x] **Phase 1.1 — programmable SM3 shaders** — ported the real DXVK
+      `DxvkIrShader` (dxbc-spirv IR→SPIR-V + binding-model lowering) over the
+      stub; `code_shader.exe` renders the RGB triangle. (`2f414cd`)
+- [x] **Phase 1.3 — index buffers + drawIndexed** — `code_index.exe`
+      renders via `DrawIndexedPrimitive`. (`712c11f`)
+
+### Phase 1.2 texture binding contract (decoded from generated MSL, for the loop)
+
+The convert module already reflects textures/samplers/heaps; the gap is the
+backend (app textures are stubbed — no MTLTexture). The PS MSL expects:
+- `buffer(0)` = sampler heap: device AB of `spvDescriptor<sampler>` (sampler
+  `gpu_resource_id`s), indexed by a 16-bit field in push data (`s0_s0_sPad`).
+- `buffer(2)` id(0) = the texture descriptor (texture `gpu_resource_id` in the
+  set-2 AB), accessed directly (not heap-indexed).
+- `buffer(7)` specData `psSamplerTypes`/`psSamplerModes` select sample mode;
+  `samplerType==3` returns black.
+- winemetal: `MTLDevice_newTexture`/`newSamplerState` (out `gpu_resource_id`),
+  `MTLTexture_replaceRegion` (upload), `WMTRenderCommandUseResource` (residency).
+- WATCH: SPIRV-Cross emitted `depth2d<float>` for the color sampler — the D3D9
+  sampler-type (shadow vs color) spec/permutation likely needs to flip it to
+  `texture2d`. Verify with `code_texture.exe` (checkerboard) and chase if the
+  quad is grayscale/black.
 
 What A+B are NOT: the Vulkan-ectomy. They were the prerequisite + hygiene. The
 real Vulkan removal is Phases 3–4 below, deliberately held until there's a real
