@@ -119,9 +119,21 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     `useResource`) must stay the BASE texture — making only the view resident
     leaves the pixels off-GPU. That fix was applied but still read black, so the
     remaining suspect is `MTLTexture_newTextureView`'s out `gpu_resource_id`
-    (verify it's non-zero and lands in the argument buffer). Note: the
-    single-frame GPU capture consistently fails to include the l8 color drawable
-    — verify with a screenshot, or fix the capture's multi-frame hang first.
+    (verify it's non-zero and lands in the argument buffer).
+  - *Attempt 2 (reverted):* isolated the swizzle by mapping `R8_UNORM` only (no
+    swizzle view) and rendering the L8 gradient through `texquad_ps`. Result was
+    WORSE than attempt 1: `code_l8`'s window stayed **unpainted** (not even the
+    clear color) and the GPU capture came back **empty / no color drawable /
+    no render encoders** — repeatably — whereas `code_texture` (RGBA8, identical
+    path) captures and renders fine. So the blocker is **R8 single-channel
+    sampling itself**, not the swizzle: creating an `R8Unorm` Metal texture and
+    binding it through the argument-buffer heap appears to fault the command
+    buffer (no present). Next investigation is the bindless-heap descriptor for
+    a 1-channel format (texture type / `gpu_resource_id` registration for R8),
+    NOT more swizzle work. Verification is also a hard blocker here: `code_l8`
+    captures are unreliable (unlike RGBA8/cube), so fixing the GPU capture's
+    multi-frame drawable-pool hang — or finding why R8 aborts the frame — should
+    come first.
 
 ---
 
