@@ -77,6 +77,30 @@ This is the most work but everything downstream depends on it, and it's what mak
 
 **Exit:** a real game (L4D2 / GTA IV) renders a frame. Unlocks Phases 2–4.
 
+### Toward the exit — feature coverage beyond items 1–4
+
+A real frame needs more than the four enumerated items. Landed so far:
+block-compressed textures (**BC1/2/3 / DXT**, `4231cf4` — the format almost all
+game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
+
+- **Render-to-texture** (shadow maps, post-processing — ubiquitous). Design,
+  kept tractable: reuse one command buffer per frame with a render pass per
+  bound target. `bindRenderTargets` reads color[0]'s `metalTexture` and calls a
+  backend `setColorTarget(tex)` (0 = backbuffer/drawable). The backend ends the
+  current encoder on a target switch and lazily opens a new render pass for the
+  next draw (drawable + present only for the backbuffer target). Create RT
+  textures with `RenderTarget | ShaderRead` usage. *Depth-format subtlety:* the
+  PSO always declares Depth32Float, so every pass must carry a matching depth
+  attachment — a first cut can require full-screen RTs that reuse `m_depthTexture`
+  (avoids adding the depth format to the PSO key); arbitrary RT sizes then need
+  per-size depth or a target-keyed PSO. Single command buffer = passes run
+  serially, so the offscreen result is ready for the backbuffer pass with no
+  intermediate commit.
+- **Cube textures** (skyboxes/reflections): texture type Cube + 6 faces; the
+  IR already bakes the sampler dimensionality from the DCL.
+- **Occlusion queries**, multi-RT, more uncompressed formats (with channel
+  swizzle for L8/A8/…).
+
 ---
 
 ## Phase 2 — Instrument *(cheap, mandatory before cutting)*
