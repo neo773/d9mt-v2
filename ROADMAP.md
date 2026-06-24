@@ -32,17 +32,29 @@ MTLTexture creation + `replaceRegion` upload (`copyBufferToImage`), sampler
 creation + bindless sampler heap, texture argument-buffer descriptors,
 residency, and `getSamplerHeapSet()` so the converter finds the heap.
 
-**Remaining blocker — `depth2d` returns one channel.** The uber-PS contains a
-`sample_compare` (shadow) path guarded by a *runtime* `samplerMode` (spec
-constants are lowered to a CBV in `DxvkIrShader::getCode` via
-`lowerSpecConstantsToCbv` when linkage is null). SPIRV-Cross therefore sees a
-Dref use and emits `depth2d<float>`, whose `.sample()` returns only the red
-channel (red/blue checker shows as black/white). Fix: prune the shadow path so
-SPIRV-Cross emits `texture2d`. The clean approach is an IR-level permutation —
-in the ported `dxvk_shader_ir.cpp`, replace the sampler-mode/type spec-constant
-SSA values with literals for the bound sampler state (so `legalizeIr` DCE kills
-the dead Dref branch), keyed into the shader cache by those values. Do NOT
-touch the SPIR-V→MSL convert module; the fix belongs in the IR getCode path.
+**Remaining blocker — `depth2d` returns one channel.** The uber-PS has a
+`sample_compare` (shadow) path guarded by `isDepth = samplerMode >= Dref`.
+SPIRV-Cross sees the Dref op and emits `depth2d<float>`, whose `.sample()`
+returns only the red channel (red/blue checker shows as black/white). To get
+`texture2d`, the Dref op must be eliminated from the SPIR-V before SPIRV-Cross.
+
+Investigated (and reverted) an IR spec-constant fold: replacing each
+`eDclSpecConstant` with its concrete value and running Arithmetic+CFG+RemoveUnused
+to DCE the dead branch. **It does not work alone** because the D3D9 converter
+emits sampler-state reads through *helper functions* (`samplerMode(uint index)`
+= `extract_bits(specValue, index*2, 2)`); after folding, the value is constant
+but the bit-extract is still parameterized by the function arg, so it never
+collapses — and dxbc-spirv has **no function-inlining pass** (confirmed:
+`FunctionCleanupPass` only removes unused params; `SpirvBuilder` emits real
+`OpFunctionCall`). Folding *all* spec constants also wrongly forces a shader
+recompile on every spec-data change (alpha test, fog, …) — the current path
+keeps those as a runtime CBV (one compile), which is the efficient design.
+
+**Correct fix (deferred — substantial):** (1) an IR pass that inlines the
+sampler-state helper functions so the constant sampler index propagates, then
+(2) specialize ONLY the sampler-type/mode spec constants (not the runtime ones)
+keyed by sampler types, and DCE the Dref path → `texture2d`. Belongs in the
+ported `dxvk_shader_ir.cpp` (the IR path), never the SPIR-V→MSL convert module.
 
 ### Phase 1.2 texture binding contract (decoded from generated MSL, for the loop)
 
