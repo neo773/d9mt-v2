@@ -1,0 +1,24 @@
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_03c3048e1a56de 358-363
+dxvk/dxvk_shader_convert.cpp
+  s_85f47c9b3164ad::t_d249e5db9b10c6 156-158
+  s_85f47c9b3164ad::t_9a9d608da5f9ad 155
+dxvk/dxvk_shader_convert.h
+  s_85f47c9b3164ad::t_8a2d583860fb3e 28-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "8725de19e626f0043620f3b5b602ef4663f97026",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
