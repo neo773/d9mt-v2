@@ -1,0 +1,32 @@
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_8e40f393d5ce50 53-61
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_7a08ab5bacc882 333,339
+  s_85f47c9b3164ad::t_6e4859e668ceb0 414-428,431-432,434-455
+  s_85f47c9b3164ad::t_229db10193bb67 360
+dxvk/dxvk_context.h
+  s_85f47c9b3164ad::t_b452203d8b05a0 314-316
+  s_85f47c9b3164ad::t_70d5d688fc8f45 590-594
+  s_85f47c9b3164ad::t_cdbe56f6a1f410 261-263,265-267
+  s_85f47c9b3164ad::t_c8fc0c878bde6a 514-519
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_c55ccb746f1213 197-201
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_62fedeacace005 414-436
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "712c11f00244c4ae9bf0b99f18c3d5217e90ae6e",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
