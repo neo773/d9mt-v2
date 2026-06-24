@@ -468,6 +468,7 @@ namespace dxvk {
     m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
     m_frameEncoder = MTLCommandBuffer_renderCommandEncoder(m_frameCommandBuffer, &renderPass);
     m_frameOpen = true;
+    m_residentThisFrame.clear();
   }
 
   void D9mtBackend::appendDraw(const D9mtPipelineDraw& draw) {
@@ -509,9 +510,14 @@ namespace dxvk {
     }
 
     // Make every argument-buffer-referenced resource resident so the GPU can
-    // follow the addresses written into the argument buffers.
+    // follow the addresses written into the argument buffers — but only the
+    // first time each resource is seen this frame; residency persists for the
+    // encoder, so re-emitting it for later draws is wasted work.
+    uint32_t residencyCount = 0;
     for (uint32_t i = 0; i < draw.residentCount; i++) {
-      wmtcmd_render_useresource& cmd = residencyCommands[i];
+      if (!m_residentThisFrame.insert(draw.residentBuffers[i]).second)
+        continue;
+      wmtcmd_render_useresource& cmd = residencyCommands[residencyCount++];
       cmd.type     = WMTRenderCommandUseResource;
       cmd.resource = draw.residentBuffers[i];
       cmd.usage    = WMTResourceUsageRead;

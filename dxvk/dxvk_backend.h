@@ -9,6 +9,7 @@
 // This is the foundation every other shim module leans on (SHIM_SPEC.md).
 
 #include <cstdint>
+#include <unordered_set>
 
 namespace dxvk {
 
@@ -161,6 +162,11 @@ namespace dxvk {
     // at the drawable size so depth-tested draws have a depth buffer to compare
     // against; the color-only triangle path leaves the default always-pass state.
     uint64_t m_depthTexture  = 0;
+
+    // Resources already made resident in the current frame. Metal residency
+    // persists for the encoder's lifetime, so a resource referenced by many
+    // draws only needs one useResource per frame, not one per draw.
+    std::unordered_set<uint64_t> m_residentThisFrame;
 
     // Open-frame state (Stage A). Non-zero handles mean a frame is in flight.
     uint64_t m_frameDrawable      = 0;
