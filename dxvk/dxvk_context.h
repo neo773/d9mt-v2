@@ -512,7 +512,7 @@ namespace dxvk {
       uint32_t blocksPerRow = (dstExtent.width + blockWidth - 1u) / blockWidth;
       m_backend->uploadTexture(dstImage->metalTexture(), dstSubresource.mipLevel,
         uint32_t(dstOffset.x), uint32_t(dstOffset.y), dstExtent.width, dstExtent.height,
-        src, uint32_t(blocksPerRow * fmt->elementSize));
+        src, uint32_t(blocksPerRow * fmt->elementSize), dstSubresource.baseArrayLayer);
     }
     void copyImage(const Rc<DxvkImage>& dstImage, VkImageSubresourceLayers dstSubresource, VkOffset3D dstOffset,
                    const Rc<DxvkImage>& srcImage, VkImageSubresourceLayers srcSubresource, VkOffset3D srcOffset,

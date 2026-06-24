@@ -117,12 +117,13 @@ namespace dxvk {
     // descriptor) to gpuResourceIdOut.
     uint64_t createSampledTexture(uint32_t width, uint32_t height, uint32_t mipLevels,
                                   uint32_t metalPixelFormat, uint32_t metalUsage,
-                                  uint64_t* gpuResourceIdOut);
+                                  uint64_t* gpuResourceIdOut, bool cube = false);
 
-    // Uploads a tightly-packed region into one mip level of a texture.
+    // Uploads a tightly-packed region into one mip level (and array slice / cube
+    // face) of a texture.
     void uploadTexture(uint64_t texture, uint32_t mipLevel, uint32_t x, uint32_t y,
-                       uint32_t width, uint32_t height,
-                       const void* data, uint32_t bytesPerRow);
+                       uint32_t width, uint32_t height, const void* data,
+                       uint32_t bytesPerRow, uint32_t arraySlice = 0u);
 
     // Creates a sampler from already-translated Metal sampler parameters and
     // returns its handle; writes the sampler's gpuResourceID (for the sampler

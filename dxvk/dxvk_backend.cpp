@@ -168,7 +168,8 @@ namespace dxvk {
                                              uint32_t mipLevels,
                                              uint32_t metalPixelFormat,
                                              uint32_t metalUsage,
-                                             uint64_t* gpuResourceIdOut) {
+                                             uint64_t* gpuResourceIdOut,
+                                             bool cube) {
     if (gpuResourceIdOut)
       *gpuResourceIdOut = 0;
 
@@ -177,8 +178,8 @@ namespace dxvk {
     info.width              = width;
     info.height             = height;
     info.depth              = 1u;
-    info.array_length       = 1u;
-    info.type               = WMTTextureType2D;
+    info.array_length       = 1u;  // a single cube is six faces, not an array
+    info.type               = cube ? WMTTextureTypeCube : WMTTextureType2D;
     info.mipmap_level_count = mipLevels ? mipLevels : 1u;
     info.sample_count       = 1u;
     info.usage              = WMTTextureUsage(metalUsage);
@@ -202,15 +203,17 @@ namespace dxvk {
   void D9mtBackend::uploadTexture(uint64_t texture, uint32_t mipLevel,
                                   uint32_t x, uint32_t y,
                                   uint32_t width, uint32_t height,
-                                  const void* data, uint32_t bytesPerRow) {
+                                  const void* data, uint32_t bytesPerRow,
+                                  uint32_t arraySlice) {
     if (!texture || !data)
       return;
     WMTOrigin origin = { x, y, 0u };
     WMTSize   size   = { width, height, 1u };
     WMTMemoryPointer ptr = {};
     ptr.set(const_cast<void*>(data));
-    // bytes-per-image is 0 for a 2D (non-array) texture region.
-    MTLTexture_replaceRegion(texture, origin, size, mipLevel, 0u, ptr, bytesPerRow, 0u);
+    // arraySlice selects a cube face (0..5) or array layer; bytes-per-image is 0
+    // for a single 2D slice.
+    MTLTexture_replaceRegion(texture, origin, size, mipLevel, arraySlice, ptr, bytesPerRow, 0u);
   }
 
   uint64_t D9mtBackend::createSampler(uint32_t minFilter, uint32_t magFilter,

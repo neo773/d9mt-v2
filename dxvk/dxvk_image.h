@@ -183,9 +183,10 @@ namespace dxvk {
         uint32_t metalUsage = 1u;  // WMTTextureUsageShaderRead
         if (createInfo.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
           metalUsage |= 4u;        // WMTTextureUsageRenderTarget
+        bool cube = (createInfo.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0u;
         m_metalTexture = backend.createSampledTexture(
           createInfo.extent.width, createInfo.extent.height,
-          createInfo.mipLevels, metalFormat, metalUsage, &m_gpuResourceId);
+          createInfo.mipLevels, metalFormat, metalUsage, &m_gpuResourceId, cube);
       }
     }
 
