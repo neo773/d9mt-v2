@@ -312,4 +312,131 @@ namespace dxvk {
     NSObject_release(pool);
   }
 
+  // --- Frame lifecycle (Stage A) ---------------------------------------------
+  // Split renderAndPresent's per-draw acquire/encode/present/stall into a
+  // per-FRAME shape: beginFrame opens one drawable + command buffer + encoder,
+  // appendDraw accumulates draws into that single encoder, and
+  // endFrameAndPresent ends/presents/commits/waits once.
+
+  void D9mtBackend::beginFrame(bool clear, uint32_t clearColorArgb) {
+    // Remember the clear request so a draw-less (clear-only) frame can still
+    // present a cleared image when endFrameAndPresent opens the frame itself.
+    m_pendingClear = clear;
+    m_pendingClearColor = clearColorArgb;
+
+    // Idempotent within a frame: only the first call per frame opens the
+    // encoder; later beginFrame calls (e.g. one before every draw) are no-ops.
+    if (m_frameOpen)
+      return;
+    if (!m_layer)
+      return;
+
+    // One autorelease pool held across the whole frame (released at frame end).
+    m_framePool = NSAutoreleasePool_alloc_init();
+
+    m_frameDrawable = MetalLayer_nextDrawable(m_layer);
+    if (!m_frameDrawable) {
+      // No drawable available — leave the frame closed and drop this pool.
+      NSObject_release(m_framePool);
+      m_framePool = 0;
+      return;
+    }
+    uint64_t drawableTexture = MetalDrawable_texture(m_frameDrawable);
+
+    // Render pass identical to renderAndPresent: clear the drawable (when
+    // asked) then load into the open encoder. clearColorArgb is raw D3DCOLOR.
+    WMTRenderPassInfo renderPass = {};
+    renderPass.colors[0].texture = drawableTexture;
+    renderPass.colors[0].load_action = clear ? WMTLoadActionClear : WMTLoadActionLoad;
+    renderPass.colors[0].store_action = WMTStoreActionStore;
+    renderPass.colors[0].clear_color.r = ((clearColorArgb >> 16) & 0xff) / 255.0;
+    renderPass.colors[0].clear_color.g = ((clearColorArgb >> 8)  & 0xff) / 255.0;
+    renderPass.colors[0].clear_color.b = ((clearColorArgb)       & 0xff) / 255.0;
+    renderPass.colors[0].clear_color.a = ((clearColorArgb >> 24) & 0xff) / 255.0;
+    renderPass.render_target_width = m_width;
+    renderPass.render_target_height = m_height;
+    renderPass.default_raster_sample_count = 1;
+
+    m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
+    m_frameEncoder = MTLCommandBuffer_renderCommandEncoder(m_frameCommandBuffer, &renderPass);
+    m_frameOpen = true;
+  }
+
+  void D9mtBackend::appendDraw(const D9mtPipelineDraw& draw) {
+    if (!m_frameOpen || !m_frameEncoder || !draw.pipelineState)
+      return;
+
+    // Same POD command chain as renderAndPresent(D9mtPipelineDraw): set pipeline
+    // -> make resources resident -> bind every buffer -> draw. The buffer/
+    // residency packets live in vectors with stable addresses (sized up front)
+    // so the `next` links stay valid until encodeCommands consumes them.
+    // encodeCommands appends onto the still-open encoder — no end/present here.
+    wmtcmd_render_setpso setPipeline = {};
+    wmtcmd_render_draw   drawCmd     = {};
+    std::vector<wmtcmd_render_setbuffer>    bufferCommands(draw.bindingCount);
+    std::vector<wmtcmd_render_useresource>  residencyCommands(draw.residentCount);
+
+    setPipeline.type = WMTRenderCommandSetPSO;
+    setPipeline.pso  = draw.pipelineState;
+
+    wmtcmd_base* tail = reinterpret_cast<wmtcmd_base*>(&setPipeline);
+
+    // Make every argument-buffer-referenced resource resident so the GPU can
+    // follow the addresses written into the argument buffers.
+    for (uint32_t i = 0; i < draw.residentCount; i++) {
+      wmtcmd_render_useresource& cmd = residencyCommands[i];
+      cmd.type     = WMTRenderCommandUseResource;
+      cmd.resource = draw.residentBuffers[i];
+      cmd.usage    = WMTResourceUsageRead;
+      cmd.stages   = WMTRenderStages(WMTRenderStageVertex | WMTRenderStageFragment);
+      tail->next.set(&cmd);
+      tail = reinterpret_cast<wmtcmd_base*>(&cmd);
+    }
+
+    for (uint32_t i = 0; i < draw.bindingCount; i++) {
+      const D9mtBufferBinding& binding = draw.bindings[i];
+      wmtcmd_render_setbuffer& cmd = bufferCommands[i];
+      cmd.type   = binding.fragmentStage ? WMTRenderCommandSetFragmentBuffer
+                                          : WMTRenderCommandSetVertexBuffer;
+      cmd.buffer = binding.buffer;
+      cmd.offset = binding.offset;
+      cmd.index  = uint8_t(binding.index);
+      tail->next.set(&cmd);
+      tail = reinterpret_cast<wmtcmd_base*>(&cmd);
+    }
+
+    drawCmd.type           = WMTRenderCommandDraw;
+    drawCmd.primitive_type = WMTPrimitiveTypeTriangle;
+    drawCmd.vertex_start   = 0;
+    drawCmd.vertex_count   = draw.vertexCount;
+    drawCmd.instance_count = 1;
+    drawCmd.base_instance  = 0;
+    tail->next.set(&drawCmd);
+
+    MTLRenderCommandEncoder_encodeCommands(
+        m_frameEncoder, reinterpret_cast<const wmtcmd_base*>(&setPipeline));
+  }
+
+  void D9mtBackend::endFrameAndPresent() {
+    // Clear-only frame: nobody opened the encoder, so open one now using the
+    // last clear seen by beginFrame so the cleared image still gets presented.
+    if (!m_frameOpen) {
+      beginFrame(m_pendingClear, m_pendingClearColor);
+      if (!m_frameOpen)
+        return;  // still couldn't open (e.g. no drawable) — nothing to present.
+    }
+
+    MTLCommandEncoder_endEncoding(m_frameEncoder);
+    MTLCommandBuffer_presentDrawable(m_frameCommandBuffer, m_frameDrawable);
+    MTLCommandBuffer_commit(m_frameCommandBuffer);
+    MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
+
+    if (m_framePool)
+      NSObject_release(m_framePool);
+
+    // Reset frame state — zero handles mean no frame is in flight.
+    m_frameDrawable = m_frameCommandBuffer = m_frameEncoder = m_framePool = 0;
+    m_frameOpen = false;
+  }
+
 }

@@ -89,6 +89,29 @@ namespace dxvk {
     // (the real translated-shader path).
     void renderAndPresent(const D9mtPipelineDraw& draw);
 
+    // --- Frame lifecycle (Stage A) -------------------------------------------
+    // One drawable + command buffer + render command encoder per PRESENTED
+    // frame. Draws accumulate into the open encoder; the drawable is presented
+    // and the command buffer committed once, at frame end — replacing the
+    // per-draw acquire/present/stall of renderAndPresent.
+
+    // Opens the frame (next drawable, command buffer, render encoder) if not
+    // already open, clearing to clearColorArgb when `clear` is set. Idempotent
+    // within a frame: only the first call opens; later calls are no-ops. Safe to
+    // call before every draw. Remembers the clear so a draw-less (clear-only)
+    // frame can still present a cleared image at endFrameAndPresent.
+    void beginFrame(bool clear, uint32_t clearColorArgb);
+
+    // Encodes one pipeline draw into the open frame encoder (no present, no
+    // commit). beginFrame must have opened the frame first; the draw's own
+    // clear fields are ignored (clearing is a frame-open concern).
+    void appendDraw(const D9mtPipelineDraw& draw);
+
+    // Ends the open encoder, presents the drawable, commits, waits, resets frame
+    // state. If no frame is open (clear-only frame), opens + clears one first
+    // using the last clear seen by beginFrame so the cleared frame still shows.
+    void endFrameAndPresent();
+
   private:
     uint64_t m_device        = 0;
     uint64_t m_queue         = 0;
@@ -98,6 +121,15 @@ namespace dxvk {
     uint64_t m_pipelineState = 0;
     uint32_t m_width         = 0;
     uint32_t m_height        = 0;
+
+    // Open-frame state (Stage A). Non-zero handles mean a frame is in flight.
+    uint64_t m_frameDrawable      = 0;
+    uint64_t m_frameCommandBuffer = 0;
+    uint64_t m_frameEncoder       = 0;
+    uint64_t m_framePool          = 0;     // NSAutoreleasePool held across the frame
+    bool     m_frameOpen          = false;
+    bool     m_pendingClear       = false;  // last clear request seen by beginFrame
+    uint32_t m_pendingClearColor  = 0;
   };
 
   // The one backend the active device created. Set in DxvkDevice::initialize so

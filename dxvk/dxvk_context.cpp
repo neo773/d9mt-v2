@@ -406,7 +406,8 @@ namespace dxvk {
     pipelineDraw.vertexCount     = d.vertexCount;
     pipelineDraw.clear           = m_clearPending;
     pipelineDraw.clearColorArgb  = m_clearColorArgb;
-    m_backend->renderAndPresent(pipelineDraw);
+    m_backend->beginFrame(m_clearPending, m_clearColorArgb);
+    m_backend->appendDraw(pipelineDraw);
 
     m_clearPending = false;
   }

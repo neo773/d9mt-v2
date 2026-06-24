@@ -77,10 +77,11 @@ namespace dxvk {
     const Rc<DxvkLatencyTracker>& tracker,
           uint64_t                frameId,
           DxvkSubmitStatus*       status) {
-    // The present module (swapchain blitter / presenter shim) drives the actual
-    // backend present through the backend it shares with us. Here we have no
-    // extra submission work to perform.
+    // The per-frame present boundary: the backend now presents the frame that
+    // DxvkContext::draw has been accumulating into the open encoder, ending the
+    // encoder, presenting the drawable, and committing the command buffer.
     (void)presenter; (void)tracker; (void)frameId; (void)status;
+    m_backend->endFrameAndPresent();
   }
 
 }
