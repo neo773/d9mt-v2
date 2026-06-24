@@ -143,15 +143,16 @@ namespace dxvk {
             uint32_t              binding,
             DxvkBufferSlice&&     buffer,
             uint32_t              stride) {
-    (void) stride;
-
     // Remember every bound stream (not just binding 0) — the FF input layout
     // also references a null stream for unused attributes, and Metal drops the
     // draw if any referenced vertex buffer index is unbound. An empty slice
-    // (the frontend's unbind) yields handle 0, which we skip at draw time.
+    // (the frontend's unbind) yields handle 0, which we skip at draw time. The
+    // stride is the D3D9 SetStreamSource stride; Metal bakes it into the PSO's
+    // vertex layout (Vulkan keeps it dynamic, but Metal cannot).
     BoundVertexStream& stream = m_vertexBuffers[binding];
     stream.handle = buffer.bufferHandle();
     stream.offset = buffer.offset();
+    stream.stride = stride;
   }
 
 
@@ -230,7 +231,14 @@ namespace dxvk {
       DxvkVertexBinding binding = input.binding();
       MetalVertexStream stream;
       stream.bufferIndex  = VertexBufferBase + binding.binding;
-      stream.stride       = binding.extent ? binding.extent : 4u;  // Metal rejects stride 0
+      // The real per-vertex stride is the bound stream's SetStreamSource stride;
+      // binding.extent is only the attributes' reach (the last offset), which
+      // undercounts a trailing attribute and missteps the vertices. Fall back to
+      // it when the stream is unbound. Metal rejects a zero stride.
+      auto bound = m_vertexBuffers.find(binding.binding);
+      uint32_t boundStride = bound != m_vertexBuffers.end() ? bound->second.stride : 0u;
+      stream.stride       = boundStride ? boundStride
+                          : (binding.extent ? binding.extent : 4u);
       stream.stepFunction = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? 2u : 1u;
       stream.stepRate     = 1u;
       layout.streams.push_back(stream);

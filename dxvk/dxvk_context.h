@@ -631,7 +631,7 @@ namespace dxvk {
     // Every stream the input layout references must be bound (binding b at Metal
     // buffer VertexBufferBase + b), including the FF "null" stream that backs
     // unused attributes — leaving one unbound makes Metal drop the draw.
-    struct BoundVertexStream { uint64_t handle = 0; uint64_t offset = 0; };
+    struct BoundVertexStream { uint64_t handle = 0; uint64_t offset = 0; uint32_t stride = 0; };
     std::unordered_map<uint32_t, BoundVertexStream> m_vertexBuffers;
 
     // Bound index buffer (bindIndexBuffer): Metal handle + byte offset + the
