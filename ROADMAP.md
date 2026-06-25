@@ -189,7 +189,16 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     and dump it to a PNG from the unixlib (`d9mtmetal/unix.m` can do a blit +
     `getBytes`), bypassing both gpudebug replay and the window. With that, the
     offscreen-draw question (and MRT, and any future feature) becomes a 2-second
-    ground-truth check instead of a guessing game. Suspects if it IS real: (1) a Private RT used
+    ground-truth check instead of a guessing game. **DONE (commit 6bb08e0):**
+    `dumpTextureToFile` blits the last offscreen target to a shared buffer and
+    writes raw BGRA8 to `C:/d9mt-test/rt_dump.bin` when `DUMP_RT` exists. Used it
+    to CONFIRM, via ground truth, that the offscreen draw writes nothing (the RT
+    reads back as the clear `0x101010`, not the drawn green). So the bug is
+    DEFINITIVELY real, and verification is no longer the bottleneck — the next
+    session can bisect `appendDraw` for offscreen with a reliable check each
+    iteration. Suspects (every recorded encoder-state difference vs a working
+    backbuffer draw is already eliminated, so look at GPU-execution-level state):
+    (1) a Private RT used
     as a draw target needs residency/`useResource` the backbuffer drawable
     doesn't; (2) the viewport y-flip normalization uses the drawable height
     instead of the offscreen RT's, pushing the quad off-target; (3) offscreen
