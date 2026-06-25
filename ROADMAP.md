@@ -213,6 +213,37 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     also unreliable). Either outcome finally splits frontend-vs-shim. NOTE: do
     NOT re-attempt the swizzled-view or upload-expansion fixes — both are proven
     not to address this; the bug is upstream of the texture format.
+  - *Ran it — `D3DFMT_A8R8G8B8` + gradient is ALSO invisible.* So the texture
+    format is fully eliminated: `code_l8` is invisible with R8/A8/RGBA8/A8R8G8B8
+    while `code_texture` (A8R8G8B8) renders, with byte-identical shaders and the
+    same quad. The ONLY remaining differences are the texture **size** (16×16 vs
+    `code_texture`'s 8×8) and **data** (gradient vs checkerboard), or something
+    tied to the `code_l8.exe` process/window itself (both its GPU captures and
+    its live window paint have been unreliable all along, unlike `code_texture`/
+    `code_shader`/`code_cube`). **Final isolating experiment for next session:**
+    make `code_l8` literally `code_texture` (8×8 A8R8G8B8 checkerboard, identical
+    code) under the `code_l8.exe` name. If it renders → the bug is the 16×16
+    size or the gradient data (a real but narrow shim bug). If it is STILL
+    invisible → the defect is environmental to that exe/window/capture, not the
+    renderer at all, and the entire L8 thread has been chasing a verification
+    ghost — re-validate L8 with a fresh `code_texture`-derived harness. This is
+    the single most important thing to settle before any more L8 work.
+  - **RAN IT — VERIFICATION GHOST CONFIRMED.** Made `code_l8.c` a byte-identical
+    clone of `code_texture.c` (8×8 A8R8G8B8 red/blue checkerboard, same quad,
+    same shader, same everything — only the window-class/exe name `code_l8`
+    differs) and it is STILL invisible in the capture, while `code_texture.exe`
+    renders the checkerboard. **So the renderer is NOT the problem — `code_l8.exe`
+    itself captures/displays blank regardless of its contents.** The whole L8
+    thread this session was chasing a broken test exe, not a driver bug. L8/A8
+    texture support is therefore UNVERIFIED, not broken — likely fine. ACTION for
+    next session: (1) figure out why `code_l8.exe` specifically captures blank
+    (stale build cached in the bottle? window never composited? the run/ capture
+    harness keys on something?) — start by diffing the deployed `code_l8.exe` vs
+    `code_texture.exe` and trying a brand-new exe name; (2) once a reliable
+    single-channel harness exists, the actual L8 fix is almost certainly just
+    adding `R8_UNORM`/`R8G8_UNORM` to `metalPixelFormatFromVulkan` (+ the rrr1/
+    000a/rrrg swizzle), which all the prior analysis already worked out. Do NOT
+    trust `code_l8.exe` for any further verification.
 
 ---
 
