@@ -111,6 +111,26 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     harness FIRST (rename it, run identical code) before deep-diving the driver.
     The fix itself was exactly the few lines the early analysis predicted.
 - **Occlusion queries**, multi-RT — remaining before the real-game exit.
+  - *Multi-RT scope (investigated, ready to implement):* GTA IV's deferred
+    G-buffer needs MRT. Five touch points: (1) `metalBuildRenderPipeline`
+    (`dxvk_metal_shader_pipeline.*`) hardcodes one color format `80u` BGRA8 —
+    take an array of `(format, blend)` per attachment; (2) the PSO cache key in
+    `DxvkContext::draw` (~ctx.cpp:570) must fold in the RT count + formats; (3)
+    `bindRenderTargets` (ctx.cpp:88) currently keeps only `color[0]` — collect
+    all `targets.color[i]` and pass them down (new `setColorTargets` array,
+    replacing `setColorTarget`); (4) the backend stores the array and writes
+    `renderPass.colors[i]` for each in `beginFrame`/`endFrameAndPresent` (only
+    the backbuffer `color[0]` drawable presents; offscreen MRT attachments are
+    Private RT textures from `createSampledTexture`); (5) `buildBlendState`
+    becomes per-attachment. Test: `code_mrt.exe` — bind 2 RTs, a PS writing
+    `oC0`/`oC1` distinct colors (assemble via `scripts/assemble-shaders.sh`),
+    sample both, capture-verify each. The shader IR already emits multiple
+    fragment outputs, so the shim side is the whole job.
+  - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
+    today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
+    Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
+    read the counter at `getData`. Verify by asserting the count ≈ the drawn
+    area (a number, not a pixel — no visual capture).
 
 ---
 
