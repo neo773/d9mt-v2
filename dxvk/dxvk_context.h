@@ -624,6 +624,36 @@ namespace dxvk {
     void*                 m_specDataBufferCpu = nullptr;
     uint64_t              m_specDataAddress   = 0;
 
+    // A shared, zero-filled buffer used as the descriptor for any constant
+    // buffer a shader declares but the frontend never bound — so the GPU reads
+    // zeros instead of dereferencing a null argument-buffer address.
+    uint64_t              m_nullBuffer        = 0;
+    uint64_t              m_nullBufferAddress = 0;
+    uint64_t nullBufferAddress() {
+      if (!m_nullBuffer) {
+        // Large enough to cover the biggest constant buffer a shader might read
+        // (D3D9 float constants + vertex-blend matrices), so an unbound CBV read
+        // never runs off the end of the buffer into a fault.
+        void* cpu = nullptr;
+        m_nullBuffer = m_backend->createSharedBuffer(65536u, &cpu, &m_nullBufferAddress);
+        if (cpu)
+          std::memset(cpu, 0, 65536u);
+      }
+      return m_nullBufferAddress;
+    }
+
+    // A 1x1 texture bound for any sampled-image slot a shader declares but the
+    // frontend never set, so sampling reads a valid (black) texel instead of
+    // faulting on an invalid resource ID.
+    uint64_t              m_nullTexture           = 0;
+    uint64_t              m_nullTextureResourceId = 0;
+    uint64_t nullTextureResourceId() {
+      if (!m_nullTexture)
+        m_nullTexture = m_backend->createSampledTexture(
+          1u, 1u, 1u, 80u /* BGRA8 */, 1u /* ShaderRead */, &m_nullTextureResourceId);
+      return m_nullTextureResourceId;
+    }
+
     // Uploads m_specConstantData into m_specDataBuffer; returns its GPU address.
     uint64_t uploadSpecData();
 

@@ -473,6 +473,14 @@ namespace dxvk {
             if (bound != m_uniformBuffers.end() && bound->second.address) {
               slots[ref.abId] = bound->second.address;
               residentBuffers.push_back(bound->second.handle);
+            } else {
+              // The shader declares this constant buffer but the frontend bound
+              // nothing (e.g. a vertex-blend CBV referenced with skinning off).
+              // D3D9 reads unbound constants as undefined; point the slot at a
+              // shared zero buffer so the GPU reads zeros instead of faulting on
+              // a null address.
+              slots[ref.abId] = nullBufferAddress();
+              residentBuffers.push_back(m_nullBuffer);
             }
           }
         } else if (ref.type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
@@ -483,6 +491,12 @@ namespace dxvk {
             slots[ref.abId] = tex->second.resourceId;
             if (tex->second.handle)
               residentBuffers.push_back(tex->second.handle);
+          } else {
+            // Shader declares this texture but the frontend bound none — give it
+            // a valid 1x1 descriptor so sampling reads black instead of faulting
+            // on an invalid resource ID.
+            slots[ref.abId] = nullTextureResourceId();
+            residentBuffers.push_back(m_nullTexture);
           }
         }
       }
