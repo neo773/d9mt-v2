@@ -1,0 +1,29 @@
+test/code_offdraw.c
+  s_85f47c9b3164ad::t_d60f1762c0caac 1-125
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_54c350c3d9520e 211-213
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_d06e659c4d376e 243-247
+  s_85f47c9b3164ad::t_16d3ca2a53a8de 12
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_fadd59626c3d75 620-629,633,637-638
+  s_85f47c9b3164ad::t_d0d0f6a8f55dcf 502-522
+ROADMAP.md
+  s_85f47c9b3164ad::t_6ff154b8977736 152-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "67e13f92e8f15518a77fd2ad993f17bc4baef883",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
