@@ -285,12 +285,22 @@ namespace dxvk {
     void bindUniformBuffer(VkShaderStageFlags stages, uint32_t slot, DxvkBufferSlice&& buffer) {
       (void) stages;
       BoundUniformBuffer& bound = m_uniformBuffers[slot];
-      bound.address = buffer.defined() ? buffer.gpuAddress()  : 0u;
+      bound.base    = buffer.defined() ? buffer.gpuAddress()  : 0u;
+      bound.address = bound.base;
       bound.handle  = buffer.defined() ? buffer.bufferHandle() : 0u;
     }
 
+    // A constant buffer is bound once (full buffer, via bindUniformBuffer) then
+    // sub-allocated in a ring: each draw's constants live at an advancing offset,
+    // and the frontend calls this to point the shader at that offset. Update the
+    // argument-buffer address to base + offset; without this every draw reads the
+    // buffer's start (stale/zero constants) — which left GTA IV's per-draw bone
+    // matrices reading zero, collapsing all skinned geometry to the origin.
     void bindUniformBufferRange(VkShaderStageFlags stages, uint32_t slot, VkDeviceSize offset, VkDeviceSize length) {
-      (void) stages; (void) slot; (void) offset; (void) length;
+      (void) stages; (void) length;
+      auto it = m_uniformBuffers.find(slot);
+      if (it != m_uniformBuffers.end())
+        it->second.address = it->second.base + offset;
     }
 
     // Record the texture bound at `slot`: its argument-buffer resource ID (the
@@ -660,7 +670,7 @@ namespace dxvk {
     // GPU address + Metal handle of the uniform buffer bound at each slot
     // (bindUniformBuffer). The address goes into argument buffers; the handle is
     // made resident so the GPU can follow that address.
-    struct BoundUniformBuffer { uint64_t address = 0; uint64_t handle = 0; };
+    struct BoundUniformBuffer { uint64_t address = 0; uint64_t handle = 0; uint64_t base = 0; };
     std::unordered_map<uint32_t, BoundUniformBuffer> m_uniformBuffers;
 
     // Scratch argument buffers, keyed by (stageKey << 8 | descriptorSet); each
