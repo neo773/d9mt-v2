@@ -193,14 +193,26 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     format (R8, A8) produces no fragment output** through this bindless sampling
     path, while RGBA8 works with everything else identical. The defect is in
     sampling a 1-channel `texture2d<float>` via the argument-buffer heap.
-  - *Redirected fix (implement next, not more swizzle work):* create A8/L8/A8L8
-    D3D9 textures as a real **RGBA8** Metal texture and expand+swizzle the source
-    bytes on upload in `copyBufferToImage`: L8→(r,r,r,1), A8→(0,0,0,a),
-    A8L8→(r,r,r,g). RGBA8 sampling is proven working, so this sidesteps the
-    single-channel bug entirely (and subsumes the swizzle). Distinguish the three
-    (they share VkFormat `R8_UNORM`/`R8G8_UNORM`) by the view's `packedSwizzle`,
-    captured onto the image at first view creation, or by threading the D3D9
-    format through `createImage`. Static capture analysis is fully exhausted.
+  - *Even the RGBA8-expansion was DISPROVEN — the single-channel theory is also
+    wrong.* Implemented the upload-expansion (create L8 as RGBA8, widen each byte
+    to `(r,r,r,255)`): confirmed via capture that the L8 texture (`@tex0`) is now
+    `RGBA8Unorm` holding the correct grayscale ramp — and `code_l8` is **STILL
+    invisible**. Meanwhile `code_texture` (a normal RGBA8 8×8 checkerboard)
+    renders perfectly in a fresh capture, and its fragment MSL is **byte-for-byte
+    identical** to `code_l8`'s (same `sampleTexture_0_s0`, same `main0`, same
+    `alphaTest{return true}`). So with the texture format, the shader, the
+    geometry, and ALL pipeline state proven identical to a working draw, the
+    `code_l8` quad writes nothing. The remaining differences are only: texture
+    size (16×16 vs 8×8), texture data, and the D3D9 source format (`L8` vs
+    `A8R8G8B8`) driving the frontend path. **Decisive next experiment:** change
+    `code_l8` to allocate a `D3DFMT_A8R8G8B8` texture (like `code_texture`) but
+    keep the gradient data — if THAT renders, the bug is the frontend's `L8`
+    handling (sampler/spec-data/coordinate path), not anything in the Metal shim;
+    if it's still invisible, it's the data/size or a gpudebug-replay artifact
+    (`code_l8` captures may simply be mis-replaying — the live window paint is
+    also unreliable). Either outcome finally splits frontend-vs-shim. NOTE: do
+    NOT re-attempt the swizzled-view or upload-expansion fixes — both are proven
+    not to address this; the bug is upstream of the texture format.
 
 ---
 
