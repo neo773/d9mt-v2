@@ -1,4 +1,5 @@
 #include "dxvk_device.h"
+#include "dxvk_presenter.h"   // Presenter::signalFrame — advance the frame-latency fence
 
 namespace dxvk {
 
@@ -80,8 +81,15 @@ namespace dxvk {
     // The per-frame present boundary: the backend now presents the frame that
     // DxvkContext::draw has been accumulating into the open encoder, ending the
     // encoder, presenting the drawable, and committing the command buffer.
-    (void)presenter; (void)tracker; (void)frameId; (void)status;
+    (void)status;
     m_backend->endFrameAndPresent();
+
+    // Signal the frame-latency fence. The backend present is synchronous (it
+    // waits for the GPU), so by here frameId is fully complete — without this
+    // the swapchain's SyncFrameLatency wait never advances and Present blocks
+    // forever once frameId exceeds the max frame latency (a few frames in).
+    if (presenter != nullptr)
+      presenter->signalFrame(frameId, tracker);
   }
 
 }
