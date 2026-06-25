@@ -893,7 +893,17 @@ namespace dxvk {
       MTLCommandBuffer_commit(m_frameCommandBuffer);
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
       if (MTLCommandBuffer_status(m_frameCommandBuffer) == WMTCommandBufferStatusError)
-        logLine("endFrameAndPresent: command buffer ERROR");
+      { static bool loggedOnce = false;
+        if (!loggedOnce) {
+          loggedOnce = true;
+          char buf[256] = {};
+          const char* pfx = "endFrameAndPresent: cmdbuf ERROR: ";
+          size_t n = 0; for (; pfx[n]; n++) buf[n] = pfx[n];
+          if (uint64_t err = MTLCommandBuffer_error(m_frameCommandBuffer))
+            if (uint64_t desc = NSObject_description(err))
+              NSString_getCString(desc, buf + n, sizeof(buf) - n, WMTUTF8StringEncoding);
+          logLine(buf);
+        } }
       // The frame is complete: if an occlusion query counted into the visibility
       // buffer this frame, its sample count is now readable.
       if (m_occlusionUsedThisFrame && m_visibilityCpu) {
