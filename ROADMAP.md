@@ -195,15 +195,24 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     to CONFIRM, via ground truth, that the offscreen draw writes nothing (the RT
     reads back as the clear `0x101010`, not the drawn green). So the bug is
     DEFINITIVELY real, and verification is no longer the bottleneck — the next
-    session can bisect `appendDraw` for offscreen with a reliable check each
-    iteration. Suspects (every recorded encoder-state difference vs a working
-    backbuffer draw is already eliminated, so look at GPU-execution-level state):
-    (1) a Private RT used
-    as a draw target needs residency/`useResource` the backbuffer drawable
-    doesn't; (2) the viewport y-flip normalization uses the drawable height
-    instead of the offscreen RT's, pushing the quad off-target; (3) offscreen
-    misses per-draw state that the `m_backbufferPassOpen` path implies. Dump the
-    encoder's resolved viewport/scissor/render-area for an offscreen draw.
+    session can bisect with a reliable check each iteration. **Empirically ruled
+    out via the readback (each a build+dump):** the viewport (skipping it so Metal
+    uses the full-RT default — still clear); the scissor; the per-size depth
+    (valid, matching); the RT storage mode (Private→Managed — still clear); every
+    recorded encoder command (the offscreen draw's `setRenderPipelineState`,
+    `setDepthStencilState`, `setCullMode:None`, `setViewport`, vertex buffers,
+    `drawPrimitives` are byte-identical to a working backbuffer draw). KEY framing
+    for next time: the SAME draw (alpha_ps green quad + texquad_vs) renders to the
+    backbuffer (proven by `code_alpha`) but writes nothing to an offscreen RT —
+    so the variable is purely *the render target is a Private MTLTexture instead
+    of the CAMetalLayer drawable*, and the clear (load-action) DOES land on it
+    (RT reads back as the clear), only the draw's fragments don't. That points
+    below the shim: winemetal's prebuilt `MTLCommandBuffer_renderCommandEncoder`
+    building the `MTLRenderPassDescriptor`/encoder for a non-drawable color
+    attachment, or how draw commands are submitted to that encoder. Next: inspect
+    winemetal's render-encoder path (and whether a color attachment needs an
+    explicit store/usage flag the drawable sets implicitly); compare the WMT
+    render-pass struct we pass for offscreen vs backbuffer field-by-field.
   - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
     today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
     Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
