@@ -499,6 +499,27 @@ namespace dxvk {
   // backbuffer pixels, so it scales up by drawable/backbuffer. The registered
   // backbuffer texture carries the logical size (GetClientRect already returns
   // Retina pixels, so m_width can equal the drawable and is not a safe divisor).
+  uint64_t D9mtBackend::depthForSize(uint32_t width, uint32_t height) {
+    uint64_t key = (uint64_t(width) << 32) | height;
+    auto it = m_depthBySize.find(key);
+    if (it != m_depthBySize.end())
+      return it->second;
+    WMTTextureInfo info = {};
+    info.pixel_format       = WMTPixelFormatDepth32Float_Stencil8;
+    info.width              = width;
+    info.height             = height;
+    info.depth              = 1u;
+    info.array_length       = 1u;
+    info.type               = WMTTextureType2D;
+    info.mipmap_level_count = 1u;
+    info.sample_count       = 1u;
+    info.usage              = WMTTextureUsageRenderTarget;
+    info.options            = WMTResourceStorageModePrivate;
+    uint64_t depth = MTLDevice_newTexture(m_device, &info);
+    m_depthBySize.emplace(key, depth);
+    return depth;
+  }
+
   void D9mtBackend::measureDrawableAndRenderScale(uint64_t drawableTexture) {
     if (m_drawableWidth)
       return;
@@ -596,19 +617,25 @@ namespace dxvk {
     renderPass.colors[0].clear_color.g = ((clearColorArgb >> 8)  & 0xff) / 255.0;
     renderPass.colors[0].clear_color.b = ((clearColorArgb)       & 0xff) / 255.0;
     renderPass.colors[0].clear_color.a = ((clearColorArgb >> 24) & 0xff) / 255.0;
-    renderPass.depth.texture      = m_depthTexture;
+    // The backbuffer pass fills the (Retina-sized) drawable; an offscreen pass
+    // fills its own target. Metal requires the depth attachment to match the
+    // color size for a draw, so each pass uses a depth of exactly its color
+    // size: the drawable-sized shared depth for the backbuffer, a per-size depth
+    // for offscreen targets (the window-sized m_width can exceed a smaller RT).
+    bool backbufferPass = !(m_targetTexture && !m_backbufferTextures.count(m_targetTexture));
+    uint32_t passWidth  = backbufferPass && m_drawableWidth  ? m_drawableWidth  : uint32_t(MTLTexture_width(colorTexture));
+    uint32_t passHeight = backbufferPass && m_drawableHeight ? m_drawableHeight : uint32_t(MTLTexture_height(colorTexture));
+    uint64_t passDepth  = backbufferPass ? m_depthTexture : depthForSize(passWidth, passHeight);
+    renderPass.depth.texture      = passDepth;
     renderPass.depth.load_action  = WMTLoadActionClear;
     renderPass.depth.store_action = WMTStoreActionDontCare;
     renderPass.depth.clear_depth  = 1.0f;
-    renderPass.stencil.texture      = m_depthTexture;  // same combined attachment
+    renderPass.stencil.texture      = passDepth;  // same combined attachment
     renderPass.stencil.load_action  = WMTLoadActionClear;
     renderPass.stencil.store_action = WMTStoreActionDontCare;
     renderPass.stencil.clear_stencil = 0u;
-    // The backbuffer pass fills the (Retina-sized) drawable; an offscreen pass
-    // fills its own logical-sized target within the larger shared depth buffer.
-    bool backbufferPass = !(m_targetTexture && !m_backbufferTextures.count(m_targetTexture));
-    renderPass.render_target_width  = backbufferPass && m_drawableWidth  ? m_drawableWidth  : m_width;
-    renderPass.render_target_height = backbufferPass && m_drawableHeight ? m_drawableHeight : m_height;
+    renderPass.render_target_width  = passWidth;
+    renderPass.render_target_height = passHeight;
     renderPass.default_raster_sample_count = 1;
     m_backbufferPassOpen = backbufferPass;
 

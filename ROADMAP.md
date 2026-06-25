@@ -149,11 +149,26 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     only clears offscreen) — most likely the offscreen render pass's
     viewport/depth-range or the way the shared/per-size depth is cleared per
     offscreen pass, or a residency issue specific to Private RT textures as
-    draw targets. Start with the single-RT offscreen-draw test, then bisect the
-    offscreen `beginFrame` path. Also size offscreen passes' depth+render_target
-    to the RT (a per-size depth cache + `render_target =
-    MTLTexture_width(colorTexture)`) — that part of attempt 1 was correct and
-    needed regardless.
+    draw targets.
+  - *Single-RT offscreen-draw test landed (`code_offdraw.exe`):* CONFIRMS it is
+    NOT MRT-specific — drawing a constant-green quad into ONE offscreen RT, then
+    sampling it to the backbuffer, the RT reads back as the clear (no green) and
+    the backbuffer is blank, both in capture AND in a live window screenshot.
+    `code_rtt` (offscreen CLEAR + backbuffer draw) still renders, so it's the
+    offscreen *draw* specifically. The per-size-depth fix (now committed: an
+    offscreen pass uses `depthForSize(colorTexture size)` and
+    `render_target = MTLTexture_width(colorTexture)`, since Metal needs the depth
+    to match the color size for a draw) is correct and regression-safe
+    (`code_lum` backbuffer still renders) but did NOT make the offscreen draw
+    appear — so the depth mismatch was real but not the whole cause. Remaining
+    ambiguity to resolve FIRST next session: is the offscreen draw truly broken,
+    or is it (a) a gpudebug-replay limitation (it replays offscreen *clears* but
+    maybe not offscreen *draws* — note the RT is read directly, yet blank), or
+    (b) a new-exe verification ghost? Disambiguate by adding an offscreen-draw
+    pass to a KNOWN-GOOD exe (`code_lum`) — if that also goes blank, the bug is
+    real; then bisect the offscreen `beginFrame`/`appendDraw` path (suspects:
+    Private-RT-as-draw-target residency, or the viewport y-flip using the wrong
+    height for a non-drawable target).
   - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
     today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
     Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,

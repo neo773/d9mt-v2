@@ -9,6 +9,7 @@
 // This is the foundation every other shim module leans on (SHIM_SPEC.md).
 
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace dxvk {
@@ -239,6 +240,11 @@ namespace dxvk {
     void maybeBeginGpuCapture();
     void endGpuCaptureIfActive();
     void measureDrawableAndRenderScale(uint64_t drawableTexture);
+    // A private Depth32Float_Stencil8 texture of exactly w*h, created once per
+    // size and reused, so an offscreen pass's depth matches its color size
+    // (Metal needs the depth attachment to match the color size for a draw).
+    uint64_t depthForSize(uint32_t width, uint32_t height);
+    std::unordered_map<uint64_t, uint64_t> m_depthBySize;
 
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many
