@@ -580,16 +580,32 @@ namespace dxvk {
   }
 
   void D9mtBackend::setColorTarget(uint64_t texture) {
-    if (texture == m_targetTexture)
+    uint32_t format = 80u;  // MTLPixelFormatBGRA8Unorm — single-target default
+    setColorTargets(&texture, &format, 1u);
+  }
+
+  void D9mtBackend::setColorTargets(const uint64_t* textures,
+                                    const uint32_t* metalFormats, uint32_t count) {
+    if (count > MaxColorTargets)
+      count = MaxColorTargets;
+    bool changed = count != m_colorTargetCount || textures[0] != m_targetTexture;
+    for (uint32_t i = 1; i < count && !changed; i++)
+      changed = textures[i] != m_colorTargets[i];
+    if (!changed)
       return;
     // End the current render pass so the next draw opens a fresh pass against
-    // the new target on the same command buffer.
+    // the new target set on the same command buffer.
     if (m_frameEncoder) {
       MTLCommandEncoder_endEncoding(m_frameEncoder);
       m_frameEncoder = 0;
       m_frameOpen = false;
     }
-    m_targetTexture = texture;
+    m_colorTargetCount = count;
+    for (uint32_t i = 0; i < count; i++) {
+      m_colorTargets[i] = textures[i];
+      m_colorFormats[i] = metalFormats[i];
+    }
+    m_targetTexture = textures[0];  // color[0] drives sizing + present
   }
 
   void D9mtBackend::beginFrame(bool clear, uint32_t clearColorArgb) {
@@ -660,6 +676,14 @@ namespace dxvk {
     renderPass.colors[0].clear_color.g = ((clearColorArgb >> 8)  & 0xff) / 255.0;
     renderPass.colors[0].clear_color.b = ((clearColorArgb)       & 0xff) / 255.0;
     renderPass.colors[0].clear_color.a = ((clearColorArgb >> 24) & 0xff) / 255.0;
+    // Additional MRT attachments share the same clear/load/store as color[0];
+    // color[0] is passed in as colorTexture, the rest come from setColorTargets.
+    for (uint32_t i = 1; i < m_colorTargetCount; i++) {
+      renderPass.colors[i].texture      = m_colorTargets[i];
+      renderPass.colors[i].load_action  = renderPass.colors[0].load_action;
+      renderPass.colors[i].store_action = WMTStoreActionStore;
+      renderPass.colors[i].clear_color  = renderPass.colors[0].clear_color;
+    }
     // The backbuffer pass fills the (Retina-sized) drawable; an offscreen pass
     // fills its own target. Metal requires the depth attachment to match the
     // color size for a draw, so each pass uses a depth of exactly its color
@@ -673,6 +697,10 @@ namespace dxvk {
       m_lastOffscreenTarget = colorTexture;
       m_lastOffscreenWidth  = passWidth;
       m_lastOffscreenHeight = passHeight;
+      m_lastOffscreenTargets[0] = colorTexture;
+      for (uint32_t i = 1; i < m_colorTargetCount; i++)
+        m_lastOffscreenTargets[i] = m_colorTargets[i];
+      m_lastOffscreenCount = m_colorTargetCount;
     }
     renderPass.depth.texture      = passDepth;
     renderPass.depth.load_action  = WMTLoadActionClear;
@@ -873,10 +901,17 @@ namespace dxvk {
         m_occlusionResultReady = true;
         m_occlusionUsedThisFrame = false;
       }
-      // Ground-truth readback of the last offscreen target (debug-gated).
-      if (m_lastOffscreenTarget && std::fopen("C:\\d9mt-test\\DUMP_RT", "r"))
-        dumpTextureToFile(m_lastOffscreenTarget, m_lastOffscreenWidth,
-                          m_lastOffscreenHeight, "C:\\d9mt-test\\rt_dump.bin");
+      // Ground-truth readback of the last offscreen targets (debug-gated): one
+      // file per MRT attachment (rt_dump.bin, rt_dump1.bin, ...).
+      if (m_lastOffscreenTarget && std::fopen("C:\\d9mt-test\\DUMP_RT", "r")) {
+        for (uint32_t i = 0; i < m_lastOffscreenCount; i++) {
+          char path[40];
+          if (i == 0) std::snprintf(path, sizeof(path), "C:\\d9mt-test\\rt_dump.bin");
+          else        std::snprintf(path, sizeof(path), "C:\\d9mt-test\\rt_dump%u.bin", i);
+          dumpTextureToFile(m_lastOffscreenTargets[i], m_lastOffscreenWidth,
+                            m_lastOffscreenHeight, path);
+        }
+      }
     }
     endGpuCaptureIfActive();
 

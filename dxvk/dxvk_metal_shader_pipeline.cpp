@@ -100,25 +100,30 @@ namespace dxvk {
           uint64_t                  vertexFunction,
           uint64_t                  fragmentFunction,
     const MetalVertexLayout&        vertexLayout,
-          uint32_t                  colorPixelFormat,
+    const uint32_t*                 colorPixelFormats,
+          uint32_t                  colorCount,
     const MetalColorBlend&          blend) {
-    if (!device || !vertexFunction)
+    if (!device || !vertexFunction || !colorCount)
       return 0u;
+    if (colorCount > 8u)
+      colorCount = 8u;
 
     d9mt_pso_info info;
     std::memset(&info, 0, sizeof(info));
     info.vertex_function   = vertexFunction;
     info.fragment_function = fragmentFunction;
 
-    info.colors[0].pixel_format           = colorPixelFormat;
-    info.colors[0].blending_enabled       = blend.enabled ? 1u : 0u;
-    info.colors[0].rgb_blend_op           = blend.rgbOp;
-    info.colors[0].alpha_blend_op         = blend.alphaOp;
-    info.colors[0].src_rgb_blend_factor   = blend.srcRgb;
-    info.colors[0].dst_rgb_blend_factor   = blend.dstRgb;
-    info.colors[0].src_alpha_blend_factor = blend.srcAlpha;
-    info.colors[0].dst_alpha_blend_factor = blend.dstAlpha;
-    info.colors[0].write_mask             = blend.writeMask;
+    for (uint32_t i = 0; i < colorCount; i++) {
+      info.colors[i].pixel_format           = colorPixelFormats[i];
+      info.colors[i].blending_enabled       = blend.enabled ? 1u : 0u;
+      info.colors[i].rgb_blend_op           = blend.rgbOp;
+      info.colors[i].alpha_blend_op         = blend.alphaOp;
+      info.colors[i].src_rgb_blend_factor   = blend.srcRgb;
+      info.colors[i].dst_rgb_blend_factor   = blend.dstRgb;
+      info.colors[i].src_alpha_blend_factor = blend.srcAlpha;
+      info.colors[i].dst_alpha_blend_factor = blend.dstAlpha;
+      info.colors[i].write_mask             = blend.writeMask;
+    }
     // The frame always binds a Depth32Float_Stencil8 attachment, so every
     // pipeline must declare the matching depth and stencil formats even when
     // depth/stencil testing is disabled.

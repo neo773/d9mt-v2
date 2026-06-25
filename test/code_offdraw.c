@@ -89,10 +89,17 @@ int main(void) {
   IDirect3DTexture9_GetSurfaceLevel(rttex, 0, &rt);
   IDirect3DDevice9_GetRenderTarget(dev, 0, &backbuffer);
 
+  IDirect3DQuery9 *query = NULL;
+  IDirect3DDevice9_CreateQuery(dev, D3DQUERYTYPE_OCCLUSION, &query);
+
+  static const float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, mvp, 4);
+
   IDirect3DDevice9_SetVertexShader(dev, vs);
   IDirect3DDevice9_SetVertexDeclaration(dev, decl);
   IDirect3DDevice9_SetStreamSource(dev, 0, vb, 0, sizeof(struct Vertex));
   IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
+  int frame = 0;
 
   MSG msg;
   for (;;) {
@@ -101,13 +108,15 @@ int main(void) {
       TranslateMessage(&msg);
       DispatchMessageA(&msg);
     }
-    /* Pass 1: DRAW a green quad into the offscreen RT. */
+    /* Pass 1: DRAW a green quad into the offscreen RT, counting visible samples. */
     IDirect3DDevice9_SetRenderTarget(dev, 0, rt);
     IDirect3DDevice9_SetPixelShader(dev, drawPs);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xFF101010, 1.0f, 0);
+    if (query) IDirect3DQuery9_Issue(query, D3DISSUE_BEGIN);
     IDirect3DDevice9_BeginScene(dev);
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 2);
     IDirect3DDevice9_EndScene(dev);
+    if (query) IDirect3DQuery9_Issue(query, D3DISSUE_END);
 
     /* Pass 2: sample the RT onto the backbuffer. */
     IDirect3DDevice9_SetRenderTarget(dev, 0, backbuffer);
@@ -120,6 +129,13 @@ int main(void) {
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 2);
     IDirect3DDevice9_EndScene(dev);
     IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+
+    if (query && ++frame >= 3) {
+      DWORD samples = 0xFFFFFFFFu;
+      IDirect3DQuery9_GetData(query, &samples, sizeof(samples), D3DGETDATA_FLUSH);
+      FILE *f = fopen("C:\\d9mt-test\\offdraw_occl.txt", "w");
+      if (f) { fprintf(f, "offscreen draw visible samples = %lu\n", (unsigned long) samples); fclose(f); }
+    }
   }
   return 0;
 }

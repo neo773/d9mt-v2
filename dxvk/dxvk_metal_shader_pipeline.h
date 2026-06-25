@@ -77,14 +77,17 @@ namespace dxvk {
   };
 
   // Build a retained MTLRenderPipelineState from the given functions, vertex
-  // layout, single color attachment format (MTLPixelFormat raw value), and
-  // color blend state via the d9mtmetal unixlib. Returns 0 on failure.
+  // layout, color attachment formats (MTLPixelFormat raw values, one per MRT
+  // attachment), and color blend state via the d9mtmetal unixlib. The blend
+  // state applies to every attachment (D3D9 shares one blend across MRTs).
+  // Returns 0 on failure.
   uint64_t metalBuildRenderPipeline(
           uint64_t                  device,
           uint64_t                  vertexFunction,
           uint64_t                  fragmentFunction,
     const MetalVertexLayout&        vertexLayout,
-          uint32_t                  colorPixelFormat,
+    const uint32_t*                 colorPixelFormats,
+          uint32_t                  colorCount,
     const MetalColorBlend&          blend);
 
 }

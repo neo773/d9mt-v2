@@ -89,11 +89,23 @@ namespace dxvk {
             DxvkRenderTargets&&   targets,
             VkImageAspectFlags    feedbackLoop) {
     (void) feedbackLoop;
-    // Select the color[0] target. An offscreen render target view carries a real
-    // Metal texture; the backbuffer view has none (it renders to the drawable),
-    // so a zero handle tells the backend to use the swapchain drawable.
-    uint64_t targetTexture = targets.color[0].view != nullptr
-      ? targets.color[0].view->metalTexture() : 0u;
+    // Collect the bound color targets (contiguous from 0). An offscreen render
+    // target view carries a real Metal texture; the backbuffer view has none (it
+    // renders to the drawable), so a zero handle tells the backend to use the
+    // swapchain drawable. The format feeds the matching pipeline; the backbuffer
+    // is BGRA8 (80). Stop at the first unbound slot beyond color[0].
+    uint64_t textures[D9mtBackend::MaxColorTargets] = {};
+    uint32_t formats[D9mtBackend::MaxColorTargets]  = {};
+    uint32_t count = 1u;
+    textures[0] = targets.color[0].view ? targets.color[0].view->metalTexture() : 0u;
+    formats[0]  = targets.color[0].view ? targets.color[0].view->image()->metalPixelFormat() : 80u;
+    for (uint32_t i = 1; i < MaxNumRenderTargets && i < D9mtBackend::MaxColorTargets; i++) {
+      if (!targets.color[i].view)
+        break;
+      textures[i] = targets.color[i].view->metalTexture();
+      formats[i]  = targets.color[i].view->image()->metalPixelFormat();
+      count = i + 1u;
+    }
     if (m_backend) {
       // A clear recorded for the current target is normally applied lazily by
       // the next draw's render pass; if the target switches first with no draw
@@ -103,7 +115,7 @@ namespace dxvk {
         m_backend->beginFrame(m_clearPending, m_clearColorArgb);
         m_clearPending = false;
       }
-      m_backend->setColorTarget(targetTexture);
+      m_backend->setColorTargets(textures, formats, count);
     }
   }
 
@@ -562,21 +574,31 @@ namespace dxvk {
       MetalVertexLayout layout = buildVertexLayout();
       MetalColorBlend   blend  = buildBlendState();
 
-      // Pipeline cache keyed by the shader pair plus the blend state — the same
-      // shaders drawn opaque vs alpha-blended need distinct pipelines. The
-      // shader cookies and the 32-bit packed blend bits are mixed into one key.
+      // The pipeline's color attachments must match the bound render targets'
+      // count + formats (an MRT pass needs a multi-output pipeline). Gather them
+      // from the backend.
+      uint32_t colorCount = m_backend->colorTargetCount();
+      uint32_t colorFormats[D9mtBackend::MaxColorTargets];
+      for (uint32_t i = 0; i < colorCount; i++)
+        colorFormats[i] = m_backend->colorTargetFormat(i);
+
+      // Pipeline cache keyed by the shader pair, the blend state, and the render-
+      // target count + formats — the same shaders drawn opaque vs alpha-blended,
+      // or to different attachment layouts, need distinct pipelines.
       uint32_t blendBits = 0u;
       std::memcpy(&blendBits, &m_blendMode, sizeof(blendBits));
       uint64_t key = (uint64_t(DxvkShader::getCookie(m_boundVertexShader)) << 32)
                    |  uint64_t(DxvkShader::getCookie(m_boundFragmentShader));
       key ^= uint64_t(blendBits) * 0x9E3779B97F4A7C15ull;
+      for (uint32_t i = 0; i < colorCount; i++)
+        key ^= (uint64_t(colorFormats[i]) + 0x100ull * i) * 0xD1B54A32D192ED03ull;
       auto cachedPipeline = m_pipelineStates.find(key);
       if (cachedPipeline != m_pipelineStates.end()) {
         pipeline = cachedPipeline->second;
       } else {
         pipeline = metalBuildRenderPipeline(m_backend->device(),
           vertexStage->function, fragmentStage ? fragmentStage->function : 0u,
-          layout, /* MTLPixelFormatBGRA8Unorm */ 80u, blend);
+          layout, colorFormats, colorCount, blend);
         m_pipelineStates.emplace(key, pipeline);
         if (!pipeline)
           logLine("render pipeline build failed");

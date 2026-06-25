@@ -164,6 +164,17 @@ namespace dxvk {
     // pass against the new target.
     void setColorTarget(uint64_t texture);
 
+    // Multiple render targets: binds color[0..count-1] to the given textures with
+    // the given Metal pixel formats (for the matching pipeline) for subsequent
+    // draws. color[0] drives target sizing and (when it is the backbuffer)
+    // presentation; the rest are offscreen attachments. count==1 is the common
+    // single-target case. Switching targets ends the current render pass.
+    static constexpr uint32_t MaxColorTargets = 8u;
+    void setColorTargets(const uint64_t* textures, const uint32_t* metalFormats,
+                         uint32_t count);
+    uint32_t colorTargetCount() const { return m_colorTargetCount; }
+    uint32_t colorTargetFormat(uint32_t index) const { return m_colorFormats[index]; }
+
     // Occlusion queries: while a query is active, draws count visible (depth/
     // stencil-passing) samples into a Metal visibility-result buffer. The count
     // is read back after the frame the query's draws were in completes, so
@@ -233,6 +244,9 @@ namespace dxvk {
     // drawable (which the shim renders into and presents), any other texture to
     // an offscreen render-to-texture target.
     uint64_t                     m_targetTexture = 0;
+    uint64_t                     m_colorTargets[MaxColorTargets] = {};
+    uint32_t                     m_colorFormats[MaxColorTargets] = {};
+    uint32_t                     m_colorTargetCount = 1u;
     std::unordered_set<uint64_t> m_backbufferTextures;
 
     // The swapchain drawable is the window's physical (Retina) pixel size, which
@@ -270,6 +284,8 @@ namespace dxvk {
                            const char* path);
     uint64_t m_lastOffscreenTarget = 0;
     uint32_t m_lastOffscreenWidth = 0, m_lastOffscreenHeight = 0;
+    uint64_t m_lastOffscreenTargets[MaxColorTargets] = {};
+    uint32_t m_lastOffscreenCount = 0;
 
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many

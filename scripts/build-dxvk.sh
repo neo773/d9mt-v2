@@ -208,6 +208,9 @@ $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_texture.exe" "$V2/test/code_texture.
 echo "[dxvk] compiling code_lum.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_lum.exe" "$V2/test/code_lum.c" -ld3d9 -luser32 -lgdi32
 
+echo "[dxvk] compiling code_mrt.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_mrt.exe" "$V2/test/code_mrt.c" -ld3d9 -luser32 -lgdi32
+
 echo "[dxvk] compiling code_occl.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_occl.exe" "$V2/test/code_occl.c" -ld3d9 -luser32 -lgdi32
 

@@ -110,109 +110,18 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     RULE: when one test exe misbehaves but others render, diff/clone the test
     harness FIRST (rename it, run identical code) before deep-diving the driver.
     The fix itself was exactly the few lines the early analysis predicted.
-- **Occlusion queries**, multi-RT — remaining before the real-game exit.
-  - *Multi-RT scope (investigated, ready to implement):* GTA IV's deferred
-    G-buffer needs MRT. Five touch points: (1) `metalBuildRenderPipeline`
-    (`dxvk_metal_shader_pipeline.*`) hardcodes one color format `80u` BGRA8 —
-    take an array of `(format, blend)` per attachment; (2) the PSO cache key in
-    `DxvkContext::draw` (~ctx.cpp:570) must fold in the RT count + formats; (3)
-    `bindRenderTargets` (ctx.cpp:88) currently keeps only `color[0]` — collect
-    all `targets.color[i]` and pass them down (new `setColorTargets` array,
-    replacing `setColorTarget`); (4) the backend stores the array and writes
-    `renderPass.colors[i]` for each in `beginFrame`/`endFrameAndPresent` (only
-    the backbuffer `color[0]` drawable presents; offscreen MRT attachments are
-    Private RT textures from `createSampledTexture`); (5) `buildBlendState`
-    becomes per-attachment. Test: `code_mrt.exe` — bind 2 RTs, a PS writing
-    `oC0`/`oC1` distinct colors (assemble via `scripts/assemble-shaders.sh`),
-    sample both, capture-verify each. The shader IR already emits multiple
-    fragment outputs, so the shim side is the whole job.
-  - *Attempt 1 (implemented + reverted — plumbing correct, output blocked):* did
-    all five touch points. The MRT **binding verifiably works** — the capture
-    shows the offscreen pass with two color attachments (`color0`=rt0,
-    `color1`=rt1) and a perfect 2-output fragment MSL (`oC0_color [[color(0)]]`
-    red, `oC1_specular0 [[color(1)]]` green). BUT the 2-attachment offscreen draw
-    writes NOTHING to either RT, and worse, **silently breaks the rest of the
-    frame** (a following backbuffer pass that samples rt0 also renders blank) —
-    with NO command-buffer error (`MTLCommandBuffer_status` is OK). Confirmed NOT
-    a verification ghost: a fresh-name clone (`code_gbuf`) reproduces it; and
-    `code_rtt` (single-RT offscreen CLEAR + backbuffer draw) still renders fine,
-    so single-RT offscreen + multi-pass are not broken. The defect is specific to
-    a **multi-color-attachment offscreen draw**. Reverted rather than ship
-    non-functional MRT. Two notes for next time: (a) offscreen *draws* (vs
-    clears) were never tested before — write a SINGLE-RT offscreen-draw test
-    first to split "MRT-specific" from "any offscreen draw". (b) NOT the unixlib:
-    checked `third_party/d9mtmetal/unix.m` — its `NEW_RENDER_PSO` already loops
-    `colors[i] for i < 8`, so MRT PSOs are built correctly; and the capture
-    showed winemetal's render encoder DID bind both color attachments. So the
-    real suspect is now **offscreen geometry draws writing nothing in general**
-    (a fundamental offscreen-render bug, never exercised before since `code_rtt`
-    only clears offscreen) — most likely the offscreen render pass's
-    viewport/depth-range or the way the shared/per-size depth is cleared per
-    offscreen pass, or a residency issue specific to Private RT textures as
-    draw targets.
-  - *Single-RT offscreen-draw test landed (`code_offdraw.exe`):* CONFIRMS it is
-    NOT MRT-specific — drawing a constant-green quad into ONE offscreen RT, then
-    sampling it to the backbuffer, the RT reads back as the clear (no green) and
-    the backbuffer is blank, both in capture AND in a live window screenshot.
-    `code_rtt` (offscreen CLEAR + backbuffer draw) still renders, so it's the
-    offscreen *draw* specifically. The per-size-depth fix (now committed: an
-    offscreen pass uses `depthForSize(colorTexture size)` and
-    `render_target = MTLTexture_width(colorTexture)`, since Metal needs the depth
-    to match the color size for a draw) is correct and regression-safe
-    (`code_lum` backbuffer still renders) but did NOT make the offscreen draw
-    appear — so the depth mismatch was real but not the whole cause. Remaining
-    ambiguity to resolve FIRST next session: is the offscreen draw truly broken,
-    or is it (a) a gpudebug-replay limitation (it replays offscreen *clears* but
-    maybe not offscreen *draws* — note the RT is read directly, yet blank), or
-    (b) a new-exe verification ghost? **Reasoned conclusion: REAL, not a ghost**
-    — `code_rtt` and `code_offdraw` are near-identical two-pass exes differing
-    ONLY in pass 1 (clear vs draw); `code_rtt`'s pass-2 backbuffer draw renders,
-    `code_offdraw`'s does not. A ghost would blank pass 2 regardless of pass 1,
-    so the offscreen *draw* in pass 1 is the cause. **Render-pass setup is now
-    verified CORRECT** (a one-shot log confirmed the offscreen pass gets a valid
-    color texture, render area 800×600, and a valid non-zero depth of matching
-    800×600) — so it is NOT the attachment sizing/binding. The bug is in draw
-    EXECUTION on an offscreen target, or a gpudebug-replay limitation for
-    offscreen draws (can't fully exclude — both capture and a live window
-    screenshot were blank, but the live window may itself be a paint issue). Go
-    straight to bisecting the offscreen `appendDraw` path. UPDATE: the offscreen
-    draw's recorded encoder state is **identical to a working backbuffer draw**
-    (same `setRenderPipelineState`, `setDepthStencilState`, `setCullMode:None`,
-    `setViewport`, vertex buffers, `drawPrimitives` 6 verts) — every inspectable
-    difference is eliminated, so static capture analysis is exhausted on this.
-    **Meta-blocker (the real lesson of this whole stretch):** the verification
-    tooling is unreliable for exactly the cases that matter — gpudebug `fetch`
-    replays offscreen *clears* but appears not to replay offscreen *draws*, and
-    window screenshots hit ghost/paint races (cost a whole session on L8). The
-    highest-leverage next move is a RELIABLE on-device readback: have the driver
-    itself blit/copy a render target to a CPU-readable (Managed/Shared) buffer
-    and dump it to a PNG from the unixlib (`d9mtmetal/unix.m` can do a blit +
-    `getBytes`), bypassing both gpudebug replay and the window. With that, the
-    offscreen-draw question (and MRT, and any future feature) becomes a 2-second
-    ground-truth check instead of a guessing game. **DONE (commit 6bb08e0):**
-    `dumpTextureToFile` blits the last offscreen target to a shared buffer and
-    writes raw BGRA8 to `C:/d9mt-test/rt_dump.bin` when `DUMP_RT` exists. Used it
-    to CONFIRM, via ground truth, that the offscreen draw writes nothing (the RT
-    reads back as the clear `0x101010`, not the drawn green). So the bug is
-    DEFINITIVELY real, and verification is no longer the bottleneck — the next
-    session can bisect with a reliable check each iteration. **Empirically ruled
-    out via the readback (each a build+dump):** the viewport (skipping it so Metal
-    uses the full-RT default — still clear); the scissor; the per-size depth
-    (valid, matching); the RT storage mode (Private→Managed — still clear); every
-    recorded encoder command (the offscreen draw's `setRenderPipelineState`,
-    `setDepthStencilState`, `setCullMode:None`, `setViewport`, vertex buffers,
-    `drawPrimitives` are byte-identical to a working backbuffer draw). KEY framing
-    for next time: the SAME draw (alpha_ps green quad + texquad_vs) renders to the
-    backbuffer (proven by `code_alpha`) but writes nothing to an offscreen RT —
-    so the variable is purely *the render target is a Private MTLTexture instead
-    of the CAMetalLayer drawable*, and the clear (load-action) DOES land on it
-    (RT reads back as the clear), only the draw's fragments don't. That points
-    below the shim: winemetal's prebuilt `MTLCommandBuffer_renderCommandEncoder`
-    building the `MTLRenderPassDescriptor`/encoder for a non-drawable color
-    attachment, or how draw commands are submitted to that encoder. Next: inspect
-    winemetal's render-encoder path (and whether a color attachment needs an
-    explicit store/usage flag the drawable sets implicitly); compare the WMT
-    render-pass struct we pass for offscreen vs backbuffer field-by-field.
+  - *Multi-RT — DONE + verified.* Five touch points: `setColorTargets(textures,
+    formats, count)` on the backend stores a color-target array; `bindRenderTargets`
+    collects all `targets.color[i]`; `beginFrame` binds `renderPass.colors[i]` for
+    each; `metalBuildRenderPipeline` takes a per-attachment format array (one blend
+    for all — D3D9 shares blend across MRTs); the `DxvkContext::draw` PSO key folds
+    in the RT count + formats. Verified by `code_mrt.exe` (PS writes oC0/oC1): the
+    `DUMP_RT` readback dumps one file per attachment — RT0 reads back red, RT1
+    green, ground-truth exact. NOTE: the long earlier "offscreen draws write
+    nothing" investigation was a TEST BUG — `code_offdraw`/`code_mrt` never set
+    `texquad_vs`'s MVP constants (quad collapsed to the origin) and the readback
+    sampled a CORNER pixel (in the -0.9..0.9 margin = clear). Offscreen draws +
+    MRT work; the depth-size fix was still real. Verification-ghost lesson, again.
   - *Occlusion queries — DONE + verified (real GPU counting):* a shared
     visibility-result buffer set on every render pass + per-draw
     `setVisibilityMode(Counting/Disabled)` driven by `beginQuery`/`endQuery`; the
