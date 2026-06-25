@@ -439,9 +439,17 @@ namespace dxvk {
     }
     void writeTimestamp(const Rc<DxvkQuery>& query) { (void) query; }
 
-    // GPU events / signals — fire nothing (single-threaded synchronous replay).
+    // GPU events / signals. The shim presents/flushes synchronously (the backend
+    // waits for the GPU each frame), so a signal recorded on the CS timeline can
+    // be fired as soon as the CS thread reaches it: by then the corresponding GPU
+    // work is already complete. Firing it is essential — the frontend's
+    // submission/staging/sampler fences are waited on (e.g. discard-map, sampler
+    // pool, flush), and leaving them unsignaled deadlocks the CPU thread.
     void signalGpuEvent(const Rc<DxvkEvent>& event) { (void) event; }
-    void signal(const Rc<sync::Signal>& signal, uint64_t value) { (void) signal; (void) value; }
+    void signal(const Rc<sync::Signal>& signal, uint64_t value) {
+      if (signal != nullptr)
+        signal->signal(value);
+    }
 
     // Barriers — implicit in the single Metal pass; nothing to emit.
     void emitGraphicsBarrier(VkPipelineStageFlags srcStages, VkAccessFlags srcAccess,
