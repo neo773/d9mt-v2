@@ -499,6 +499,36 @@ namespace dxvk {
   // backbuffer pixels, so it scales up by drawable/backbuffer. The registered
   // backbuffer texture carries the logical size (GetClientRect already returns
   // Retina pixels, so m_width can equal the drawable and is not a safe divisor).
+  void D9mtBackend::dumpTextureToFile(uint64_t texture, uint32_t width, uint32_t height,
+                                      const char* path) {
+    if (!texture || !width || !height)
+      return;
+    uint32_t bytesPerRow = width * 4u;
+    uint64_t byteCount = uint64_t(bytesPerRow) * height;
+    void* cpu = nullptr;
+    uint64_t buffer = createSharedBuffer(byteCount, &cpu);
+    if (!buffer || !cpu)
+      return;
+    uint64_t cmdbuf = MTLCommandQueue_commandBuffer(m_queue);
+    uint64_t blit = MTLCommandBuffer_blitCommandEncoder(cmdbuf);
+    wmtcmd_blit_copy_from_texture_to_buffer cmd = {};
+    cmd.type           = WMTBlitCommandCopyFromTextureToBuffer;
+    cmd.src            = texture;
+    cmd.origin         = WMTOrigin{ 0u, 0u, 0u };
+    cmd.size           = WMTSize{ width, height, 1u };
+    cmd.dst            = buffer;
+    cmd.bytes_per_row  = bytesPerRow;
+    cmd.bytes_per_image = uint32_t(byteCount);
+    MTLBlitCommandEncoder_encodeCommands(blit, reinterpret_cast<const wmtcmd_base*>(&cmd));
+    MTLCommandEncoder_endEncoding(blit);
+    MTLCommandBuffer_commit(cmdbuf);
+    MTLCommandBuffer_waitUntilCompleted(cmdbuf);
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(cpu, 1u, byteCount, f);
+      std::fclose(f);
+    }
+  }
+
   uint64_t D9mtBackend::depthForSize(uint32_t width, uint32_t height) {
     uint64_t key = (uint64_t(width) << 32) | height;
     auto it = m_depthBySize.find(key);
@@ -626,6 +656,11 @@ namespace dxvk {
     uint32_t passWidth  = backbufferPass && m_drawableWidth  ? m_drawableWidth  : uint32_t(MTLTexture_width(colorTexture));
     uint32_t passHeight = backbufferPass && m_drawableHeight ? m_drawableHeight : uint32_t(MTLTexture_height(colorTexture));
     uint64_t passDepth  = backbufferPass ? m_depthTexture : depthForSize(passWidth, passHeight);
+    if (!backbufferPass) {
+      m_lastOffscreenTarget = colorTexture;
+      m_lastOffscreenWidth  = passWidth;
+      m_lastOffscreenHeight = passHeight;
+    }
     renderPass.depth.texture      = passDepth;
     renderPass.depth.load_action  = WMTLoadActionClear;
     renderPass.depth.store_action = WMTStoreActionDontCare;
@@ -805,6 +840,10 @@ namespace dxvk {
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
       if (MTLCommandBuffer_status(m_frameCommandBuffer) == WMTCommandBufferStatusError)
         logLine("endFrameAndPresent: command buffer ERROR");
+      // Ground-truth readback of the last offscreen target (debug-gated).
+      if (m_lastOffscreenTarget && std::fopen("C:\\d9mt-test\\DUMP_RT", "r"))
+        dumpTextureToFile(m_lastOffscreenTarget, m_lastOffscreenWidth,
+                          m_lastOffscreenHeight, "C:\\d9mt-test\\rt_dump.bin");
     }
     endGpuCaptureIfActive();
 

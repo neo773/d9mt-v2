@@ -245,6 +245,14 @@ namespace dxvk {
     // (Metal needs the depth attachment to match the color size for a draw).
     uint64_t depthForSize(uint32_t width, uint32_t height);
     std::unordered_map<uint64_t, uint64_t> m_depthBySize;
+    // Reliable ground-truth: blit a (possibly Private) texture into a shared
+    // buffer and write its raw BGRA8 bytes to a file, bypassing the GPU-capture
+    // replayer and the window. Triggered for the last offscreen target when the
+    // C:\d9mt-test\DUMP_RT file exists. width*height*4 bytes, no row padding.
+    void dumpTextureToFile(uint64_t texture, uint32_t width, uint32_t height,
+                           const char* path);
+    uint64_t m_lastOffscreenTarget = 0;
+    uint32_t m_lastOffscreenWidth = 0, m_lastOffscreenHeight = 0;
 
     // Resources already made resident in the current frame. Metal residency
     // persists for the encoder's lifetime, so a resource referenced by many
