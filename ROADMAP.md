@@ -95,155 +95,22 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
   slice (D3D9 `baseArrayLayer` → Metal cube slice); the IR already bakes the
   sampler dimensionality from the DCL. `code_cube.exe` samples the +Z face
   (cyan), verified by GPU capture.
-- **Occlusion queries**, multi-RT, more uncompressed formats (with channel
-  swizzle for L8/A8/…).
-  - *Format note (investigated):* the frontend maps `A8`/`L8` → `VK_FORMAT_R8_UNORM`
-    and `A8L8` → `VK_FORMAT_R8G8_UNORM`, neither of which is in
-    `metalPixelFormatFromVulkan`, so those textures currently get no Metal
-    texture at all. Each also carries a D3D9 component swizzle (`L8`=rrr1,
-    `A8`=000r, `A8L8`=rrrg) — a *view* property (`DxvkImageViewKey::packedSwizzle`,
-    `unpackSwizzle()`). The clean path: (1) add `R8_UNORM`→`R8Unorm`(10) and
-    `R8G8_UNORM`→`RG8Unorm`(30) to `metalPixelFormatFromVulkan` so the base
-    texture is created; (2) in `DxvkImageView`, when `packedSwizzle` is
-    non-identity, lazily build a swizzled Metal view via
-    `MTLTexture_newTextureView(base, fmt, type, 0,levels, 0,slices, swizzle, &id)`
-    and return its `gpuResourceId` for sampling. This matches Metal's per-view
-    swizzle natively — no upload-time pixel expansion needed.
-  - *Attempt 1 (reverted, not committed):* implemented the above end-to-end
-    (`createTextureView` backend wrapper + lazy swizzled view in `createView` +
-    `code_l8.exe` gradient test). The base texture creates correctly as
-    `R8Unorm` and the swizzled view fetches as a grayscale ramp in the capture,
-    BUT the rendered quad came out **black**. Residency is the suspect: the view
-    aliases the base's storage, so `gpuResourceId()` must point at the view
-    while `metalTexture()` (what `bindResourceImageView` makes resident via
-    `useResource`) must stay the BASE texture — making only the view resident
-    leaves the pixels off-GPU. That fix was applied but still read black, so the
-    remaining suspect is `MTLTexture_newTextureView`'s out `gpu_resource_id`
-    (verify it's non-zero and lands in the argument buffer).
-  - *Attempt 2 + root cause (the earlier "R8 faults" guess was WRONG):* mapping
-    `R8_UNORM` only (no swizzle), the frame **renders and presents fine** — the
-    command buffer reports no error (added a `MTLCommandBuffer_status` check),
-    `beginFrame` confirms the target is in the backbuffer set, and the GPU
-    capture (once it lands a frame) shows `drawPrimitives` + `presentDrawable`
-    to the 1600×1200 drawable. The drawn quad is just **invisible** — the
-    drawable holds only the clear color. Reading the fragment MSL (same method
-    that cracked the alpha-test bug) shows why:
-    ```
-    float _66 = _62.w;                 // sampled .a
-    if (!alphaTest(_66)) discard_fragment();
-    ```
-    the shader discards on `!alphaTest(sampled.w)`. That LOOKED like the cause
-    (R8 samples missing alpha as 0) — but reading the captured shader, the
-    disabled-alpha-test path compiles `alphaTest` to literally `return true;`,
-    so the discard never fires and there is **no latent alpha-test bug**. So the
-    alpha test is NOT why the L8 quad is invisible.
-  - *Still open — the actual cause is unidentified.* Confirmed facts: R8 does not
-    fault (command-buffer status OK), the draw executes (`drawPrimitives`
-    vertexCount 6) and presents to the 1600×1200 drawable, `useResource @tex0`
-    (the R8 texture) is resident, `alphaTest` returns true — yet the drawable
-    holds only the clear color (no quad, not even black). `code_texture` (RGBA8,
-    identical geometry/shader/viewport) renders. So sampling an R8 texture
-    produces no visible fragments for a reason not yet found. Remaining leads to
-    check next: the viewport/scissor for the R8 draw (capture showed
-    `setScissorRect` and a different `setViewport` raw value than the RGBA8 case
-    — verify it's not a zero-area rect), the color write mask, and whether the
-    R8 sample returns a value equal to the clear. Verification gotcha: `code_l8`
-    captures are flaky (retry until the 1600×1200 `CAMetalLayer Drawable`
-    appears) and the trace-log frame counter lags, so a low count is not a hang.
-    The rrr1 swizzle is still needed for luminance correctness regardless.
-  - *Exhaustively ruled out (all verified equal to the working RGBA8 case):* a
-    driver-side log shows the R8 draw's viewport `(0,0 800×600)` and scissor
-    `(0,0 800×600)` are full (scaled ×2 for Retina, `bbPass=1`); the captured
-    `@rps0` has `blendEnabled:no` + `writeMask:RGBA`; `@dss0` is
-    `depthCompare:Always` + stencil `Always/Keep`; `alphaTest` compiles to
-    `return true`. So viewport, scissor, write mask, blend, depth, stencil, and
-    alpha discard are all eliminated. The only unchecked layer is **shader
-    execution**: the vertex-shader output clip positions (are the R8 draw's
-    vertices actually on-screen?) and the fragment sample value. Next step is
-    shader-level inspection (gpudebug shader debug / dump the post-VS positions),
-    NOT re-checking fixed-function state. Strong remaining hypothesis: something
-    about binding an R8 texture's argument-buffer descriptor makes the sample (or
-    a dependent value) collapse the geometry or output — compare the R8 vs RGBA8
-    `@rps0` vertex/fragment MSL and the bound argument buffers side by side.
-    The bound vertex buffer was ALSO verified correct from the capture (the exact
-    -0.7..0.7 quad at 20-byte stride), so geometry input is eliminated too — the
-    only thing left is what the shaders compute at runtime. Note: gpudebug's
-    `fetch` is replay-based but DID read the R8 texture's pixels correctly (the
-    swizzled-view fetch showed a clean grayscale ramp), so the blank drawable is
-    not a replay artifact — the draw genuinely writes nothing.
-  - *Definitive isolation:* `code_alpha.exe` uses a CONSTANT-output PS
-    (`mov oC0, c0`, ignores the texture) over the SAME quad geometry and renders
-    green fine. So geometry, viewport, depth, raster, and present are all proven
-    good — the bug is specifically `texquad_ps` **sampling the R8 texture**. Most
-    likely the R8 texture's bindless argument-buffer descriptor is malformed
-    (wrong texture type / unregistered `gpu_resource_id`), so the sample returns
-    NaN/garbage and the fragment writes nothing. Start the next session by
-    diffing the bound argument buffer (`@buf*` at the fragment texture index) and
-    the `gpu_resource_id` for an R8 vs an RGBA8 texture in the capture.
-    Data captured: the R8 texture (`@tex0`) is correctly created (`R8Unorm`,
-    16×16, `ShaderRead`, `Managed`); the fragment texture descriptor (buffer(2))
-    holds `2` and the sampler heap (buffer(0)) holds `29`. **Compared against a
-    captured RGBA8 `code_texture` frame — its texture descriptor is ALSO `2`,
-    identical.** So the bindless descriptor/binding is NOT the bug either: an R8
-    texture binds exactly like a working RGBA8 one. EVERYTHING statically
-    inspectable is now identical to the working case, yet the R8 draw writes no
-    pixels. The bug is purely in the GPU runtime of sampling an `R8Unorm`
-    texture. **Ran the A8 experiment** (forced `R8_UNORM → A8Unorm`(1)): the quad
-    is STILL invisible. So this is NOT R8-specific — **every single-channel
-    format (R8, A8) produces no fragment output** through this bindless sampling
-    path, while RGBA8 works with everything else identical. The defect is in
-    sampling a 1-channel `texture2d<float>` via the argument-buffer heap.
-  - *Even the RGBA8-expansion was DISPROVEN — the single-channel theory is also
-    wrong.* Implemented the upload-expansion (create L8 as RGBA8, widen each byte
-    to `(r,r,r,255)`): confirmed via capture that the L8 texture (`@tex0`) is now
-    `RGBA8Unorm` holding the correct grayscale ramp — and `code_l8` is **STILL
-    invisible**. Meanwhile `code_texture` (a normal RGBA8 8×8 checkerboard)
-    renders perfectly in a fresh capture, and its fragment MSL is **byte-for-byte
-    identical** to `code_l8`'s (same `sampleTexture_0_s0`, same `main0`, same
-    `alphaTest{return true}`). So with the texture format, the shader, the
-    geometry, and ALL pipeline state proven identical to a working draw, the
-    `code_l8` quad writes nothing. The remaining differences are only: texture
-    size (16×16 vs 8×8), texture data, and the D3D9 source format (`L8` vs
-    `A8R8G8B8`) driving the frontend path. **Decisive next experiment:** change
-    `code_l8` to allocate a `D3DFMT_A8R8G8B8` texture (like `code_texture`) but
-    keep the gradient data — if THAT renders, the bug is the frontend's `L8`
-    handling (sampler/spec-data/coordinate path), not anything in the Metal shim;
-    if it's still invisible, it's the data/size or a gpudebug-replay artifact
-    (`code_l8` captures may simply be mis-replaying — the live window paint is
-    also unreliable). Either outcome finally splits frontend-vs-shim. NOTE: do
-    NOT re-attempt the swizzled-view or upload-expansion fixes — both are proven
-    not to address this; the bug is upstream of the texture format.
-  - *Ran it — `D3DFMT_A8R8G8B8` + gradient is ALSO invisible.* So the texture
-    format is fully eliminated: `code_l8` is invisible with R8/A8/RGBA8/A8R8G8B8
-    while `code_texture` (A8R8G8B8) renders, with byte-identical shaders and the
-    same quad. The ONLY remaining differences are the texture **size** (16×16 vs
-    `code_texture`'s 8×8) and **data** (gradient vs checkerboard), or something
-    tied to the `code_l8.exe` process/window itself (both its GPU captures and
-    its live window paint have been unreliable all along, unlike `code_texture`/
-    `code_shader`/`code_cube`). **Final isolating experiment for next session:**
-    make `code_l8` literally `code_texture` (8×8 A8R8G8B8 checkerboard, identical
-    code) under the `code_l8.exe` name. If it renders → the bug is the 16×16
-    size or the gradient data (a real but narrow shim bug). If it is STILL
-    invisible → the defect is environmental to that exe/window/capture, not the
-    renderer at all, and the entire L8 thread has been chasing a verification
-    ghost — re-validate L8 with a fresh `code_texture`-derived harness. This is
-    the single most important thing to settle before any more L8 work.
-  - **RAN IT — VERIFICATION GHOST CONFIRMED.** Made `code_l8.c` a byte-identical
-    clone of `code_texture.c` (8×8 A8R8G8B8 red/blue checkerboard, same quad,
-    same shader, same everything — only the window-class/exe name `code_l8`
-    differs) and it is STILL invisible in the capture, while `code_texture.exe`
-    renders the checkerboard. **So the renderer is NOT the problem — `code_l8.exe`
-    itself captures/displays blank regardless of its contents.** The whole L8
-    thread this session was chasing a broken test exe, not a driver bug. L8/A8
-    texture support is therefore UNVERIFIED, not broken — likely fine. ACTION for
-    next session: (1) figure out why `code_l8.exe` specifically captures blank
-    (stale build cached in the bottle? window never composited? the run/ capture
-    harness keys on something?) — start by diffing the deployed `code_l8.exe` vs
-    `code_texture.exe` and trying a brand-new exe name; (2) once a reliable
-    single-channel harness exists, the actual L8 fix is almost certainly just
-    adding `R8_UNORM`/`R8G8_UNORM` to `metalPixelFormatFromVulkan` (+ the rrr1/
-    000a/rrrg swizzle), which all the prior analysis already worked out. Do NOT
-    trust `code_l8.exe` for any further verification.
+- **A8/L8/A8L8 single-channel formats** — DONE (`c48612e`). Map `R8_UNORM`/
+  `R8G8_UNORM` to Metal R8/RG8 and apply the D3D9 swizzle (L8 rrr1, A8 000a,
+  A8L8 rrrg) via a per-view swizzled Metal view (`MTLTexture_newTextureView`);
+  the view's resource id samples with the swizzle, the base texture stays
+  resident. `code_lum.exe` (an L8 0..255 ramp) renders a correct black->white
+  luminance gradient, GPU-capture verified.
+  - *Hard-won lesson (cost ~a full session):* the long 'L8 renders invisible'
+    investigation was a VERIFICATION GHOST — the `code_l8.exe` test binary
+    captured/displayed blank regardless of its contents (a byte-identical clone
+    of the working `code_texture.exe` under that name was ALSO blank). Four+
+    root-cause hypotheses (R8 faults, alpha test, bindless descriptor, single-
+    channel sampling) were all chasing a broken instrument, not the renderer.
+    RULE: when one test exe misbehaves but others render, diff/clone the test
+    harness FIRST (rename it, run identical code) before deep-diving the driver.
+    The fix itself was exactly the few lines the early analysis predicted.
+- **Occlusion queries**, multi-RT — remaining before the real-game exit.
 
 ---
 
