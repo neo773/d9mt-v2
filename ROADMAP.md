@@ -168,8 +168,14 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     — `code_rtt` and `code_offdraw` are near-identical two-pass exes differing
     ONLY in pass 1 (clear vs draw); `code_rtt`'s pass-2 backbuffer draw renders,
     `code_offdraw`'s does not. A ghost would blank pass 2 regardless of pass 1,
-    so the offscreen *draw* in pass 1 is the cause. Go straight to bisecting the
-    offscreen `beginFrame`/`appendDraw` path. Top suspects: (1) a Private RT used
+    so the offscreen *draw* in pass 1 is the cause. **Render-pass setup is now
+    verified CORRECT** (a one-shot log confirmed the offscreen pass gets a valid
+    color texture, render area 800×600, and a valid non-zero depth of matching
+    800×600) — so it is NOT the attachment sizing/binding. The bug is in draw
+    EXECUTION on an offscreen target, or a gpudebug-replay limitation for
+    offscreen draws (can't fully exclude — both capture and a live window
+    screenshot were blank, but the live window may itself be a paint issue). Go
+    straight to bisecting the offscreen `appendDraw` path. Top suspects: (1) a Private RT used
     as a draw target needs residency/`useResource` the backbuffer drawable
     doesn't; (2) the viewport y-flip normalization uses the drawable height
     instead of the offscreen RT's, pushing the quad off-target; (3) offscreen
