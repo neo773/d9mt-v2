@@ -39,6 +39,20 @@ delta and a regression target.
       bindResources/appendDraw all ~0, caches hit); the Stage-A blocking present
       (GPU wait, ~0.75ms) dominates. Re-measure on a real many-draw frame before
       cutting — that's where bindResources/appendDraw scaling will show.
+- [x] **Phase 1 complete** — cube textures (`c95016a`), A8/L8/A8L8 formats
+      (`c48612e`), occlusion queries via real Metal visibility counting
+      (`c1025a0`), multi-RT (`a6cc17e`). Plus a reusable ground-truth RT readback
+      tool (`6bb08e0`). The "offscreen draws write nothing" scare was a test bug
+      (missing MVP + corner-pixel check) — offscreen draws work.
+- [x] **GTA IV boots + renders real content on v2** (`744bc5a`). Device, window,
+      fullscreen reset, and ALL shader compiles succeed (0 pipeline failures);
+      the game presents frames, and a captured frame draws GTA's HUD font atlas
+      from a BC3/DXT5 texture, correctly decoded. The unblock: thread VS→FS
+      shader linkage so the IR reconciles varyings a pixel shader reads but its
+      vertex shader never writes (D3D9-legal; Metal rejects at link). **OPEN:**
+      the windowed loading screen shows a white quad and the first boot is very
+      slow to reach gameplay (~246% CPU streaming) — see
+      `memory/v2-occlusion-readback-offscreen.md` for the exact next steps.
 
 ### Phase 1.2 notes (DONE)
 
