@@ -126,6 +126,27 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     `oC0`/`oC1` distinct colors (assemble via `scripts/assemble-shaders.sh`),
     sample both, capture-verify each. The shader IR already emits multiple
     fragment outputs, so the shim side is the whole job.
+  - *Attempt 1 (implemented + reverted — plumbing correct, output blocked):* did
+    all five touch points. The MRT **binding verifiably works** — the capture
+    shows the offscreen pass with two color attachments (`color0`=rt0,
+    `color1`=rt1) and a perfect 2-output fragment MSL (`oC0_color [[color(0)]]`
+    red, `oC1_specular0 [[color(1)]]` green). BUT the 2-attachment offscreen draw
+    writes NOTHING to either RT, and worse, **silently breaks the rest of the
+    frame** (a following backbuffer pass that samples rt0 also renders blank) —
+    with NO command-buffer error (`MTLCommandBuffer_status` is OK). Confirmed NOT
+    a verification ghost: a fresh-name clone (`code_gbuf`) reproduces it; and
+    `code_rtt` (single-RT offscreen CLEAR + backbuffer draw) still renders fine,
+    so single-RT offscreen + multi-pass are not broken. The defect is specific to
+    a **multi-color-attachment offscreen draw**. Reverted rather than ship
+    non-functional MRT. Two notes for next time: (a) offscreen *draws* (vs
+    clears) were never tested before — write a SINGLE-RT offscreen-draw test
+    first to split "MRT-specific" from "any offscreen draw"; (b) prime suspect is
+    the **d9mtmetal unixlib's** `D9MT_FUNC_NEW_RENDER_PSO` / render-encoder setup
+    for `colors[1..N]` (it may only wire `colors[0]`), which is native code the
+    shim calls but doesn't control — inspect `third_party/d9mtmetal` and the
+    prebuilt unixlib. Also size offscreen passes' depth+render_target to the RT
+    (a per-size depth cache + `render_target = MTLTexture_width(colorTexture)`)
+    — that part of attempt 1 was correct and needed regardless.
   - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
     today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
     Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
