@@ -175,7 +175,21 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     EXECUTION on an offscreen target, or a gpudebug-replay limitation for
     offscreen draws (can't fully exclude — both capture and a live window
     screenshot were blank, but the live window may itself be a paint issue). Go
-    straight to bisecting the offscreen `appendDraw` path. Top suspects: (1) a Private RT used
+    straight to bisecting the offscreen `appendDraw` path. UPDATE: the offscreen
+    draw's recorded encoder state is **identical to a working backbuffer draw**
+    (same `setRenderPipelineState`, `setDepthStencilState`, `setCullMode:None`,
+    `setViewport`, vertex buffers, `drawPrimitives` 6 verts) — every inspectable
+    difference is eliminated, so static capture analysis is exhausted on this.
+    **Meta-blocker (the real lesson of this whole stretch):** the verification
+    tooling is unreliable for exactly the cases that matter — gpudebug `fetch`
+    replays offscreen *clears* but appears not to replay offscreen *draws*, and
+    window screenshots hit ghost/paint races (cost a whole session on L8). The
+    highest-leverage next move is a RELIABLE on-device readback: have the driver
+    itself blit/copy a render target to a CPU-readable (Managed/Shared) buffer
+    and dump it to a PNG from the unixlib (`d9mtmetal/unix.m` can do a blit +
+    `getBytes`), bypassing both gpudebug replay and the window. With that, the
+    offscreen-draw question (and MRT, and any future feature) becomes a 2-second
+    ground-truth check instead of a guessing game. Suspects if it IS real: (1) a Private RT used
     as a draw target needs residency/`useResource` the backbuffer drawable
     doesn't; (2) the viewport y-flip normalization uses the drawable height
     instead of the offscreen RT's, pushing the quad off-target; (3) offscreen
