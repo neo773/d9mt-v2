@@ -550,7 +550,8 @@ namespace dxvk {
 
     // Resolves (translate + compile + specialize, cached) the bound shader for a
     // stage. Returns nullptr if no shader is bound or translation fails.
-    const CompiledShaderStage* resolveStage(const Rc<DxvkShader>& shader);
+    const CompiledShaderStage* resolveStage(const Rc<DxvkShader>& shader,
+                                            const Rc<DxvkShader>& prevStage = {});
 
     // Builds the Metal vertex descriptor from the captured D3D9 input layout.
     MetalVertexLayout buildVertexLayout() const;

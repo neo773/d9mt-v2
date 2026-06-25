@@ -177,7 +177,8 @@ namespace dxvk {
   }
 
 
-  const DxvkContext::CompiledShaderStage* DxvkContext::resolveStage(const Rc<DxvkShader>& shader) {
+  const DxvkContext::CompiledShaderStage* DxvkContext::resolveStage(const Rc<DxvkShader>& shader,
+                                                                    const Rc<DxvkShader>& prevStage) {
     if (shader == nullptr)
       return nullptr;
 
@@ -191,17 +192,33 @@ namespace dxvk {
       reinterpret_cast<const char*>(m_specConstantData.data()),
       m_specConstantData.size() * sizeof(uint32_t)));
     uint64_t cacheKey = (uint64_t(cookie) << 32) | specHash;
+    // A fragment shader's varyings are reconciled against its vertex shader, so
+    // the same FS paired with a different VS compiles differently — fold the
+    // previous stage's cookie into the cache key.
+    if (prevStage != nullptr)
+      cacheKey ^= uint64_t(uint32_t(prevStage->getCookie())) * 0x9E3779B97F4A7C15ull;
 
     auto cached = m_compiledStages.find(cacheKey);
     if (cached != m_compiledStages.end())
       return cached->second.function ? &cached->second : nullptr;
+
+    // When a previous stage is given, link against its outputs so the IR I/O
+    // pass can resolve varyings this stage reads but the previous never writes
+    // (D3D9-legal, rejected by Metal at pipeline link).
+    DxvkShaderLinkage linkage = { };
+    const DxvkShaderLinkage* linkagePtr = nullptr;
+    if (prevStage != nullptr) {
+      linkage.prevStage        = prevStage->metadata().stage;
+      linkage.prevStageOutputs = prevStage->metadata().outputs;
+      linkagePtr = &linkage;
+    }
 
     CompiledShaderStage stage;
     // Translate the specialized SPIR-V. The sampler-heap set comes from the
     // shader's layout so the converter can locate the heap's buffer index (or
     // ~0u if no samplers, e.g. the FF triangle).
     SpirvCodeBuffer code = shader->getCodeSpecialized(
-      m_specConstantData.data(), uint32_t(m_specConstantData.size()));
+      m_specConstantData.data(), uint32_t(m_specConstantData.size()), linkagePtr);
     DxvkPipelineLayoutBuilder layout = shader->getLayout();
     stage.translation = convertSpirvToMsl(
       code, layout, shader->metadata().stage, layout.getSamplerHeapSet());
@@ -563,7 +580,7 @@ namespace dxvk {
     {
       TraceScope resolveScope(TraceZone::ResolveShader);
       vertexStage   = resolveStage(m_boundVertexShader);
-      fragmentStage = resolveStage(m_boundFragmentShader);
+      fragmentStage = resolveStage(m_boundFragmentShader, m_boundVertexShader);
     }
     if (!vertexStage)
       return false;
@@ -600,8 +617,19 @@ namespace dxvk {
           vertexStage->function, fragmentStage ? fragmentStage->function : 0u,
           layout, colorFormats, colorCount, blend);
         m_pipelineStates.emplace(key, pipeline);
-        if (!pipeline)
-          logLine("render pipeline build failed");
+        if (!pipeline) {
+          char buf[256];
+          int n = std::snprintf(buf, sizeof(buf),
+            "render pipeline build failed: attrs=%zu streams=%zu colors=%u fmts[",
+            layout.attributes.size(), layout.streams.size(), colorCount);
+          for (size_t i = 0; i < layout.attributes.size() && n < 200; i++)
+            n += std::snprintf(buf + n, sizeof(buf) - n, "loc%u:fmt%u@%u ",
+              layout.attributes[i].location, layout.attributes[i].metalFormat,
+              layout.attributes[i].offset);
+          std::snprintf(buf + n, sizeof(buf) - n, "] colorFmt0=%u stride0=%u",
+            colorFormats[0], layout.streams.empty() ? 0u : layout.streams[0].stride);
+          logLine(buf);
+        }
       }
     }
     if (!pipeline)

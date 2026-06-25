@@ -2020,6 +2020,62 @@ namespace dxvk {
   }
 
 
+  void DxvkIrShader::applyIoLinkage(dxbc_spv::ir::Builder& irBuilder,
+                                    const DxvkShaderLinkage* linkage) {
+    dxbc_spv::ir::LowerIoPass ioPass(irBuilder);
+    if (linkage) {
+      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_info.flatShadingInputs)
+        ioPass.enableFlatInterpolation(m_info.flatShadingInputs);
+
+      if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
+        ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
+
+      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsDualSrcBlend) {
+        dxbc_spv::ir::IoMap io = { };
+        io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 0u, 0xfu), dxbc_spv::ir::IoSemantic());
+        io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 1u, 0xfu), dxbc_spv::ir::IoSemantic());
+
+        ioPass.resolveUnusedOutputs(io);
+      }
+
+      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+        std::array<dxbc_spv::ir::IoOutputSwizzle, 8u> swizzles = { };
+        uint32_t outputMask = m_metadata.outputs.computeMask();
+
+        for (auto i : bit::BitMask(outputMask))
+          swizzles.at(i) = convertOutputSwizzle(linkage->rtSwizzles.at(i));
+
+        ioPass.swizzleOutputs(swizzles.size(), swizzles.data());
+      }
+
+      bool matchSemantics = linkage->semanticIo && m_metadata.flags.test(DxvkShaderFlag::SemanticIo);
+
+      if (m_metadata.stage != VK_SHADER_STAGE_COMPUTE_BIT && !DxvkShaderIo::checkStageCompatibility(
+          m_metadata.stage, m_metadata.inputs, linkage->prevStage, linkage->prevStageOutputs, matchSemantics)) {
+        auto prevStageIoMap = convertIoMap(linkage->prevStageOutputs, linkage->prevStage);
+
+        if (matchSemantics)
+          ioPass.resolveSemanticIo(prevStageIoMap);
+
+        ioPass.resolveMismatchedIo(convertShaderStage(linkage->prevStage), prevStageIoMap);
+      }
+
+      if (m_metadata.stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
+        ioPass.resolvePatchConstantLocations(convertIoMap(m_metadata.outputs, m_metadata.stage));
+
+      if (m_metadata.stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+        ioPass.resolvePatchConstantLocations(convertIoMap(linkage->prevStageOutputs, linkage->prevStage));
+    } else if (m_metadata.stage != VK_SHADER_STAGE_COMPUTE_BIT) {
+      ioPass.lowerSpecConstantsToCbv(SpecDataSet, 0u);
+    }
+
+    if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT
+     && m_info.options.flags.test(DxvkShaderCompileFlag::EnableSampleRateShading)
+     && (!linkage || !linkage->sampleLocations))
+      ioPass.enableSampleInterpolation();
+  }
+
+
   SpirvCodeBuffer DxvkIrShader::getCode(
     const DxvkShaderBindingMap*       bindings,
     const DxvkShaderLinkage*          linkage) {
@@ -2031,58 +2087,7 @@ namespace dxvk {
     deserializeIr(irBuilder);
 
     // Fix up shader I/O based on shader linkage
-    { dxbc_spv::ir::LowerIoPass ioPass(irBuilder);
-      if (linkage) {
-        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_info.flatShadingInputs)
-          ioPass.enableFlatInterpolation(m_info.flatShadingInputs);
-
-        if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
-          ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
-
-        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsDualSrcBlend) {
-          dxbc_spv::ir::IoMap io = { };
-          io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 0u, 0xfu), dxbc_spv::ir::IoSemantic());
-          io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 1u, 0xfu), dxbc_spv::ir::IoSemantic());
-
-          ioPass.resolveUnusedOutputs(io);
-        }
-
-        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
-          std::array<dxbc_spv::ir::IoOutputSwizzle, 8u> swizzles = { };
-          uint32_t outputMask = m_metadata.outputs.computeMask();
-
-          for (auto i : bit::BitMask(outputMask))
-            swizzles.at(i) = convertOutputSwizzle(linkage->rtSwizzles.at(i));
-
-          ioPass.swizzleOutputs(swizzles.size(), swizzles.data());
-        }
-
-        bool matchSemantics = linkage->semanticIo && m_metadata.flags.test(DxvkShaderFlag::SemanticIo);
-
-        if (m_metadata.stage != VK_SHADER_STAGE_COMPUTE_BIT && !DxvkShaderIo::checkStageCompatibility(
-            m_metadata.stage, m_metadata.inputs, linkage->prevStage, linkage->prevStageOutputs, matchSemantics)) {
-          auto prevStageIoMap = convertIoMap(linkage->prevStageOutputs, linkage->prevStage);
-
-          if (matchSemantics)
-            ioPass.resolveSemanticIo(prevStageIoMap);
-
-          ioPass.resolveMismatchedIo(convertShaderStage(linkage->prevStage), prevStageIoMap);
-        }
-
-        if (m_metadata.stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
-          ioPass.resolvePatchConstantLocations(convertIoMap(m_metadata.outputs, m_metadata.stage));
-
-        if (m_metadata.stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
-          ioPass.resolvePatchConstantLocations(convertIoMap(linkage->prevStageOutputs, linkage->prevStage));
-      } else if (m_metadata.stage != VK_SHADER_STAGE_COMPUTE_BIT) {
-        ioPass.lowerSpecConstantsToCbv(SpecDataSet, 0u);
-      }
-
-      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT
-       && m_info.options.flags.test(DxvkShaderCompileFlag::EnableSampleRateShading)
-       && (!linkage || !linkage->sampleLocations))
-        ioPass.enableSampleInterpolation();
-    }
+    applyIoLinkage(irBuilder, linkage);
 
     // Set up SPIR-V options. Only enable float controls if a sufficient subset
     // of features is supported; this avoids running into performance issues on
@@ -2311,7 +2316,8 @@ namespace dxvk {
 
 
   SpirvCodeBuffer DxvkIrShader::getCodeSpecialized(
-    const uint32_t* specData, uint32_t specCount) {
+    const uint32_t* specData, uint32_t specCount,
+    const DxvkShaderLinkage* linkage) {
     convertIr("getCodeSpecialized()");
 
     dxbc_spv::ir::Builder irBuilder;
@@ -2335,7 +2341,13 @@ namespace dxvk {
     }
     dxbc_spv::ir::RemoveUnusedPass::runPass(irBuilder);
 
-    // Set up SPIR-V options identically to getCode (no linkage on this path).
+    // Reconcile this stage's varyings against the previous stage when linked
+    // (e.g. a pixel shader reading an interpolant the vertex shader never
+    // writes — D3D9-legal, but Metal rejects it at pipeline link).
+    if (linkage)
+      applyIoLinkage(irBuilder, linkage);
+
+    // Set up SPIR-V options identically to getCode.
     dxbc_spv::spirv::SpirvBuilder::Options options = { };
     options.includeDebugNames = true;
     options.nvRawAccessChains = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsNvRawAccessChains);

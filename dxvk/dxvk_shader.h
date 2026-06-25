@@ -197,9 +197,10 @@ namespace dxvk {
     // become texture2d, not depth2d); precompiled-SPIR-V shaders (fixed
     // function) carry no spec constants, so the default ignores the values.
     virtual SpirvCodeBuffer getCodeSpecialized(
-      const uint32_t* specData, uint32_t specCount) {
+      const uint32_t* specData, uint32_t specCount,
+      const DxvkShaderLinkage* linkage = nullptr) {
       (void) specData; (void) specCount;
-      return getCode(nullptr, nullptr);
+      return getCode(nullptr, linkage);
     }
 
     virtual void        dump(std::ostream&) = 0;

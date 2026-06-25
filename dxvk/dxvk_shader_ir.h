@@ -166,7 +166,8 @@ namespace dxvk {
      */
     SpirvCodeBuffer getCodeSpecialized(
       const uint32_t* specData,
-            uint32_t  specCount);
+            uint32_t  specCount,
+      const DxvkShaderLinkage* linkage = nullptr) override;
 
     /**
      * \brief Queries shader binding layout
@@ -207,6 +208,14 @@ namespace dxvk {
     DxvkShaderMetadata            m_metadata = { };
 
     void convertIr(const char* reason);
+
+    // Runs the IR I/O lowering pass: when linkage is given, reconciles this
+    // stage's varyings against the previous stage's outputs (resolving the
+    // D3D9-legal case of a pixel shader reading a register the vertex shader
+    // never writes, which Metal rejects at pipeline link); otherwise lowers
+    // spec constants to a CBV. Shared by getCode and getCodeSpecialized.
+    void applyIoLinkage(dxbc_spv::ir::Builder& irBuilder,
+                        const DxvkShaderLinkage* linkage);
 
     void convertShader();
 
