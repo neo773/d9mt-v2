@@ -140,13 +140,20 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     a **multi-color-attachment offscreen draw**. Reverted rather than ship
     non-functional MRT. Two notes for next time: (a) offscreen *draws* (vs
     clears) were never tested before — write a SINGLE-RT offscreen-draw test
-    first to split "MRT-specific" from "any offscreen draw"; (b) prime suspect is
-    the **d9mtmetal unixlib's** `D9MT_FUNC_NEW_RENDER_PSO` / render-encoder setup
-    for `colors[1..N]` (it may only wire `colors[0]`), which is native code the
-    shim calls but doesn't control — inspect `third_party/d9mtmetal` and the
-    prebuilt unixlib. Also size offscreen passes' depth+render_target to the RT
-    (a per-size depth cache + `render_target = MTLTexture_width(colorTexture)`)
-    — that part of attempt 1 was correct and needed regardless.
+    first to split "MRT-specific" from "any offscreen draw". (b) NOT the unixlib:
+    checked `third_party/d9mtmetal/unix.m` — its `NEW_RENDER_PSO` already loops
+    `colors[i] for i < 8`, so MRT PSOs are built correctly; and the capture
+    showed winemetal's render encoder DID bind both color attachments. So the
+    real suspect is now **offscreen geometry draws writing nothing in general**
+    (a fundamental offscreen-render bug, never exercised before since `code_rtt`
+    only clears offscreen) — most likely the offscreen render pass's
+    viewport/depth-range or the way the shared/per-size depth is cleared per
+    offscreen pass, or a residency issue specific to Private RT textures as
+    draw targets. Start with the single-RT offscreen-draw test, then bisect the
+    offscreen `beginFrame` path. Also size offscreen passes' depth+render_target
+    to the RT (a per-size depth cache + `render_target =
+    MTLTexture_width(colorTexture)`) — that part of attempt 1 was correct and
+    needed regardless.
   - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
     today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
     Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
