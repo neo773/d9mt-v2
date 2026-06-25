@@ -164,11 +164,17 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     ambiguity to resolve FIRST next session: is the offscreen draw truly broken,
     or is it (a) a gpudebug-replay limitation (it replays offscreen *clears* but
     maybe not offscreen *draws* — note the RT is read directly, yet blank), or
-    (b) a new-exe verification ghost? Disambiguate by adding an offscreen-draw
-    pass to a KNOWN-GOOD exe (`code_lum`) — if that also goes blank, the bug is
-    real; then bisect the offscreen `beginFrame`/`appendDraw` path (suspects:
-    Private-RT-as-draw-target residency, or the viewport y-flip using the wrong
-    height for a non-drawable target).
+    (b) a new-exe verification ghost? **Reasoned conclusion: REAL, not a ghost**
+    — `code_rtt` and `code_offdraw` are near-identical two-pass exes differing
+    ONLY in pass 1 (clear vs draw); `code_rtt`'s pass-2 backbuffer draw renders,
+    `code_offdraw`'s does not. A ghost would blank pass 2 regardless of pass 1,
+    so the offscreen *draw* in pass 1 is the cause. Go straight to bisecting the
+    offscreen `beginFrame`/`appendDraw` path. Top suspects: (1) a Private RT used
+    as a draw target needs residency/`useResource` the backbuffer drawable
+    doesn't; (2) the viewport y-flip normalization uses the drawable height
+    instead of the offscreen RT's, pushing the quad off-target; (3) offscreen
+    misses per-draw state that the `m_backbufferPassOpen` path implies. Dump the
+    encoder's resolved viewport/scissor/render-area for an offscreen draw.
   - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
     today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
     Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
