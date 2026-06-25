@@ -172,6 +172,7 @@ namespace dxvk {
     // path leaves the texture null here and sets it later via setMetalTexture().
     DxvkImage(const DxvkImageCreateInfo& createInfo, D9mtBackend& backend)
     : DxvkImage(createInfo, 0u) {
+      m_backend = &backend;
       uint32_t metalFormat = metalPixelFormatFromVulkan(createInfo.format);
       bool isSampled2D = (createInfo.usage & VK_IMAGE_USAGE_SAMPLED_BIT)
                       && createInfo.type == VK_IMAGE_TYPE_2D
@@ -199,6 +200,8 @@ namespace dxvk {
         case VK_FORMAT_B8G8R8A8_SRGB:       return 81u;   // WMTPixelFormatBGRA8Unorm_sRGB
         case VK_FORMAT_R8G8B8A8_UNORM:      return 70u;   // WMTPixelFormatRGBA8Unorm
         case VK_FORMAT_R8G8B8A8_SRGB:       return 71u;   // WMTPixelFormatRGBA8Unorm_sRGB
+        case VK_FORMAT_R8_UNORM:            return 10u;   // WMTPixelFormatR8Unorm (A8/L8)
+        case VK_FORMAT_R8G8_UNORM:          return 30u;   // WMTPixelFormatRG8Unorm (A8L8)
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return 130u; // WMTPixelFormatBC1_RGBA
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:  return 131u; // WMTPixelFormatBC1_RGBA_sRGB
         case VK_FORMAT_BC2_UNORM_BLOCK:      return 132u; // WMTPixelFormatBC2_RGBA
@@ -252,6 +255,9 @@ namespace dxvk {
     uint64_t gpuResourceId() const {
       return m_gpuResourceId;
     }
+
+    // Base winemetal pixel format, for swizzled-view creation in createView.
+    uint32_t metalPixelFormat() const { return metalPixelFormatFromVulkan(m_info.format); }
 
     /**
      * \brief Map pointer
@@ -333,6 +339,7 @@ namespace dxvk {
     uint64_t                   m_gpuResourceId = 0u;
     Rc<DxvkResourceAllocation> m_storage;
     std::string                m_debugName;
+    D9mtBackend*               m_backend = nullptr;
 
   };
 
@@ -351,8 +358,10 @@ namespace dxvk {
 
     DxvkImageView(
             Rc<DxvkImage>      image,
-      const DxvkImageViewKey&  key)
-    : m_image(std::move(image)), m_key(key) { }
+      const DxvkImageViewKey&  key,
+            uint64_t           swizzledResourceId = 0u)
+    : m_image(std::move(image)), m_key(key),
+      m_swizzledResourceId(swizzledResourceId) { }
 
     /**
      * \brief Image view properties
@@ -410,8 +419,13 @@ namespace dxvk {
       return m_image != nullptr ? m_image->metalTexture() : 0u;
     }
 
-    // Argument-buffer resource ID of the underlying texture (for sampling).
+    // Argument-buffer resource ID of the texture sampled. A swizzled view (L8
+    // rrr1, A8 000a, A8L8 rrrg) samples through its own Metal view's id; Metal
+    // applies the swizzle natively. Residency (metalTexture, made resident by
+    // bindResourceImageView) stays on the base — the view aliases its storage.
     uint64_t gpuResourceId() const {
+      if (m_swizzledResourceId)
+        return m_swizzledResourceId;
       return m_image != nullptr ? m_image->gpuResourceId() : 0u;
     }
 
@@ -419,12 +433,51 @@ namespace dxvk {
 
     Rc<DxvkImage>    m_image;
     DxvkImageViewKey m_key = { };
+    uint64_t         m_swizzledResourceId = 0u;
 
   };
 
 
-  // Out-of-line: DxvkImageView is a complete type only here.
+  // WMTTextureSwizzle codes (Zero=0 One=1 Red=2 Green=3 Blue=4 Alpha=5); raw
+  // ints keep this header winemetal-free. identity is the channel's own code.
+  inline uint8_t wmtSwizzleCodeFromVulkan(VkComponentSwizzle c, uint8_t identity) {
+    switch (c) {
+      case VK_COMPONENT_SWIZZLE_ZERO: return 0u;
+      case VK_COMPONENT_SWIZZLE_ONE:  return 1u;
+      case VK_COMPONENT_SWIZZLE_R:    return 2u;
+      case VK_COMPONENT_SWIZZLE_G:    return 3u;
+      case VK_COMPONENT_SWIZZLE_B:    return 4u;
+      case VK_COMPONENT_SWIZZLE_A:    return 5u;
+      default:                        return identity;  // VK_COMPONENT_SWIZZLE_IDENTITY
+    }
+  }
+
+  inline bool isIdentitySwizzle(const VkComponentMapping& m) {
+    auto isSelf = [](VkComponentSwizzle c, VkComponentSwizzle self) {
+      return c == VK_COMPONENT_SWIZZLE_IDENTITY || c == self;
+    };
+    return isSelf(m.r, VK_COMPONENT_SWIZZLE_R) && isSelf(m.g, VK_COMPONENT_SWIZZLE_G)
+        && isSelf(m.b, VK_COMPONENT_SWIZZLE_B) && isSelf(m.a, VK_COMPONENT_SWIZZLE_A);
+  }
+
+  // Out-of-line: DxvkImageView is a complete type only here. A sampled view with
+  // a non-identity component swizzle (D3D9 L8 -> rrr1, A8 -> 000a, A8L8 -> rrrg)
+  // samples through its own swizzled Metal texture view; the base R8/RG8 texture
+  // holds the data and stays resident.
   inline Rc<DxvkImageView> DxvkImage::createView(const DxvkImageViewKey& key) {
+    VkComponentMapping swizzle = key.unpackSwizzle();
+    if (m_metalTexture && m_backend && !isIdentitySwizzle(swizzle)) {
+      uint64_t viewResourceId = 0u;
+      if (m_backend->createTextureView(
+            m_metalTexture, metalPixelFormat(), m_info.mipLevels,
+            std::max(m_info.numLayers, 1u),
+            wmtSwizzleCodeFromVulkan(swizzle.r, 2u),   // Red
+            wmtSwizzleCodeFromVulkan(swizzle.g, 3u),   // Green
+            wmtSwizzleCodeFromVulkan(swizzle.b, 4u),   // Blue
+            wmtSwizzleCodeFromVulkan(swizzle.a, 5u),   // Alpha
+            &viewResourceId) && viewResourceId)
+        return new DxvkImageView(this, key, viewResourceId);
+    }
     return new DxvkImageView(this, key);
   }
 

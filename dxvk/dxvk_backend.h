@@ -119,6 +119,16 @@ namespace dxvk {
                                   uint32_t metalPixelFormat, uint32_t metalUsage,
                                   uint64_t* gpuResourceIdOut, bool cube = false);
 
+    // A swizzled 2D view onto an existing sampled texture (e.g. L8 -> rrr1), for
+    // formats whose D3D9 component mapping Metal must apply at sample time. The
+    // r/g/b/a args are WMTTextureSwizzle codes (Zero=0 One=1 Red=2 Green=3
+    // Blue=4 Alpha=5), kept as plain ints so this header stays winemetal-free.
+    uint64_t createTextureView(uint64_t baseTexture, uint32_t metalPixelFormat,
+                               uint32_t mipLevels, uint32_t sliceCount,
+                               uint8_t swizzleR, uint8_t swizzleG,
+                               uint8_t swizzleB, uint8_t swizzleA,
+                               uint64_t* gpuResourceIdOut);
+
     // Uploads a tightly-packed region into one mip level (and array slice / cube
     // face) of a texture.
     void uploadTexture(uint64_t texture, uint32_t mipLevel, uint32_t x, uint32_t y,

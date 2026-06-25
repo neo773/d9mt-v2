@@ -200,6 +200,32 @@ namespace dxvk {
     return texture;
   }
 
+  uint64_t D9mtBackend::createTextureView(uint64_t baseTexture, uint32_t metalPixelFormat,
+                                          uint32_t mipLevels, uint32_t sliceCount,
+                                          uint8_t swizzleR, uint8_t swizzleG,
+                                          uint8_t swizzleB, uint8_t swizzleA,
+                                          uint64_t* gpuResourceIdOut) {
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = 0;
+    if (!baseTexture)
+      return 0;
+    WMTTextureSwizzleChannels swizzle = {
+      WMTTextureSwizzle(swizzleR), WMTTextureSwizzle(swizzleG),
+      WMTTextureSwizzle(swizzleB), WMTTextureSwizzle(swizzleA) };
+    uint64_t viewResourceId = 0u;
+    uint64_t view = MTLTexture_newTextureView(
+      baseTexture, WMTPixelFormat(metalPixelFormat), WMTTextureType2D,
+      0u, uint16_t(mipLevels ? mipLevels : 1u), 0u, uint16_t(sliceCount ? sliceCount : 1u),
+      swizzle, &viewResourceId);
+    if (!view) {
+      logLine("createTextureView: newTextureView failed");
+      return 0;
+    }
+    if (gpuResourceIdOut)
+      *gpuResourceIdOut = viewResourceId;
+    return view;
+  }
+
   void D9mtBackend::uploadTexture(uint64_t texture, uint32_t mipLevel,
                                   uint32_t x, uint32_t y,
                                   uint32_t width, uint32_t height,

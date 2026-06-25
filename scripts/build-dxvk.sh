@@ -205,6 +205,9 @@ echo "[dxvk] compiling code_texture.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_texture.exe" "$V2/test/code_texture.c" \
   -ld3d9 -luser32 -lgdi32
 
+echo "[dxvk] compiling code_lum.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_lum.exe" "$V2/test/code_lum.c" -ld3d9 -luser32 -lgdi32
+
 echo "[dxvk] compiling code_cube.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_cube.exe" "$V2/test/code_cube.c" \
   -ld3d9 -luser32 -lgdi32
