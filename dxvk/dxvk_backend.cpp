@@ -706,13 +706,18 @@ namespace dxvk {
     uint32_t passHeight = backbufferPass && m_drawableHeight ? m_drawableHeight : uint32_t(MTLTexture_height(colorTexture));
     uint64_t passDepth  = backbufferPass ? m_depthTexture : depthForSize(passWidth, passHeight);
     if (!backbufferPass) {
-      m_lastOffscreenTarget = colorTexture;
-      m_lastOffscreenWidth  = passWidth;
-      m_lastOffscreenHeight = passHeight;
-      m_lastOffscreenTargets[0] = colorTexture;
-      for (uint32_t i = 1; i < m_colorTargetCount; i++)
-        m_lastOffscreenTargets[i] = m_colorTargets[i];
-      m_lastOffscreenCount = m_colorTargetCount;
+      // Keep the LARGEST offscreen target (most likely the main G-buffer, not a
+      // small shadow map) for the DUMP_RT ground-truth readback.
+      if (uint64_t(passWidth) * passHeight >=
+          uint64_t(m_lastOffscreenWidth) * m_lastOffscreenHeight) {
+        m_lastOffscreenTarget = colorTexture;
+        m_lastOffscreenWidth  = passWidth;
+        m_lastOffscreenHeight = passHeight;
+        m_lastOffscreenTargets[0] = colorTexture;
+        for (uint32_t i = 1; i < m_colorTargetCount; i++)
+          m_lastOffscreenTargets[i] = m_colorTargets[i];
+        m_lastOffscreenCount = m_colorTargetCount;
+      }
     }
     renderPass.depth.texture      = passDepth;
     renderPass.depth.load_action  = WMTLoadActionClear;
