@@ -1,0 +1,47 @@
+ROADMAP.md
+  s_85f47c9b3164ad::t_c463451cf40878 113-124
+test/code_mrt.c
+  s_85f47c9b3164ad::t_8d0e425697aa48 1-110
+dxvk/dxvk_backend.cpp
+  s_85f47c9b3164ad::t_81427bc2038297 904-914
+  s_85f47c9b3164ad::t_278901b1a8a9aa 583-594,597,603-608
+  s_85f47c9b3164ad::t_96e418f16b1fed 700-703
+  s_85f47c9b3164ad::t_504da819f8fbec 679-686
+dxvk/dxvk_backend.h
+  s_85f47c9b3164ad::t_7673d7f6868525 167-177
+  s_85f47c9b3164ad::t_2e123e44642f78 287-288
+  s_85f47c9b3164ad::t_d7beeafa2b8f07 247-249
+test/mrt_ps_bytecode.inc
+  s_85f47c9b3164ad::t_1d0522c87afbfc 1
+test/shaders/mrt_ps.asm
+  s_85f47c9b3164ad::t_457fff30b7c6d0 1-5
+scripts/build-dxvk.sh
+  s_85f47c9b3164ad::t_d60d7af4fb2575 211-213
+dxvk/dxvk_context.cpp
+  s_85f47c9b3164ad::t_7592cf0f23b42c 92-108,118
+  s_85f47c9b3164ad::t_a015573a3843b5 577-587,593-594,601
+test/code_offdraw.c
+  s_85f47c9b3164ad::t_8aea659e32698a 111,115,119
+  s_85f47c9b3164ad::t_d25f673b397248 92-97,102
+  s_85f47c9b3164ad::t_77fae0c008b2bb 132-138
+dxvk/dxvk_metal_shader_pipeline.cpp
+  s_85f47c9b3164ad::t_ba820785766664 103-104,106,108-109,116-126
+dxvk/dxvk_metal_shader_pipeline.h
+  s_85f47c9b3164ad::t_2627ca9add62c8 80-83,89-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "a6cc17e612ca2db27ed0cdf3cd79db9e0e511663",
+  "prompts": {},
+  "sessions": {
+    "s_85f47c9b3164ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02672ef4-4d8a-4544-a085-074fc349e128",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
