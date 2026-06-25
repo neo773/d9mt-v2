@@ -599,6 +599,18 @@ namespace dxvk {
       MTLCommandEncoder_endEncoding(m_frameEncoder);
       m_frameEncoder = 0;
       m_frameOpen = false;
+      // Split the frame's GPU work across command buffers at offscreen render-
+      // pass boundaries: Metal's GPU watchdog is per command buffer, and a whole
+      // complex frame (the deferred G-buffer / shadow / lighting passes plus the
+      // composite) in one buffer can trip it. Commit each offscreen pass on its
+      // own buffer; the backbuffer pass — the only one that acquires + presents
+      // the drawable — must stay in the buffer that presents it, so only split
+      // before the drawable is acquired. Commits are ordered on the queue, so a
+      // later pass still sees an earlier pass's results.
+      if (m_frameCommandBuffer && !m_frameDrawable) {
+        MTLCommandBuffer_commit(m_frameCommandBuffer);
+        m_frameCommandBuffer = 0;  // beginFrame opens a fresh command buffer
+      }
     }
     m_colorTargetCount = count;
     for (uint32_t i = 0; i < count; i++) {
