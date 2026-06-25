@@ -529,6 +529,19 @@ namespace dxvk {
     }
   }
 
+  void D9mtBackend::beginOcclusionQuery() {
+    if (!m_visibilityBuffer)
+      m_visibilityBuffer = createSharedBuffer(sizeof(uint64_t), &m_visibilityCpu);
+    if (m_visibilityCpu)
+      *reinterpret_cast<uint64_t*>(m_visibilityCpu) = 0u;  // fresh count this frame
+    m_occlusionActive = true;
+    m_occlusionUsedThisFrame = true;
+  }
+
+  void D9mtBackend::endOcclusionQuery() {
+    m_occlusionActive = false;
+  }
+
   uint64_t D9mtBackend::depthForSize(uint32_t width, uint32_t height) {
     uint64_t key = (uint64_t(width) << 32) | height;
     auto it = m_depthBySize.find(key);
@@ -672,6 +685,7 @@ namespace dxvk {
     renderPass.render_target_width  = passWidth;
     renderPass.render_target_height = passHeight;
     renderPass.default_raster_sample_count = 1;
+    renderPass.visibility_buffer = m_visibilityBuffer;
     m_backbufferPassOpen = backbufferPass;
 
     m_frameEncoder = MTLCommandBuffer_renderCommandEncoder(m_frameCommandBuffer, &renderPass);
@@ -703,6 +717,7 @@ namespace dxvk {
     wmtcmd_render_setrasterizerstate  setRaster = {};
     wmtcmd_render_setviewport         setViewport = {};
     wmtcmd_render_setscissorrect      setScissor = {};
+    wmtcmd_render_setvisibilitymode   setVisibility = {};
     wmtcmd_render_draw                drawCmd     = {};
 
     setPipeline.type = WMTRenderCommandSetPSO;
@@ -757,6 +772,17 @@ namespace dxvk {
       setScissor.scissor_rect.height = uint64_t(draw.scissorHeight * viewportScaleY);
       tail->next.set(&setScissor);
       tail = reinterpret_cast<wmtcmd_base*>(&setScissor);
+    }
+
+    // Count visible samples into the visibility buffer while an occlusion query
+    // is active; otherwise leave counting off for this draw.
+    if (m_visibilityBuffer) {
+      setVisibility.type   = WMTRenderCommandSetVisibilityMode;
+      setVisibility.offset = 0u;
+      setVisibility.mode   = m_occlusionActive ? WMTVisibilityResultModeCounting
+                                               : WMTVisibilityResultModeDisabled;
+      tail->next.set(&setVisibility);
+      tail = reinterpret_cast<wmtcmd_base*>(&setVisibility);
     }
 
     // Make every argument-buffer-referenced resource resident so the GPU can
@@ -840,6 +866,13 @@ namespace dxvk {
       MTLCommandBuffer_waitUntilCompleted(m_frameCommandBuffer);  // Stage A: block
       if (MTLCommandBuffer_status(m_frameCommandBuffer) == WMTCommandBufferStatusError)
         logLine("endFrameAndPresent: command buffer ERROR");
+      // The frame is complete: if an occlusion query counted into the visibility
+      // buffer this frame, its sample count is now readable.
+      if (m_occlusionUsedThisFrame && m_visibilityCpu) {
+        m_lastOcclusionSamples = *reinterpret_cast<uint64_t*>(m_visibilityCpu);
+        m_occlusionResultReady = true;
+        m_occlusionUsedThisFrame = false;
+      }
       // Ground-truth readback of the last offscreen target (debug-gated).
       if (m_lastOffscreenTarget && std::fopen("C:\\d9mt-test\\DUMP_RT", "r"))
         dumpTextureToFile(m_lastOffscreenTarget, m_lastOffscreenWidth,

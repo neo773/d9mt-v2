@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "dxvk_include.h"
+#include "dxvk_backend.h"   // g_activeBackend — real occlusion sample count
 
 // GPU query / event shim. D3D9 occlusion / timestamp / event queries (D3D9Query)
 // are NOT on the FF-triangle path; the shim has no GPU timeline to query. We
@@ -61,7 +62,13 @@ namespace dxvk {
 
     DxvkGpuQueryStatus getData(DxvkQueryData& data) {
       data = DxvkQueryData();
-      data.occlusion.samplesPassed = ~0ull;
+      // Real GPU count once the query's frame has presented; until then the
+      // conservative "fully visible" fallback, so a same-frame GetData poll
+      // never blocks on a result the synchronous present hasn't produced yet.
+      data.occlusion.samplesPassed =
+        (g_activeBackend && g_activeBackend->occlusionResultReady())
+          ? g_activeBackend->lastOcclusionSamples()
+          : ~0ull;
       return DxvkGpuQueryStatus::Available;
     }
 

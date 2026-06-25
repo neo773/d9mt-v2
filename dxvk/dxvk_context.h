@@ -429,8 +429,14 @@ namespace dxvk {
     void endLatencyTracking(const Rc<DxvkLatencyTracker>& tracker) { (void) tracker; }
 
     // Queries — no GPU queries in the shim.
-    void beginQuery(const Rc<DxvkQuery>& query) { (void) query; }
-    void endQuery(const Rc<DxvkQuery>& query) { (void) query; }
+    void beginQuery(const Rc<DxvkQuery>& query) {
+      (void) query;
+      if (m_backend) m_backend->beginOcclusionQuery();
+    }
+    void endQuery(const Rc<DxvkQuery>& query) {
+      (void) query;
+      if (m_backend) m_backend->endOcclusionQuery();
+    }
     void writeTimestamp(const Rc<DxvkQuery>& query) { (void) query; }
 
     // GPU events / signals — fire nothing (single-threaded synchronous replay).

@@ -164,6 +164,17 @@ namespace dxvk {
     // pass against the new target.
     void setColorTarget(uint64_t texture);
 
+    // Occlusion queries: while a query is active, draws count visible (depth/
+    // stencil-passing) samples into a Metal visibility-result buffer. The count
+    // is read back after the frame the query's draws were in completes, so
+    // lastOcclusionSamples() is the real number for a query read on a later
+    // frame; a query read before its frame presents gets the conservative
+    // fallback (so no synchronous-present deadlock).
+    void beginOcclusionQuery();
+    void endOcclusionQuery();
+    bool occlusionResultReady() const { return m_occlusionResultReady; }
+    uint64_t lastOcclusionSamples() const { return m_lastOcclusionSamples; }
+
     // Records a swapchain backbuffer's texture so setColorTarget can recognise
     // it and route its draws to the presentable drawable. Called when the
     // swapchain initializes its backbuffers.
@@ -245,6 +256,12 @@ namespace dxvk {
     // (Metal needs the depth attachment to match the color size for a draw).
     uint64_t depthForSize(uint32_t width, uint32_t height);
     std::unordered_map<uint64_t, uint64_t> m_depthBySize;
+    uint64_t m_visibilityBuffer = 0;
+    void*    m_visibilityCpu = nullptr;
+    bool     m_occlusionActive = false;       // a query is counting right now
+    bool     m_occlusionUsedThisFrame = false; // a query ran in the current frame
+    bool     m_occlusionResultReady = false;
+    uint64_t m_lastOcclusionSamples = 0;
     // Reliable ground-truth: blit a (possibly Private) texture into a shared
     // buffer and write its raw BGRA8 bytes to a file, bypassing the GPU-capture
     // replayer and the window. Triggered for the last offscreen target when the

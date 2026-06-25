@@ -213,11 +213,17 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
     winemetal's render-encoder path (and whether a color attachment needs an
     explicit store/usage flag the drawable sets implicitly); compare the WMT
     render-pass struct we pass for offscreen vs backbuffer field-by-field.
-  - *Occlusion queries scope:* `getQueryData` returns conservatively-visible
-    today. Real impl: a Metal visibility-result buffer + `setVisibilityResult
-    Mode(Counting, offset)` around the draws between `beginQuery`/`endQuery`,
-    read the counter at `getData`. Verify by asserting the count ≈ the drawn
-    area (a number, not a pixel — no visual capture).
+  - *Occlusion queries — DONE + verified (real GPU counting):* a shared
+    visibility-result buffer set on every render pass + per-draw
+    `setVisibilityMode(Counting/Disabled)` driven by `beginQuery`/`endQuery`; the
+    count is read back after the query's frame presents and surfaced through
+    `DxvkQuery::getData` via `g_activeBackend`. Deadlock-safe: a query polled
+    before its frame presents gets the conservative ~0 (fully-visible) fallback —
+    always Available, never Pending — so the synchronous-present GetData loop
+    can't spin forever. Verified by `code_occl.exe`: a center quarter-screen quad
+    counts 480000 samples = 1600x1200 (2x Retina drawable) * 1/4, exact. Gotcha
+    found while verifying: `texquad_vs` needs its MVP constants set or the quad
+    collapses to the origin (0 samples) — a test bug, not the driver.
 
 ---
 
