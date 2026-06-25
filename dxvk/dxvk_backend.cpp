@@ -635,12 +635,15 @@ namespace dxvk {
 
     // The autorelease pool + command buffer span the whole frame (all render
     // passes); created once, on the first pass.
-    if (!m_framePool)
+    if (!m_framePool) {
       m_framePool = NSAutoreleasePool_alloc_init();
-    if (!m_frameCommandBuffer) {
+      // Frame start (framePool spans the whole frame, unlike the per-pass-split
+      // command buffer): begin any pending GPU capture here so it captures ALL of
+      // the frame's command buffers, not just the pass active when DO_CAPTURE hit.
       maybeBeginGpuCapture();
-      m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
     }
+    if (!m_frameCommandBuffer)
+      m_frameCommandBuffer = MTLCommandQueue_commandBuffer(m_queue);
 
     // The backbuffer renders into the swapchain drawable (acquired once per
     // frame, presented at the end); an offscreen target renders into its own
