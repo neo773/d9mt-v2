@@ -223,6 +223,16 @@ namespace dxvk {
     stage.translation = convertSpirvToMsl(
       code, layout, shader->metadata().stage, layout.getSamplerHeapSet());
 
+    if (stage.translation.ok && shader->metadata().stage == VK_SHADER_STAGE_VERTEX_BIT
+        && std::fopen("C:\\d9mt-test\\DUMP_MSL", "r")) {  // DIAG: dump every VS MSL once
+      char path[80];
+      std::snprintf(path, sizeof(path), "C:\\d9mt-test\\vs-%u.metal", cookie);
+      if (FILE* f = std::fopen(path, "w")) {
+        std::fwrite(stage.translation.source.data(), 1, stage.translation.source.size(), f);
+        std::fclose(f);
+      }
+    }
+
     if (stage.translation.ok) {
       uint64_t device = m_backend->device();
       stage.library = metalCompileLibrary(device, stage.translation.source);
