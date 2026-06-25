@@ -896,12 +896,16 @@ namespace dxvk {
       { static bool loggedOnce = false;
         if (!loggedOnce) {
           loggedOnce = true;
-          char buf[256] = {};
-          const char* pfx = "endFrameAndPresent: cmdbuf ERROR: ";
-          size_t n = 0; for (; pfx[n]; n++) buf[n] = pfx[n];
-          if (uint64_t err = MTLCommandBuffer_error(m_frameCommandBuffer))
-            if (uint64_t desc = NSObject_description(err))
-              NSString_getCString(desc, buf + n, sizeof(buf) - n, WMTUTF8StringEncoding);
+          char desc[200] = {};
+          d9mt_cmdbuf_error_params params = {};
+          params.command_buffer = m_frameCommandBuffer;
+          params.desc_ptr = uint64_t(uintptr_t(desc));
+          params.desc_len = sizeof(desc);
+          params.ret_code = -1;
+          D9MT_UnixCall(D9MT_FUNC_CMDBUF_ERROR, &params);
+          char buf[256];
+          std::snprintf(buf, sizeof(buf), "endFrameAndPresent: cmdbuf ERROR code=%lld: %s",
+            (long long) params.ret_code, desc);
           logLine(buf);
         } }
       // The frame is complete: if an occlusion query counted into the visibility

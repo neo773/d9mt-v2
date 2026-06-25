@@ -35,6 +35,9 @@ enum d9mt_unix_func {
    * ourselves. Requires MTL_CAPTURE_ENABLED=1 at launch. action: 1=begin, 0=end.
    * begin captures all command buffers on `queue` until end is called. */
   D9MT_FUNC_CAPTURE = 4,
+  /* Read a failed MTLCommandBuffer's NSError natively (winemetal's
+   * NSObject_description comes back empty from the PE side). */
+  D9MT_FUNC_CMDBUF_ERROR = 5,
   D9MT_FUNC_COUNT,
 };
 
@@ -44,6 +47,13 @@ struct d9mt_capture_params {
   uint64_t path_len;  /* in */
   uint32_t action;    /* in: 1=begin, 0=end                                */
   uint32_t ret_ok;    /* out: 1 if the action succeeded                    */
+};
+
+struct d9mt_cmdbuf_error_params {
+  uint64_t command_buffer;  /* in: MTLCommandBuffer handle           */
+  uint64_t desc_ptr;        /* in: UTF-8 output buffer for the error */
+  uint64_t desc_len;        /* in: buffer capacity                   */
+  int64_t  ret_code;        /* out: NSError.code (-1 if no error)    */
 };
 
 struct d9mt_hud_color_params {
