@@ -44,15 +44,22 @@ delta and a regression target.
       (`c1025a0`), multi-RT (`a6cc17e`). Plus a reusable ground-truth RT readback
       tool (`6bb08e0`). The "offscreen draws write nothing" scare was a test bug
       (missing MVP + corner-pixel check) — offscreen draws work.
-- [x] **GTA IV boots + renders real content on v2** (`744bc5a`). Device, window,
-      fullscreen reset, and ALL shader compiles succeed (0 pipeline failures);
-      the game presents frames, and a captured frame draws GTA's HUD font atlas
-      from a BC3/DXT5 texture, correctly decoded. The unblock: thread VS→FS
-      shader linkage so the IR reconciles varyings a pixel shader reads but its
-      vertex shader never writes (D3D9-legal; Metal rejects at link). **OPEN:**
-      the windowed loading screen shows a white quad and the first boot is very
-      slow to reach gameplay (~246% CPU streaming) — see
-      `memory/v2-occlusion-readback-offscreen.md` for the exact next steps.
+- [x] **GTA IV boots, compiles all shaders, renders real content, and gets past
+      its loading screen on v2.** Milestones this stretch: (a) `744bc5a` — thread
+      VS→FS shader linkage so the IR reconciles varyings a pixel shader reads but
+      its vertex shader never writes (D3D9-legal; Metal rejects at link) → 0
+      pipeline failures, HUD font atlas decoded from BC3/DXT5. (b) `2f226ca` —
+      signal the swapchain frame-latency fence in `presentImage` (it was never
+      signaled → Present deadlocked after a few frames, the "stuck white quad").
+      (c) `7d50b45` — make `ctx->signal` actually fire (it was a no-op →
+      submission/staging/sampler fences never advanced → CPU-side waits deadlock).
+      After (b)+(c) GTA clears the loading screen and issues millions of draws
+      (CPU 246%→100%). **OPEN:** it reaches a BLACK post-load screen (not yet
+      gameplay) with one Metal command-buffer error per run — capture the erroring
+      frame / decode the Metal error code next. See
+      `memory/v2-occlusion-readback-offscreen.md`. NOTE: the shim left several
+      sync-primitive stubs as no-ops; a real game exercises them — audit any fence
+      a workload can wait on.
 
 ### Phase 1.2 notes (DONE)
 
