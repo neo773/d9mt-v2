@@ -1,0 +1,192 @@
+driver/mtl/mtl_presenter.h
+  s_099954a5f894ee::t_35d7ad8ba3e978 30-31
+  s_099954a5f894ee::t_caf772b24dbc82 1-29,32-88
+driver/util/log/log.cpp
+  s_099954a5f894ee::t_5f5bd25ac1aad4 8-11
+driver/d3d9/phasec_probe.cpp
+  s_099954a5f894ee::t_8c820d6e2eb6b3 11-13
+  s_099954a5f894ee::t_973a63f3897b1d 1-10
+  s_099954a5f894ee::t_28e27edd349f3f 16
+  s_099954a5f894ee::t_fa95cecca5fbec 17-19
+  s_099954a5f894ee::t_c00ebc08955099 20-21
+  s_099954a5f894ee::t_20b3a67ed1e08e 14-15
+driver/mtl/mtl_context.h
+  s_099954a5f894ee::t_f833cfc063b4f4 43
+  s_099954a5f894ee::t_a5e91a70790c26 7
+driver/d3d9/d3d9_util.cpp
+  s_099954a5f894ee::t_e90e2eebfb47f8 1-368
+driver/mtl/mtl_resource.h
+  s_099954a5f894ee::t_5a79f77ade6596 4
+  s_099954a5f894ee::t_dbc0da6fd07971 136-145,148-149,152,154-188
+  s_099954a5f894ee::t_ba27bd29bcf1a5 225
+  s_099954a5f894ee::t_0fe172cb05edf7 251
+  s_099954a5f894ee::t_3c247f137db0a3 125-133,219-223,226-247
+  s_099954a5f894ee::t_98eb7bf07ffb70 134-135
+driver/d3d9/d3d9_names.cpp
+  s_099954a5f894ee::t_012ae1fdbefdbb 3-6
+driver/d3d9/d3d9_fixed_function.cpp
+  s_099954a5f894ee::t_ff53938dfe927e 1-17
+driver/d3d9/d3d9_constant_buffer.h
+  s_099954a5f894ee::t_70b2c79340f8c9 3-13,28-29,35-36,53,66,95-100,103-104,106,110,113-114,117,120,123,125,128,130,132
+driver/d3d9/d3d9_shader_analysis.cpp
+  s_099954a5f894ee::t_19f258735c55d6 140-142
+  s_099954a5f894ee::t_31857fcddf9007 4-5,18-19
+  s_099954a5f894ee::t_07841ea45ecaa8 1-3,6-17,20-139,143-291,293-294,296-298,300-359
+  s_099954a5f894ee::t_c2011663a052e3 292,295,299
+driver/mtl/mtl_format.cpp
+  s_099954a5f894ee::t_11d09bf6a5d005 35
+  s_099954a5f894ee::t_2019651efe9ef3 12-34,36-48
+driver/d3d9/d3d9_shader.h
+  s_099954a5f894ee::t_26f81680f8db10 1-4,9-10,15-16,22-77,113-120,361
+  s_099954a5f894ee::t_c2492596ea96f9 6-8,11-14,17-21
+  s_099954a5f894ee::t_f82d2792d8c1fd 165-166
+  s_099954a5f894ee::t_a7ccf66f5f4045 121-164,167-360
+  s_099954a5f894ee::t_ea2d42936cded7 78-112
+  s_099954a5f894ee::t_7b06fc6360fc24 5
+driver/d3d9/d3d9_initializer.h
+  s_099954a5f894ee::t_a09bce9cceabdb 1-101
+driver/mtl/mtl_format.h
+  s_099954a5f894ee::t_58c06eb1317c93 8-14,19
+driver/d3d9/d3d9_adapter.h
+  s_099954a5f894ee::t_b77e9b32d71c6d 1-183
+driver/d3d9/d3d9_constant_copy.cpp
+  s_099954a5f894ee::t_c6c47ce745f762 2,4
+  s_099954a5f894ee::t_2fa5988c257a53 1,3,5-401
+driver/d3d9/d3d9_swvp_emu.h
+  s_099954a5f894ee::t_62974bd71d7372 12-13
+  s_099954a5f894ee::t_7c24bcd8ef873a 1-11,14-71
+driver/d3d9/d3d9_annotation.h
+  s_099954a5f894ee::t_adab5aeaba43b6 1-91
+driver/d3d9/d3d9_interface.h
+  s_099954a5f894ee::t_58c5fbd9ced373 1-198
+driver/d3d9/d3d9_query.h
+  s_099954a5f894ee::t_f7857328501c3c 1-94
+driver/EXTRACTION-LOG.md
+  s_099954a5f894ee::t_a744c67811cb60 333-403
+  s_099954a5f894ee::t_17569bd3499f5b 210-285
+  s_099954a5f894ee::t_dd333b7efbcf59 404-436,441-483
+  s_099954a5f894ee::t_d59c3890478aab 437-440
+  s_099954a5f894ee::t_3ac22188a5a012 286-332
+  s_099954a5f894ee::t_c3f895e7e45ddf 135-209
+driver/d3d9/d3d9_swapchain.h
+  s_099954a5f894ee::t_164345fac1c152 1-226
+scripts/build-driver.sh
+  s_099954a5f894ee::t_7f56afaf1e77cf 28-35
+  s_099954a5f894ee::t_aebefcf8bb4edb 96-104
+  s_099954a5f894ee::t_fe1673f2267eec 56
+  s_099954a5f894ee::t_1d71f423b764f1 206-207
+  s_099954a5f894ee::t_235dd166e4f942 66-71
+  s_099954a5f894ee::t_97c7fa61b70e50 72-76
+  s_099954a5f894ee::t_29a7af3846ba28 170-191
+  s_099954a5f894ee::t_b85241be0b3759 55,57-65
+  s_099954a5f894ee::t_bbcb40dd2c4756 44
+  s_099954a5f894ee::t_c6b97da6952ce4 202
+  s_099954a5f894ee::t_21bafb4943914f 203
+  s_099954a5f894ee::t_35a13bbc3b8cd4 111-116,118
+  s_099954a5f894ee::t_ae5f130b84650f 164-169,192-201,204-205,215-216
+  s_099954a5f894ee::t_6a0f610cebffc9 208-214
+  s_099954a5f894ee::t_9624f5de1c50ed 217
+driver/d3d9/d3d9_texture.h
+  s_099954a5f894ee::t_762f5c16830d2d 1-256
+driver/dxvk/dxvk_annotation.h
+  s_099954a5f894ee::t_adab5aeaba43b6 1-33
+driver/d3d9/d3d9_subresource.h
+  s_099954a5f894ee::t_f42cb5bf5c0f06 1-145
+driver/d3d9/d3d9_util.h
+  s_099954a5f894ee::t_9ebb7a5bc60ec8 1-367
+driver/mtl/mtl_presenter_stub.cpp
+  s_099954a5f894ee::t_877aa970d5f960 1-66
+driver/d3d9/d3d9_shader_analysis.h
+  s_099954a5f894ee::t_ec18b182d58c85 13
+  s_099954a5f894ee::t_1187bf6d4e4d4a 264
+  s_099954a5f894ee::t_f7b1a9bf28012f 210
+  s_099954a5f894ee::t_07841ea45ecaa8 1-12,14-209,211-263,265-276
+driver/mtl/mtl_device.h
+  s_099954a5f894ee::t_e769f56c20bf27 53-55,60
+  s_099954a5f894ee::t_7344ce2fc0c666 118-122,141-144
+  s_099954a5f894ee::t_03aea39c7b0cdb 123-135,145-174
+  s_099954a5f894ee::t_e1d64b8cef8dd1 1-52,56-59,61-117,136-140,175-176
+driver/d3d9/d3d9_constant_copy.h
+  s_099954a5f894ee::t_2fa5988c257a53 1-3,6-8,12-355
+  s_099954a5f894ee::t_acb87b31d26b1b 4-5,9-11
+driver/dxvk/dxvk_allocator.h
+  s_099954a5f894ee::t_99ece5587a396e 1-313
+driver/d3d9/d3d9_common_buffer.h
+  s_099954a5f894ee::t_866d20a32abb6b 1-257
+driver/d3d9/d3d9_surface.h
+  s_099954a5f894ee::t_72042d21fd1bd3 1-74
+scripts/build-driver.vulkan-whitelist
+  s_099954a5f894ee::t_680151b0c13a61 5-6
+driver/d3d9/d3d9_volume.h
+  s_099954a5f894ee::t_e94a1a0bab4736 1-41
+driver/util/dxvk_hash.h
+  s_099954a5f894ee::t_f46be67fea09dd 1-55
+driver/d3d9/d3d9_common_texture.h
+  s_099954a5f894ee::t_b2d8e4bc3a6ca4 1-214,220-415
+  s_099954a5f894ee::t_0ebc838cd1c498 215-219
+driver/d3d9/d3d9_shader.cpp
+  s_099954a5f894ee::t_fd26688eac03cd 1-16
+driver/mtl/mtl_types.h
+  s_099954a5f894ee::t_3b30236002f11a 275-278
+  s_099954a5f894ee::t_1e1849f1868f4a 476-488
+  s_099954a5f894ee::t_a08144b261cfb7 443-475,489-506,533-538
+  s_099954a5f894ee::t_3c247f137db0a3 507-532,539
+  s_099954a5f894ee::t_0f9793b4fd3963 67-78
+  s_099954a5f894ee::t_2a9f7e8bf544ae 540
+driver/mtl/mtl_device_stub.cpp
+  s_099954a5f894ee::t_bc502436a715e3 1-2
+  s_099954a5f894ee::t_f8915be6571f6d 15-16,18,21
+  s_099954a5f894ee::t_80010bdb729623 3-14,17,19-20,22-76,124
+  s_099954a5f894ee::t_7c40634c2dbcee 82,84-123
+  s_099954a5f894ee::t_11d09bf6a5d005 83
+  s_099954a5f894ee::t_7344ce2fc0c666 77-81
+driver/d3d9/d3d9_bridge.h
+  s_099954a5f894ee::t_f1da16858d3064 1-127
+driver/backend/mtl_context_impl.h
+  s_099954a5f894ee::t_1cccfbf09a3d9e 1-182
+driver/d3d9/d3d9_state.h
+  s_099954a5f894ee::t_d4c9437999d85c 20-24
+driver/d3d9/d3d9_format.cpp
+  s_099954a5f894ee::t_b2e509f4dabb7e 538-546,549-552
+driver/d3d9/d3d9_device.h
+  s_099954a5f894ee::t_a415c327dd3639 1682
+  s_099954a5f894ee::t_3857e94fbbd74b 1709-1711
+  s_099954a5f894ee::t_c299cb1a3908a7 814-815
+  s_099954a5f894ee::t_ccf4b78f47957f 1656,1660
+  s_099954a5f894ee::t_3ac92273362f0c 864
+  s_099954a5f894ee::t_27b4f853cd900c 1623
+  s_099954a5f894ee::t_309fc591dc554e 1232
+  s_099954a5f894ee::t_8aee7018c570c8 1109-1110
+  s_099954a5f894ee::t_f1da16858d3064 1-2,21-37,39-51,53-119,122-237,239-244,246-255,257-813,816-828,830-832,834-835,837-839,841-863,865-894,898-946,949-1108,1111-1224,1226-1231,1233-1303,1305-1308,1310-1315,1317-1581,1583-1604,1607-1608,1610,1612,1615-1622,1624-1655,1657-1659,1661-1681,1683-1708,1712-1730
+  s_099954a5f894ee::t_6a8e63f6452d67 1304,1309,1316
+  s_099954a5f894ee::t_2a42401cadb3d8 829,833,836,840
+  s_099954a5f894ee::t_1596923718c5bf 947-948
+  s_099954a5f894ee::t_fb3b57332e3c76 1605-1606,1609,1611,1613-1614
+  s_099954a5f894ee::t_23e1a08bc5b04c 1582
+  s_099954a5f894ee::t_fe539443842112 52
+  s_099954a5f894ee::t_76ca083a7a7e16 38
+  s_099954a5f894ee::t_663c0363643db9 256
+  s_099954a5f894ee::t_196cf1a481eb74 238,245
+  s_099954a5f894ee::t_29732a6e045445 895-897
+  s_099954a5f894ee::t_10fb3386fea9c2 3-20
+  s_099954a5f894ee::t_9222a1e44e2eaa 120-121
+  s_099954a5f894ee::t_98381d603a85d7 1225
+driver/d3d9/d3d9_fixed_function.h
+  s_099954a5f894ee::t_88a889bf2606af 1-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d48c9eba05de74e14816b82b388ac54e02429165",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
