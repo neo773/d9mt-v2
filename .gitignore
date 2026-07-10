@@ -15,3 +15,6 @@ examples/triangle/*.png
 /dxvk-ref/
 /third_party/dxbc-spirv/
 /third_party/khronos/
+
+# upstream DXVK 3.0 reference clone (extraction source, reproduce via git clone)
+/DXVK-3.0-uptsream/

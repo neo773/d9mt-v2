@@ -205,22 +205,6 @@ echo "[dxvk] compiling code_texture.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_texture.exe" "$V2/test/code_texture.c" \
   -ld3d9 -luser32 -lgdi32
 
-echo "[dxvk] compiling code_lum.exe"
-$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_lum.exe" "$V2/test/code_lum.c" -ld3d9 -luser32 -lgdi32
-
-echo "[dxvk] compiling code_mrt.exe"
-$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_mrt.exe" "$V2/test/code_mrt.c" -ld3d9 -luser32 -lgdi32
-
-echo "[dxvk] compiling code_occl.exe"
-$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_occl.exe" "$V2/test/code_occl.c" -ld3d9 -luser32 -lgdi32
-
-echo "[dxvk] compiling code_offdraw.exe"
-$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_offdraw.exe" "$V2/test/code_offdraw.c" -ld3d9 -luser32 -lgdi32
-
-echo "[dxvk] compiling code_cube.exe"
-$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_cube.exe" "$V2/test/code_cube.c" \
-  -ld3d9 -luser32 -lgdi32
-
 echo "[dxvk] compiling code_blend.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_blend.exe" "$V2/test/code_blend.c" \
   -ld3d9 -luser32 -lgdi32
@@ -250,6 +234,10 @@ $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_alpha.exe" "$V2/test/code_alpha.c" -
 
 echo "[dxvk] compiling code_rtt.exe"
 $MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_rtt.exe" "$V2/test/code_rtt.c" \
+  -ld3d9 -luser32 -lgdi32
+
+echo "[dxvk] compiling code_twodraw.exe"
+$MINGW-gcc -O2 -I"$V2/test" -o "$BUILD/code_twodraw.exe" "$V2/test/code_twodraw.c" \
   -ld3d9 -luser32 -lgdi32
 
 echo "[dxvk] done:"; ls -la "$BUILD/d3d9.dll" "$BUILD"/code*.exe

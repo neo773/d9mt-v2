@@ -39,27 +39,6 @@ delta and a regression target.
       bindResources/appendDraw all ~0, caches hit); the Stage-A blocking present
       (GPU wait, ~0.75ms) dominates. Re-measure on a real many-draw frame before
       cutting — that's where bindResources/appendDraw scaling will show.
-- [x] **Phase 1 complete** — cube textures (`c95016a`), A8/L8/A8L8 formats
-      (`c48612e`), occlusion queries via real Metal visibility counting
-      (`c1025a0`), multi-RT (`a6cc17e`). Plus a reusable ground-truth RT readback
-      tool (`6bb08e0`). The "offscreen draws write nothing" scare was a test bug
-      (missing MVP + corner-pixel check) — offscreen draws work.
-- [x] **GTA IV boots, compiles all shaders, renders real content, and gets past
-      its loading screen on v2.** Milestones this stretch: (a) `744bc5a` — thread
-      VS→FS shader linkage so the IR reconciles varyings a pixel shader reads but
-      its vertex shader never writes (D3D9-legal; Metal rejects at link) → 0
-      pipeline failures, HUD font atlas decoded from BC3/DXT5. (b) `2f226ca` —
-      signal the swapchain frame-latency fence in `presentImage` (it was never
-      signaled → Present deadlocked after a few frames, the "stuck white quad").
-      (c) `7d50b45` — make `ctx->signal` actually fire (it was a no-op →
-      submission/staging/sampler fences never advanced → CPU-side waits deadlock).
-      After (b)+(c) GTA clears the loading screen and issues millions of draws
-      (CPU 246%→100%). **OPEN:** it reaches a BLACK post-load screen (not yet
-      gameplay) with one Metal command-buffer error per run — capture the erroring
-      frame / decode the Metal error code next. See
-      `memory/v2-occlusion-readback-offscreen.md`. NOTE: the shim left several
-      sync-primitive stubs as no-ops; a real game exercises them — audit any fence
-      a workload can wait on.
 
 ### Phase 1.2 notes (DONE)
 
@@ -111,49 +90,10 @@ game art ships in) + per-mip block-aware upload. Remaining, in rough priority:
   samples a red offscreen RT onto a quad. Current cut assumes full-screen RTs
   (reuse `m_depthTexture`, so the Depth32Float PSO matches); arbitrary RT sizes
   need per-size depth or a target-keyed PSO depth format.
-- **Cube textures** — DONE (`c95016a`). `createSampledTexture` builds a
-  WMTTextureTypeCube when the cube flag is set; each face uploads to its array
-  slice (D3D9 `baseArrayLayer` → Metal cube slice); the IR already bakes the
-  sampler dimensionality from the DCL. `code_cube.exe` samples the +Z face
-  (cyan), verified by GPU capture.
-- **A8/L8/A8L8 single-channel formats** — DONE (`c48612e`). Map `R8_UNORM`/
-  `R8G8_UNORM` to Metal R8/RG8 and apply the D3D9 swizzle (L8 rrr1, A8 000a,
-  A8L8 rrrg) via a per-view swizzled Metal view (`MTLTexture_newTextureView`);
-  the view's resource id samples with the swizzle, the base texture stays
-  resident. `code_lum.exe` (an L8 0..255 ramp) renders a correct black->white
-  luminance gradient, GPU-capture verified.
-  - *Hard-won lesson (cost ~a full session):* the long 'L8 renders invisible'
-    investigation was a VERIFICATION GHOST — the `code_l8.exe` test binary
-    captured/displayed blank regardless of its contents (a byte-identical clone
-    of the working `code_texture.exe` under that name was ALSO blank). Four+
-    root-cause hypotheses (R8 faults, alpha test, bindless descriptor, single-
-    channel sampling) were all chasing a broken instrument, not the renderer.
-    RULE: when one test exe misbehaves but others render, diff/clone the test
-    harness FIRST (rename it, run identical code) before deep-diving the driver.
-    The fix itself was exactly the few lines the early analysis predicted.
-  - *Multi-RT — DONE + verified.* Five touch points: `setColorTargets(textures,
-    formats, count)` on the backend stores a color-target array; `bindRenderTargets`
-    collects all `targets.color[i]`; `beginFrame` binds `renderPass.colors[i]` for
-    each; `metalBuildRenderPipeline` takes a per-attachment format array (one blend
-    for all — D3D9 shares blend across MRTs); the `DxvkContext::draw` PSO key folds
-    in the RT count + formats. Verified by `code_mrt.exe` (PS writes oC0/oC1): the
-    `DUMP_RT` readback dumps one file per attachment — RT0 reads back red, RT1
-    green, ground-truth exact. NOTE: the long earlier "offscreen draws write
-    nothing" investigation was a TEST BUG — `code_offdraw`/`code_mrt` never set
-    `texquad_vs`'s MVP constants (quad collapsed to the origin) and the readback
-    sampled a CORNER pixel (in the -0.9..0.9 margin = clear). Offscreen draws +
-    MRT work; the depth-size fix was still real. Verification-ghost lesson, again.
-  - *Occlusion queries — DONE + verified (real GPU counting):* a shared
-    visibility-result buffer set on every render pass + per-draw
-    `setVisibilityMode(Counting/Disabled)` driven by `beginQuery`/`endQuery`; the
-    count is read back after the query's frame presents and surfaced through
-    `DxvkQuery::getData` via `g_activeBackend`. Deadlock-safe: a query polled
-    before its frame presents gets the conservative ~0 (fully-visible) fallback —
-    always Available, never Pending — so the synchronous-present GetData loop
-    can't spin forever. Verified by `code_occl.exe`: a center quarter-screen quad
-    counts 480000 samples = 1600x1200 (2x Retina drawable) * 1/4, exact. Gotcha
-    found while verifying: `texquad_vs` needs its MVP constants set or the quad
-    collapses to the origin (0 samples) — a test bug, not the driver.
+- **Cube textures** (skyboxes/reflections): texture type Cube + 6 faces; the
+  IR already bakes the sampler dimensionality from the DCL.
+- **Occlusion queries**, multi-RT, more uncompressed formats (with channel
+  swizzle for L8/A8/…).
 
 ---
 

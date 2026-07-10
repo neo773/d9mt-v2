@@ -29,6 +29,6 @@ rm -f "$SYS32/d3d9.dll"
 cd "$TESTDIR"
 export TRACE_FILE='C:\d9mt-test\app.trace'
 export APITRACE_FORCE_MODULE_PATH='C:\d9mt-test\d3d9_metal.dll'
-export WINEDLLOVERRIDES='d3d9=n;winemetal=n;d9mtmetal=b'
+export WINEDLLOVERRIDES='d3d9=n;winemetal=n'
 "$WINE" --bottle "$BOTTLE" start /unix "$TESTDIR/$EXE" >/dev/null 2>&1 &
 echo "[apitrace] launched $EXE (pid $!) — forwarding to d3d9_metal.dll"
