@@ -1,0 +1,11 @@
+Upstream: DXMT (github.com/3Shain/dxmt) src/winemetal
+Commit:   964f1308aa4aefb897d6b55b8614e02075a038c2
+Date:     Mon Jun 22 09:51:15 2026 -0500
+Policy:   docs/rewrite/04-air-unixlib.md §Bridge policy — additive patches only,
+          formatted to stay cherry-pickable against upstream.
+Local changes:
+  - airconv_thunks.{c,h} removed (call DXMT SM50* entry points we do not ship);
+    replaced by d9mtair_thunks.{c,h} in the same dispatch style, backed by the
+    v2/airlib compile core (AirBuilder + LLVM).
+  - winemetal.h / winemetal_thunks.{c,h} / unix/winemetal_unix.c: one additive
+    ABI entry — vertex-descriptor-capable render PSO creation (see UPSTREAM.diff).
