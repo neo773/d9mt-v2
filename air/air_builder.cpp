@@ -784,10 +784,13 @@ struct AirBuilderImpl {
         params.push_back(hiddenParamType(ir::SsaDef(declId)));
       }
 
+      // Named by walk order, not SSA id: ir_serialize densely remaps ids on
+      // round-trip, and byte-identical output across serialize boundaries is
+      // a loopback-test invariant (internal linkage; name is otherwise free).
       Function* fn = Function::Create(
         FunctionType::get(mapType(op.getType(), false), params, false),
         GlobalValue::InternalLinkage,
-        "fn" + std::to_string(op.getDef().getId()), *mod);
+        "fn" + std::to_string(functions.size()), *mod);
       addShaderFnAttrs(fn);
       functions.emplace(op.getDef().getId(), fn);
     }

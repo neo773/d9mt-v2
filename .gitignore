@@ -18,3 +18,8 @@ examples/triangle/*.png
 
 # upstream DXVK 3.0 reference clone (extraction source, reproduce via git clone)
 /DXVK-3.0-uptsream/
+
+# local LLVM toolchain builds
+/toolchains/
+# (also as symlink)
+/third_party/dxbc-spirv
