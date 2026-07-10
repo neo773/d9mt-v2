@@ -1,0 +1,6 @@
+; projective sample: coords divided by w
+ps_3_0
+dcl_texcoord0 v0
+dcl_2d s0
+texldp r0, v0, s0
+mov oC0, r0

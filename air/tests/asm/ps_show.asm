@@ -1,0 +1,4 @@
+; passthrough PS: shows interpolated color — also the partner PS for VS cases
+ps_3_0
+dcl_color0 v0
+mov oC0, v0

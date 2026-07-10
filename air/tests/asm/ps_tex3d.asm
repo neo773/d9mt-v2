@@ -1,0 +1,6 @@
+; volume sample
+ps_3_0
+dcl_texcoord0 v0
+dcl_volume s0
+texld r0, v0, s0
+mov oC0, r0

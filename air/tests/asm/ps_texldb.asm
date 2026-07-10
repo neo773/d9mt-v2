@@ -1,0 +1,6 @@
+; biased sample: lod bias in w
+ps_3_0
+dcl_texcoord0 v0
+dcl_2d s0
+texldb r0, v0, s0
+mov oC0, r0
