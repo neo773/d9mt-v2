@@ -64,6 +64,18 @@ namespace dxvk {
     TriangleFan   = 5,   // emulated (no native Metal fan)
   };
 
+  // Was DxvkInputAssemblyState { VkPrimitiveTopology, primitiveRestart }. Metal
+  // splits topology *class* (PSO) from *type* (draw); this carries the D3D9-facing
+  // topology plus the primitive-restart flag (unused on Metal strips — always false
+  // for D3D9, which has no restart index). Produced by DecodeInputAssemblyState.
+  struct MtlInputAssemblyState {
+    MtlInputAssemblyState() = default;
+    MtlInputAssemblyState(MtlPrimitiveTopology t, bool restart)
+    : topology(t), primitiveRestart(restart) { }
+    MtlPrimitiveTopology topology         = MtlPrimitiveTopology::TriangleList;
+    bool                 primitiveRestart = false;
+  };
+
   // --- enum-decoder outputs (d3d9_util.h Decode*) --------------------------
   // Values mirror MTLCompareFunction.
   enum class MtlCompareFunction : uint32_t {
@@ -260,6 +272,10 @@ namespace dxvk {
     uint32_t width = 0, height = 0;
   };
 
+  struct MtlOffset2D { // was VkOffset2D
+    int32_t x = 0, y = 0;
+  };
+
   struct MtlRect {     // MTLScissorRect
     uint32_t x = 0, y = 0, width = 0, height = 0;
   };
@@ -422,6 +438,104 @@ namespace dxvk {
   struct MtlSubmitStatus {
     uint64_t submissionId = 0;
     bool     completed    = false;
+  };
+
+
+  // --- device factory surface types (mtl_device.h) --------------------------
+
+  enum class MtlUsage : uint32_t {
+    None          = 0u,
+    VertexBuffer  = 1u << 0,
+    IndexBuffer   = 1u << 1,
+    UniformBuffer = 1u << 2,
+    Staging       = 1u << 3,
+    Sampled       = 1u << 4,
+    RenderTarget  = 1u << 5,
+    DepthStencil  = 1u << 6,
+  };
+
+  inline MtlUsage operator | (MtlUsage a, MtlUsage b) {
+    return MtlUsage(uint32_t(a) | uint32_t(b));
+  }
+  inline bool operator & (MtlUsage a, MtlUsage b) {
+    return (uint32_t(a) & uint32_t(b)) != 0u;
+  }
+
+  enum class MtlCpuAccess : uint32_t {
+    None  = 0u,        // GPU-private
+    Write = 1u,        // shared, write-combined (upload)
+    Read  = 2u,        // shared, cached (readback)
+  };
+
+  enum class MtlImageType : uint32_t {
+    e1D = 0u,
+    e2D = 1u,
+    e3D = 2u,
+  };
+
+  // Was VkImageViewType — the sampler-slot view dimensionality recorded by shader
+  // analysis (d3d9_shader_analysis) and consumed when binding textures. Values
+  // mirror the Vk enum so the D3D9 decode logic copies unchanged.
+  enum class MtlTextureViewType : uint32_t {
+    e1D        = 0u,
+    e2D        = 1u,
+    e3D        = 2u,
+    eCube      = 3u,
+    e1DArray   = 4u,
+    e2DArray   = 5u,
+    eCubeArray = 6u,
+  };
+
+  struct MtlExtent3D {
+    uint32_t width  = 0u;
+    uint32_t height = 0u;
+    uint32_t depth  = 1u;
+  };
+
+  enum class MtlSamplerMipMode : uint32_t {  // MTLSamplerMipFilter
+    None    = 0u,
+    Nearest = 1u,
+    Linear  = 2u,
+  };
+
+  enum class MtlBorderColor : uint32_t {     // MTLSamplerBorderColor
+    TransparentBlack = 0u,
+    OpaqueBlack      = 1u,
+    OpaqueWhite      = 2u,
+  };
+
+
+  // --- format metadata (was DxvkFormatInfo) ----------------------------------
+  enum MtlFormatFlag : uint32_t {
+    MtlFormatFlagNone       = 0u,
+    MtlFormatFlagCompressed = 1u << 0,   // BC block formats
+    MtlFormatFlagDepth      = 1u << 1,
+    MtlFormatFlagStencil    = 1u << 2,
+    MtlFormatFlagPacked     = 1u << 3,
+  };
+
+  struct MtlFormatInfo {
+    uint32_t elementSize = 0u;   // bytes per texel (or per block if compressed)
+    uint32_t blockWidth  = 1u;   // texels per block
+    uint32_t blockHeight = 1u;
+    uint32_t flags       = MtlFormatFlagNone;
+    MtlAspectMask aspects = MtlAspectColor;
+  };
+
+  // Defined in mtl_format.cpp; never returns nullptr (Invalid yields zeros).
+  const MtlFormatInfo* lookupFormatInfo(MtlFormat format);
+
+  struct MtlStagingBufferStats {
+    uint64_t allocated = 0u;   // lifetime bytes allocated
+    uint64_t used      = 0u;   // bytes in flight
+  };
+
+  struct MtlDeviceInfo {
+    char     name[256]        = { };
+    uint64_t maxBufferLength  = 0u;
+    uint32_t maxTextureSize2D = 16384u;
+    uint32_t maxAnisotropy    = 16u;
+    bool     supportsBCFormats = true;
   };
 
 }

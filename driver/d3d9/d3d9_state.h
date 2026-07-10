@@ -17,6 +17,11 @@
 
 namespace dxvk {
 
+  // PHASE-C6: was DxvkLimits::MaxNumSpecConstants (dxvk_limits.h), reached
+  // transitively via dxvk_shader.h before the dxvk/ include chain was severed.
+  // Kept as a standalone D3D9 spec-constant ceiling on the seam.
+  static constexpr uint32_t MaxNumSpecConstants = 20u;
+
   static constexpr uint32_t RenderStateCount  = 256;
   static constexpr uint32_t SamplerStateCount = D3DSAMP_DMAPOFFSET + 1;
   static constexpr uint32_t SamplerCount      = caps::MaxTexturesPS + caps::MaxTexturesVS + 1;

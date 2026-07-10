@@ -5,6 +5,10 @@
 #include "../util_env.h"
 
 namespace dxvk {
+
+  // out-of-line definition for the static instance (missing in this fork's
+  // layout; required for linking — see EXTRACTION-LOG.md)
+  Logger Logger::s_instance = { "d3d9.log" };
   
   Logger::Logger(const std::string& fileName)
   : m_minLevel(getMinLogLevel()), m_fileName(fileName) {

@@ -535,21 +535,21 @@ namespace dxvk {
 
   const MtlFormatInfo* D3D9MtlFormatTable::GetUnsupportedFormatInfo(
     D3D9Format            Format) const {
-    // MtlFormatInfo{ elementSize, blockSize, aspects, planeCount }
-    static const MtlFormatInfo r8b8g8        = { 3, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo r3g3b2        = { 1, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo x4r4g4b4      = { 2, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo a8r3g3b2      = { 2, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo a8p8          = { 2, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo p8            = { 1, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo w11v11u10     = { 4, { 1, 1, 1 }, MtlAspectColor,   1 };
-    static const MtlFormatInfo cxv8u8        = { 2, { 1, 1, 1 }, MtlAspectColor,   1 };
+    // MtlFormatInfo{ elementSize, blockWidth, blockHeight, flags, aspects }
+    static const MtlFormatInfo r8b8g8        = { 3, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo r3g3b2        = { 1, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo x4r4g4b4      = { 2, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo a8r3g3b2      = { 2, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo a8p8          = { 2, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo p8            = { 1, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo w11v11u10     = { 4, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
+    static const MtlFormatInfo cxv8u8        = { 2, 1, 1, MtlFormatFlagNone,    MtlAspectColor   };
     // Unsupported and potentially unsupported lockable depth formats need to be
     // listed here in order to allow for the creation of offscreen plain surfaces
-    static const MtlFormatInfo d16_lockable  = { 2, { 1, 1, 1 }, MtlAspectDepth,   1 };
-    static const MtlFormatInfo d32f_lockable = { 4, { 1, 1, 1 }, MtlAspectDepth,   1 };
-    static const MtlFormatInfo d32_lockable  = { 4, { 1, 1, 1 }, MtlAspectDepth,   1 };
-    static const MtlFormatInfo s8_lockable   = { 1, { 1, 1, 1 }, MtlAspectStencil, 1 };
+    static const MtlFormatInfo d16_lockable  = { 2, 1, 1, MtlFormatFlagDepth,   MtlAspectDepth   };
+    static const MtlFormatInfo d32f_lockable = { 4, 1, 1, MtlFormatFlagDepth,   MtlAspectDepth   };
+    static const MtlFormatInfo d32_lockable  = { 4, 1, 1, MtlFormatFlagDepth,   MtlAspectDepth   };
+    static const MtlFormatInfo s8_lockable   = { 1, 1, 1, MtlFormatFlagStencil, MtlAspectStencil };
     static const MtlFormatInfo unknown       = {};
 
     switch (Format) {

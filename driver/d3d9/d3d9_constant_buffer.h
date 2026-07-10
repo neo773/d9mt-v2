@@ -1,13 +1,16 @@
 #pragma once
 
-// PHASE-C: this is an ADAPT file (doc 02 §1), NOT ported yet. It is copied only
-// as a transitive include dependency of the KEEP files d3d9_constant_set.h ->
-// d3d9_state.h. It still contains ~21 Vulkan references (VkDeviceSize,
-// VkBufferUsageFlags, VkShaderStageFlags, VkMemoryPropertyFlags) and Rc<DxvkBuffer>
-// / Rc<DxvkResourceAllocation>, and includes ../dxvk/dxvk_buffer.h. Port to
-// MtlBufferHandle + MtlBufferSlice + the discard ring (mtl_resource.h) in Phase C.
-// The Vulkan-gate whitelist must exempt this file until then.
-#include "../dxvk/dxvk_buffer.h"
+// PHASE-C6: ported off Vulkan onto the Mtl seam (doc 05 §Buffers — constant-buffer
+// ring row: usage UniformBuffer, cpuAccess Write).
+//   Rc<DxvkBuffer>             -> Rc<MtlBuffer>
+//   Rc<DxvkResourceAllocation> -> Rc<MtlAllocation>   (the Discard rename ring)
+//   VkDeviceSize               -> MtlDeviceSize
+//   VkBufferUsageFlags         -> MtlUsage
+//   VkShaderStageFlags         -> MtlStageMask
+//   VkMemoryPropertyFlags      -> MtlCpuAccess
+// The Determine*() bodies (d3d9_constant_buffer.cpp) do the semantic rewrite; this
+// header is a pure token retype. Removed from the Vulkan-gate whitelist.
+#include "../mtl/mtl_device.h"
 
 #include "../util/util_math.h"
 
@@ -22,15 +25,15 @@ namespace dxvk {
    * \brief Constant buffer
    */
   class D3D9ConstantBuffer {
-    static constexpr VkDeviceSize ShaderConstSize = 1024ull << 10;
-    static constexpr VkDeviceSize MiscSize        =   64ull << 10;
+    static constexpr MtlDeviceSize ShaderConstSize = 1024ull << 10;
+    static constexpr MtlDeviceSize MiscSize        =   64ull << 10;
 
     using Kind = D3D9ShaderResourceMapping::CbvIndex;
   public:
 
     struct StreamCommand {
-      VkDeviceSize offset = 0u;
-      VkDeviceSize size = 0u;
+      MtlDeviceSize offset = 0u;
+      MtlDeviceSize size = 0u;
     };
 
     D3D9ConstantBuffer();
@@ -47,7 +50,7 @@ namespace dxvk {
      * Useful to pad copies with initialized data.
      * \returns Data alignment
      */
-    VkDeviceSize GetAlignment() const {
+    MtlDeviceSize GetAlignment() const {
       return m_align;
     }
 
@@ -60,7 +63,7 @@ namespace dxvk {
      * \param [in] size Number of bytes to allocate
      * \returns Map pointer of the allocated region
      */
-    void* Alloc(VkDeviceSize size);
+    void* Alloc(MtlDeviceSize size);
 
     /**
      * \brief Allocates typed data
@@ -89,44 +92,44 @@ namespace dxvk {
     D3D9DeviceEx*         m_device  = nullptr;
 
     Kind                  m_kind    = {};
-    VkDeviceSize          m_size    = 0ull;
-    VkBufferUsageFlags    m_usage   = 0u;
-    VkShaderStageFlags    m_stages  = 0u;
-    VkDeviceSize          m_align   = 0ull;
-    VkMemoryPropertyFlags m_memType = 0u;
-    VkDeviceSize          m_offset  = 0ull;
+    MtlDeviceSize         m_size    = 0ull;
+    MtlUsage              m_usage   = MtlUsage::None;
+    MtlStageMask          m_stages  = 0u;
+    MtlDeviceSize         m_align   = 0ull;
+    MtlCpuAccess          m_memType = MtlCpuAccess::None;
+    MtlDeviceSize         m_offset  = 0ull;
     bool                  m_useDma  = false;
 
-    Rc<DxvkBuffer>        m_cpuBuffer = nullptr;
-    Rc<DxvkBuffer>        m_gpuBuffer = nullptr;
+    Rc<MtlBuffer>        m_cpuBuffer = nullptr;
+    Rc<MtlBuffer>        m_gpuBuffer = nullptr;
 
-    Rc<DxvkResourceAllocation> m_cpuSlice = nullptr;
+    Rc<MtlAllocation>    m_cpuSlice = nullptr;
 
     StreamCommand*        m_streamCmd = nullptr;
 
-    Rc<DxvkResourceAllocation> CreateBuffer();
+    Rc<MtlAllocation> CreateBuffer();
 
     void SetupStreamCommand(
-            VkDeviceSize        Offset,
-            VkDeviceSize        Size,
+            MtlDeviceSize       Offset,
+            MtlDeviceSize       Size,
             bool                Discard);
 
-    static VkDeviceSize DetermineSize(
+    static MtlDeviceSize DetermineSize(
             Kind                CbvType);
 
-    static VkBufferUsageFlags DetermineUsage(
+    static MtlUsage DetermineUsage(
             D3D9DeviceEx*       pDevice,
             Kind                CbvType,
-            VkDeviceSize        Size);
+            MtlDeviceSize       Size);
 
-    static VkShaderStageFlags DetermineStages(
+    static MtlStageMask DetermineStages(
             Kind                CbvType);
 
-    static VkDeviceSize DetermineAlignment(
+    static MtlDeviceSize DetermineAlignment(
             D3D9DeviceEx*       pDevice,
-            VkBufferUsageFlags  Usage);
+            MtlUsage            Usage);
 
-    static VkMemoryPropertyFlags DetermineMemoryType(
+    static MtlCpuAccess DetermineMemoryType(
             Kind                CbvType);
 
     static bool DetermineDmaUsage(

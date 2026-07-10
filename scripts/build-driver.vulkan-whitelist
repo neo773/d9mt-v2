@@ -2,8 +2,5 @@
 # Each entry is a documented, legitimate remaining Vk/vulkan reference that is NOT
 # real code in a compiled TU. Keep this list SHORT and justified; prefer renaming.
 #
-# d3d9_constant_buffer.h — ADAPT file (doc 02) copied only as a transitive include
-# dependency of d3d9_state.h (via d3d9_constant_set.h). It still holds VkDeviceSize /
-# VkBufferUsageFlags / Rc<DxvkBuffer> and is NOT in the compile set. Phase C ports it
-# to MtlBuffer + the ring. It carries a // PHASE-C: banner explaining this.
-d3d9_constant_buffer\.h:
+# (empty — d3d9_constant_buffer.h was ported to the Mtl seam in Phase C-6 and is now
+#  a fatal probe TU; no whitelisted Vulkan references remain.)

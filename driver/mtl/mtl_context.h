@@ -4,6 +4,7 @@
 
 #include "mtl_types.h"
 #include "mtl_resource.h"
+#include "mtl_device.h"
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
@@ -39,11 +40,7 @@ namespace dxvk {
   // --- Rc<>-managed backend objects the seam references --------------------
   // Minimal complete definitions so things link. PHASE-C: real payloads.
 
-  class MtlDevice : public RcObject {
-  public:
-    virtual ~MtlDevice() { }
-    // PHASE-C: MTLDevice handle, caps, allocator/heap, queue.
-  };
+  // MtlDevice (resource factory half of the seam) lives in mtl_device.h.
 
   // Wraps an MTL4LibraryFunctionDescriptor over our AIR metallib — no MTLFunction,
   // no SPIR-V (doc 01 §1b, doc 03 §5).

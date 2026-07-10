@@ -1,5 +1,9 @@
 #include "d3d9_format.h"
 
+// PHASE-C include fix: ENUM_NAME/ENUM_DEFAULT (util_enum.h) previously arrived
+// transitively through the old d3d9_format -> dxvk include chain, now severed.
+#include "../util/util_enum.h"
+
 namespace dxvk {
 
   std::ostream& operator << (std::ostream& os, D3D9Format e) {

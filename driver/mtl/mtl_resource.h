@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 
 #include "mtl_types.h"
 
@@ -121,12 +122,70 @@ namespace dxvk {
   class MtlResource : public RcObject {
   public:
     virtual ~MtlResource() { }
+
+    // Submission serial of the last GPU use; the backend stamps it at
+    // submit. WaitForResource-style CPU syncs compare it against the
+    // device's completed serial (was DxvkPagedResource tracking).
+    uint64_t trackingSerial() const { return m_trackingSerial; }
+    void setTrackingSerial(uint64_t serial) { m_trackingSerial = serial; }
+
+  private:
+    uint64_t m_trackingSerial = 0u;
   };
+
+  // The renamed backing storage of a buffer (was DxvkResourceAllocation).
+  // Owns one Metal buffer allocation; MAP_DISCARD swaps a fresh one in and the
+  // OLD one rides an Rc into the CS command stream, retiring only after the
+  // last submission that referenced it completes (contract 3a).
+  class MtlAllocation : public RcObject {
+  public:
+    MtlBufferHandle handle     = { };       // backing id<MTLBuffer> token
+    void*           mapPtr     = nullptr;   // shared-storage CPU pointer
+    uint64_t        gpuAddress = 0u;
+    MtlDeviceSize   size       = 0;
+  };
+
+  class MtlDevice;
 
   class MtlBuffer : public MtlResource {
   public:
-    MtlBufferHandle handle = { };
+    MtlBufferHandle handle = { };   // mirrors m_storage->handle (fast path)
     MtlDeviceSize   size   = 0;
+
+    void* mapPtr(MtlDeviceSize offset) const {
+      return m_storage && m_storage->mapPtr
+        ? reinterpret_cast<char*>(m_storage->mapPtr) + offset
+        : nullptr;
+    }
+
+    uint64_t gpuAddress(MtlDeviceSize offset) const {
+      return m_storage ? m_storage->gpuAddress + offset : 0u;
+    }
+
+    const Rc<MtlAllocation>& storage() const {
+      return m_storage;
+    }
+
+    // Allocates FRESH backing of the same size (the Discard rename).
+    // Implemented by the backend device; declared here so the frontend
+    // port is a token swap of DxvkBuffer::allocateStorage.
+    Rc<MtlAllocation> allocateStorage();
+
+    // Swaps in new backing, bumps the generation, returns the OLD storage
+    // (moved into the CS invalidateBuffer command for retirement).
+    Rc<MtlAllocation> assignStorage(Rc<MtlAllocation>&& next) {
+      Rc<MtlAllocation> prev = std::move(m_storage);
+      m_storage = std::move(next);
+      handle = m_storage->handle;
+      handle.generation = prev ? prev->handle.generation + 1u : 0u;
+      return prev;
+    }
+
+  protected:
+    Rc<MtlAllocation> m_storage = nullptr;
+    MtlDevice*        m_device  = nullptr;   // backend fills; for allocateStorage
+
+    friend class MtlDevice;
   };
 
   class MtlTexture : public MtlResource {
@@ -157,10 +216,36 @@ namespace dxvk {
     MtlObjectHandle sampler = MtlNullHandle;   // id<MTLSamplerState> token
   };
 
-  // The fresh backing slice produced by allocateStorage() during Discard.
-  class MtlAllocation : public RcObject {
+
+  // Linear staging allocator over a shared MtlBuffer (was DxvkStagingBuffer).
+  // The frontend suballocates upload space; retirement rides the standard
+  // allocation lifetime (slices hold Rc to the buffer).
+  class MtlStagingBuffer : public RcObject {
   public:
-    MtlSuballocation slice = { };
+    MtlStagingBuffer() = default;   // value member of D3D9DeviceEx (was DxvkStagingBuffer)
+    MtlStagingBuffer(Rc<MtlBuffer> buffer, MtlDeviceSize size)
+    : m_buffer(std::move(buffer)), m_size(size) { }
+
+    MtlBufferSlice alloc(MtlDeviceSize size, MtlDeviceSize align = 256u) {
+      MtlDeviceSize offset = (m_offset + align - 1u) & ~(align - 1u);
+      if (offset + size > m_size)
+        return MtlBufferSlice();   // caller allocates a fresh staging buffer
+      m_offset = offset + size;
+      m_stats.used += size;
+      m_stats.allocated += size;
+      return MtlBufferSlice(m_buffer, offset, size);
+    }
+
+    void reset() { m_offset = 0u; m_stats.used = 0u; }
+
+    const MtlStagingBufferStats& stats() const { return m_stats; }
+
+  private:
+    Rc<MtlBuffer> m_buffer;
+    MtlDeviceSize m_size = 0u;
+    MtlDeviceSize m_offset = 0u;
+    MtlStagingBufferStats m_stats = { };
   };
 
 }
+
