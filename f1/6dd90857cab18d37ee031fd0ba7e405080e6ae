@@ -1,0 +1,68 @@
+driver/backend/mtl_pso_cache.h
+  s_099954a5f894ee::t_b85794b773b172 1-128
+driver/backend/mtl_device_impl.cpp
+  s_099954a5f894ee::t_a3909fafd6d2d5 1-109,120-229,254-279
+  s_099954a5f894ee::t_7d8937e45c0e13 110-119,230-253
+driver/backend/mtl_ring.h
+  s_099954a5f894ee::t_ffaa704d430f1a 1-80
+driver/backend/mtl_submission.cpp
+  s_099954a5f894ee::t_76b0228d364abf 1-64
+airlib/d9mtair.h
+  s_099954a5f894ee::t_1d77c4cac9a2c0 1-104
+airlib/unix.cpp
+  s_099954a5f894ee::t_461ec8b901e891 1-166,169,171-177,179-184
+  s_099954a5f894ee::t_badcbc575ed67f 167-168,170,178
+scripts/build-d9mtair.sh
+  s_099954a5f894ee::t_d6dbac19d9d891 65-66
+  s_099954a5f894ee::t_ff4046443f5513 80
+  s_099954a5f894ee::t_bdc527c114c225 28-31
+  s_099954a5f894ee::t_be240bbed5c210 19-23,26-27
+  s_099954a5f894ee::t_7cff5860e92d5f 1-18,24-25,32-64,67-79,81-150
+driver/backend/wmt_handle.h
+  s_099954a5f894ee::t_d76f6763094801 26
+  s_099954a5f894ee::t_49a3c3f0142367 1-25,27-87
+air/air_builder.cpp
+  s_099954a5f894ee::t_aca83de1fb07ca 787-789,793
+scripts/build-llvm-unixside.sh
+  s_099954a5f894ee::t_45c2386308f439 1-40
+driver/backend/mtl_submission.h
+  s_099954a5f894ee::t_9a31fe4648c929 1-76
+airlib/loopback_main.cpp
+  s_099954a5f894ee::t_f5cde697f55d67 127-128,136
+  s_099954a5f894ee::t_9df82a6c0557f1 1-126,129-135,137-138
+docs/rewrite/04-air-unixlib.md
+  s_099954a5f894ee::t_82707d600ad9b5 1-97
+driver/backend/mtl_cmd_chunk.h
+  s_099954a5f894ee::t_3310c72c953dc1 1-94
+airlib/dll.c
+  s_099954a5f894ee::t_765a994d5ee817 1-46
+scripts/run-airlib-loopback.sh
+  s_099954a5f894ee::t_e83fc0f5c46a52 3-14,22-24,27-38,47-50,52
+  s_099954a5f894ee::t_1b4f7698afc67e 1-2,15-21,25-26,39-46,51,53-58
+driver/backend/mtl_ring.cpp
+  s_099954a5f894ee::t_81b78040c63f5d 76-79
+  s_099954a5f894ee::t_0a1c0d87ff6fce 1-75,80-94
+driver/backend/mtl_device_impl.h
+  s_099954a5f894ee::t_cc60c25be97cec 88-89
+  s_099954a5f894ee::t_b42bb0e9ab4bb6 12
+  s_099954a5f894ee::t_db172e2885a23a 26,29-36
+  s_099954a5f894ee::t_77b3caba1e96e7 1-11,13-25,27-28,37-87,90-116
+.gitignore
+  s_099954a5f894ee::t_cc25295056d1e5 21-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f16dd90857cab18d37ee031fd0ba7e405080e6ae",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
