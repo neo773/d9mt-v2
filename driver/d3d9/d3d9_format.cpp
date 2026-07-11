@@ -249,12 +249,13 @@ namespace dxvk {
       case D3D9Format::D15S1: return {}; // Unsupported (everywhere)
 
       case D3D9Format::D24S8: return {
-        MtlFormat::Depth24Unorm_Stencil8,
+        // Apple Silicon has no D24_Unorm_S8; use 32F_S8 (DXVK does the same).
+        MtlFormat::Depth32Float_Stencil8,
         MtlFormat::Invalid,
         MtlAspectDepth | MtlAspectStencil };
 
       case D3D9Format::D24X8: return {
-        MtlFormat::Depth24Unorm_Stencil8,
+        MtlFormat::Depth32Float,
         MtlFormat::Invalid,
         MtlAspectDepth };
 
@@ -271,7 +272,7 @@ namespace dxvk {
         MtlAspectDepth };
 
       case D3D9Format::D24FS8: return {
-        MtlFormat::Depth24Unorm_Stencil8,
+        MtlFormat::Depth32Float_Stencil8,
         MtlFormat::Invalid,
         MtlAspectDepth | MtlAspectStencil };
 
