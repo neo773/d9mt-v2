@@ -34,6 +34,9 @@ public:
   /* Serial the NEXT submission will carry. */
   uint64_t nextSerial() const { return m_nextSerial; }
 
+  /* Serial of the most recent submission (0 = nothing submitted yet). */
+  uint64_t lastSubmittedSerial() const { return m_nextSerial - 1u; }
+
   /* Enqueues the GPU-side signal onto the MTL4 command queue and returns the
    * serial it will signal. METAL 4: MTL4CommandBuffer has no
    * encodeSignalEvent — the signal is a queue-timeline op, so call this

@@ -132,8 +132,6 @@ namespace dxvk::backend {
     std::mutex m_dssoMutex;
     std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
 
-    uint64_t m_lastSubmittedSerial = 0u;
-
     friend class MtlContextImpl;
 
   };

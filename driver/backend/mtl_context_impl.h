@@ -308,6 +308,7 @@ namespace dxvk::backend {
     // --- core internal flow -------------------------------------------------
     void ensureCommandBuffer();        // rotate allocator, begin MTL4 cmdbuf, useResidencySet
     void materializePass();            // open MTL4 render encoder, fold clears
+    void flushPendingClears();         // materialize folded clears with no draw
     void closePass();                  // endEncoding + release encoder
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO

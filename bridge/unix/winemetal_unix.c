@@ -5829,6 +5829,11 @@ _MTL4CommandBuffer_renderCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   const struct WMTRenderPassInfo *info = (const struct WMTRenderPassInfo *)params->arg;
   MTL4RenderPassDescriptor *descriptor = _wm_mtl4_render_pass_descriptor(info);
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] renderPass c0tex=%p load=%u clear=(%.2f,%.2f,%.2f,%.2f)\n",
+            (void *)info->colors[0].texture, (unsigned)info->colors[0].load_action,
+            info->colors[0].clear_color.r, info->colors[0].clear_color.g,
+            info->colors[0].clear_color.b, info->colors[0].clear_color.a);
   params->ret = (obj_handle_t)[(id<MTL4CommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
   [descriptor release];
   return STATUS_SUCCESS;
@@ -6000,6 +6005,13 @@ _MTL4ComputeCommandEncoder_copyFromTextureToBuffer(void *obj) {
   struct unixcall_mtl4_copy_tex_buf *params = obj;
   MTLOrigin src_origin = { (NSUInteger)params->src_origin.x, (NSUInteger)params->src_origin.y, (NSUInteger)params->src_origin.z };
   MTLSize src_size = { (NSUInteger)params->src_size.width, (NSUInteger)params->src_size.height, (NSUInteger)params->src_size.depth };
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] copyTexBuf tex=%p %lux%lu -> buf=%p off=%llu bpr=%llu ENTER\n",
+            (void *)params->src_texture,
+            (unsigned long)src_size.width, (unsigned long)src_size.height,
+            (void *)params->dst_buffer,
+            (unsigned long long)params->dst_offset,
+            (unsigned long long)params->dst_bytes_per_row);
   [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromTexture:(id<MTLTexture>)params->src_texture
                                                      sourceSlice:(NSUInteger)params->src_slice
                                                      sourceLevel:(NSUInteger)params->src_level
@@ -6009,6 +6021,8 @@ _MTL4ComputeCommandEncoder_copyFromTextureToBuffer(void *obj) {
                                                destinationOffset:(NSUInteger)params->dst_offset
                                           destinationBytesPerRow:(NSUInteger)params->dst_bytes_per_row
                                         destinationBytesPerImage:(NSUInteger)params->dst_bytes_per_image];
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] copyTexBuf EXIT\n");
   return STATUS_SUCCESS;
 }
 

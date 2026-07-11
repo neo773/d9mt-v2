@@ -333,6 +333,8 @@ namespace dxvk::backend {
   obj_handle_t MtlContextImpl::computeEncoder() {
     if (m_pass.active)
       closePass();
+    else
+      flushPendingClears();   /* a copy must observe folded, not-yet-drawn clears */
     ensureCommandBuffer();
     return MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
   }
@@ -402,6 +404,30 @@ namespace dxvk::backend {
     NSObject_release(enc);
   }
 
+  namespace {
+    /* rowAlign/sliceAlign are ALIGNMENTS (DXVK semantics), not pitches. Metal
+     * wants bytesPerRow/bytesPerImage — compute the tight pitch from the
+     * format's block geometry, then round up. Callers that pass a full pitch
+     * as the alignment still get that pitch back (align(tight, pitch) = pitch
+     * whenever tight <= pitch). */
+    void computeBufferImagePitch(
+        MtlFormat format, MtlSize extent,
+        MtlDeviceSize rowAlign, MtlDeviceSize sliceAlign,
+        MtlDeviceSize& bytesPerRow, MtlDeviceSize& bytesPerImage) {
+      const MtlFormatInfo* fi = lookupFormatInfo(format);
+      const uint32_t elementSize = fi->elementSize ? fi->elementSize : 4u;
+      const uint32_t bw = fi->blockWidth  ? fi->blockWidth  : 1u;
+      const uint32_t bh = fi->blockHeight ? fi->blockHeight : 1u;
+      auto alignUp = [](MtlDeviceSize v, MtlDeviceSize a) {
+        return a > 1u ? (v + a - 1u) / a * a : v;
+      };
+      bytesPerRow   = alignUp(MtlDeviceSize((extent.width + bw - 1u) / bw) * elementSize, rowAlign);
+      bytesPerImage = extent.depth > 1u
+        ? alignUp(bytesPerRow * ((extent.height + bh - 1u) / bh), sliceAlign)
+        : 0u;
+    }
+  }
+
   void MtlContextImpl::copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
                                            const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                                            MtlDeviceSize sliceAlign, MtlFormat format) {
@@ -414,8 +440,11 @@ namespace dxvk::backend {
     makeResident(d->owned.handle());
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     WMTOrigin origin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
+    MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
+    computeBufferImagePitch(format != MtlFormat::Invalid ? format : d->format,
+      extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
     MTL4ComputeCommandEncoder_copyFromBufferToTexture(
-      enc, s->handle.buf, off, rowAlign, sliceAlign, size,
+      enc, s->handle.buf, off, bytesPerRow, bytesPerImage, size,
       d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, origin);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
@@ -434,9 +463,12 @@ namespace dxvk::backend {
     makeResident(d->handle.buf);
     WMTOrigin origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   size   = { extent.width, extent.height, extent.depth };
+    MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
+    computeBufferImagePitch(format != MtlFormat::Invalid ? format : s->format,
+      extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
     MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
       enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, origin, size,
-      d->handle.buf, off, rowAlign, sliceAlign);
+      d->handle.buf, off, bytesPerRow, bytesPerImage);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);

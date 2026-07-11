@@ -1,10 +1,12 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
 #include "../util/log/log.h"
+#include "../util/util_string.h"
 
 /*
  * METAL 4 backend (SOURCE_OF_TRUTH §2). Implementation notes live in
@@ -99,6 +101,36 @@ namespace dxvk::backend {
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
+  /* D9MT_GPUCAPTURE=N (with MTL_CAPTURE_ENABLED=1): wrap the first N queue
+   * commits in a programmatic MTLCaptureManager GPU trace, written to
+   * Z:\tmp\d9mt.gputrace. Diagnostic only — wine processes don't register
+   * with gputoolsserviced, so the gpucapture CLI can't attach to them. */
+  static int s_gpuCaptureRemaining = -2;   /* -2 = env unread, -1 = disabled */
+
+  static void gpuCaptureBeforeCommit(obj_handle_t device) {
+    if (s_gpuCaptureRemaining == -2) {
+      const char* v = std::getenv("D9MT_GPUCAPTURE");
+      s_gpuCaptureRemaining = (v && *v) ? std::atoi(v) : -1;
+      if (s_gpuCaptureRemaining > 0) {
+        obj_handle_t mgr = MTLCaptureManager_sharedCaptureManager();
+        WMTCaptureInfo ci = {};
+        ci.capture_object = device;
+        ci.destination = WMTCaptureDestinationGPUTraceDocument;
+        ci.output_url.set("/tmp/d9mt.gputrace");
+        bool ok = MTLCaptureManager_startCapture(mgr, &ci);
+        Logger::info(str::format("D9MT-GPUCAPTURE start ok=", ok,
+          " commits=", s_gpuCaptureRemaining, " -> /tmp/d9mt.gputrace"));
+      }
+    }
+  }
+
+  static void gpuCaptureAfterCommit() {
+    if (s_gpuCaptureRemaining > 0 && --s_gpuCaptureRemaining == 0) {
+      MTLCaptureManager_stopCapture(MTLCaptureManager_sharedCaptureManager());
+      Logger::info("D9MT-GPUCAPTURE stopped");
+    }
+  }
+
   void MtlContextImpl::submit(bool waitCompleted) {
     if (m_pass.active)
       closePass();
@@ -113,7 +145,9 @@ namespace dxvk::backend {
     MTLResidencySet_requestResidency(m_residencySet.handle());
 
     obj_handle_t cb = m_cmdbuf.handle();
+    gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), &cb, 1u);
+    gpuCaptureAfterCommit();
 
     /* MTL4: the completion signal is a queue-timeline op AFTER commit. */
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
@@ -233,6 +267,24 @@ namespace dxvk::backend {
     materializePass();
     closePass();
     m_pass = std::move(saved);
+  }
+
+  void MtlContextImpl::flushPendingClears() {
+    /* Fold-in clears (clearRenderTarget on a bound-but-unopened pass) only
+     * execute when the pass materializes at a draw. A copy/readback (or the
+     * present blit) that arrives with no intervening draw must still observe
+     * the clear — materialize an empty load=Clear/store=Store pass now, else
+     * the clear is silently dropped (clear-only frames read back stale/black,
+     * wine test_sanity). */
+    if (m_pass.active || !m_pass.pending)
+      return;
+    bool any = m_pass.clearDepth || m_pass.clearStencil;
+    for (bool c : m_pass.clearColor)
+      any = any || c;
+    if (!any)
+      return;
+    materializePass();
+    closePass();
   }
 
   void MtlContextImpl::materializePass() {

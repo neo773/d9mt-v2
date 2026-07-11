@@ -4812,31 +4812,21 @@ namespace dxvk {
     // on the CS thread so that we can determine whether the
     // resource is currently in use or not.
 
-    // Determine access type to wait for based on map mode
-    MtlCpuAccess access = (MapFlags & D3DLOCK_READONLY)
-      ? MtlCpuAccess::Write
-      : MtlCpuAccess::Read;
+    // PHASE-E: MtlResource::isInUse() is still a conservative stub (always
+    // false), so serial-based busy detection is unavailable. Treat every
+    // waited resource as busy: sync the CS thread (records pending copies),
+    // submit the open command list, and wait for the GPU to drain. Without
+    // the submit+wait the CPU reads the mapping buffer before the GPU copy
+    // ran (GetRenderTargetData readback returns zeros). D3DLOCK_DONOTWAIT
+    // also takes this path — reporting WASSTILLDRAWING forever would spin
+    // the app, since we cannot observe the resource becoming idle yet.
+    (void) MapFlags;
 
-    if (!Resource.isInUse(access))
-      SynchronizeCsThread(SequenceNumber);
-
-    if (Resource.isInUse(access)) {
-      if (MapFlags & D3DLOCK_DONOTWAIT) {
-        // We don't have to wait, but misbehaving games may
-        // still try to spin on `Map` until the resource is
-        // idle, so we should flush pending commands
-        ConsiderFlush(GpuFlushType::ImplicitWeakHint);
-        return false;
-      }
-      else {
-        // Make sure pending commands using the resource get
-        // executed on the the GPU if we have to wait for it
-        ExecuteFlush(false);
-        SynchronizeCsThread(SequenceNumber);
-
-        m_dxvkDevice->waitForResource(Resource);
-      }
-    }
+    SynchronizeCsThread(SequenceNumber);
+    ExecuteFlush(false);
+    /* the flush chunk itself lands after SequenceNumber — drain everything */
+    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+    m_dxvkDevice->waitForIdle();
 
     return true;
   }

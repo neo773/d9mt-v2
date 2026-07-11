@@ -94,8 +94,8 @@ namespace dxvk::backend {
   }
 
   MtlDeviceImpl::~MtlDeviceImpl() {
-    if (m_tracker && m_lastSubmittedSerial)
-      m_tracker->waitFor(m_lastSubmittedSerial);
+    if (m_tracker)
+      m_tracker->waitFor(m_tracker->lastSubmittedSerial());
   }
 
   Rc<MtlBuffer> MtlDeviceImpl::createBuffer(const MtlBufferCreateInfo& info) {
@@ -361,8 +361,11 @@ namespace dxvk::backend {
   }
 
   void MtlDeviceImpl::waitForIdle() {
-    if (m_tracker && m_lastSubmittedSerial)
-      m_tracker->waitFor(m_lastSubmittedSerial);
+    /* Drain everything submitted so far. The tracker owns the submission
+     * serials — the device-side m_lastSubmittedSerial was never updated and
+     * made this a silent no-op (CPU readbacks raced the GPU copy). */
+    if (m_tracker)
+      m_tracker->waitFor(m_tracker->lastSubmittedSerial());
   }
 
   bool MtlDeviceImpl::supportsFormat(MtlFormat format, MtlUsage usage) const {
