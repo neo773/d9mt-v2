@@ -21,24 +21,32 @@
  *    blend, topology class, sample count [, depth format while Metal 3]}.
  *    Same-key fast path = one memo compare (RenderPsoCache).
  *
- * 3. Snapshot binding (the bug-2 kill). Per-draw uniform data (D3D9
- *    constants via bindUniformBufferRange offsets), push data, and any
- *    argument-table block are written into FRESH UploadRing slices at draw
- *    time. Encoded commands reference ring memory that is never rewritten;
- *    ring chunks recycle only after the submission completes. Textures/
- *    samplers bind as direct wmtcmd setTexture/setSampler slots (flat
- *    D3D9 slot model — no descriptor indirection on Metal 3).
+ * 3. Snapshot binding (the bug-2 kill), METAL 4 argument tables. Per-draw
+ *    uniform data (D3D9 constants via bindUniformBufferRange offsets) and
+ *    push data are written into FRESH UploadRing slices at draw time; their
+ *    gpuAddress is written into an MTL4ArgumentTable via setAddress. The
+ *    table reads the address at the draw snapshot, so ring memory is never
+ *    rewritten under a queued draw (exactly the Metal-3 chunk semantics).
+ *    D3D9's separate VS/PS constant namespaces map to TWO argument tables
+ *    (m_argTable[vertex], m_argTable[fragment]), each bound at its own stage
+ *    via setArgumentTable:atStages: — this preserves the setVertexBuffer /
+ *    setFragmentBuffer split that a single shared table would collide.
+ *    Textures/samplers bind via setTexture(gpuResourceID)/setSamplerState.
  *
  * 4. Residency + keep-alive. track() holds an Rc until submit; every bound
- *    resource's trackingSerial is stamped at submit. A flat open-addressing
- *    dedup set (v1's proven ~1.2ms win) gates useResource emission.
+ *    resource's trackingSerial is stamped at submit. ONE MTLResidencySet per
+ *    context: bound resources addAllocation (flat dedup gate); commit +
+ *    requestResidency before queue commit; cmdbuf useResidencySet. The set
+ *    rebuilds at a frame boundary only once the prior epoch's serial retires
+ *    (never evict an in-flight allocation).
  *
- * 5. Submission spine. flushCommandList(): close encoder, encodeSignalEvent
- *    via SubmissionTracker::onSubmit, commit, ring.onSubmit(serial), move
- *    keep-alive set into tracker.retireAfter(serial, ...). endFrame():
- *    processRetirements + ring.onComplete(completedSerial). synchronizeWsi:
- *    presenter acquire/present + frame-latency signal (contract 3e — wired
- *    end-to-end from day one; never a stub).
+ * 5. Submission spine. beginRecording rotates a 3-deep MTL4CommandAllocator
+ *    ring + resets the caught-up slot. submit(): endCommandBuffer, queue
+ *    commit([cmdbuf]) (batched), queue signalEvent(serial) via
+ *    SubmissionTracker::onSubmit, ring.onSubmit(serial), move keep-alive into
+ *    tracker.retireAfter(serial). endFrame(): processRetirements +
+ *    ring.onComplete(completedSerial). synchronizeWsi: queue waitForDrawable
+ *    -> commit -> queue signalDrawable -> drawable present (contract 3e).
  *
  * 6. invalidateBuffer (contract 3a): the incoming Rc<MtlAllocation> (the
  *    OLD backing) goes straight into tracker.retireAfter(currentSerial).
@@ -48,14 +56,16 @@
  *    slots (proven v2 design); EVENT/timestamp = submission-serial compare.
  *    All answers derive from SubmissionTracker; no bespoke fences.
  *
- * 8. Copies/blits: blit encoder via wmtcmd blit stream; blitTextureView /
- *    generateMipmaps(filtered) go through the meta-blit render pipeline
- *    (build-time metallib, §6.6); resolveTexture full-subresource via pass
- *    store-action resolve, partial = resolve-to-scratch + copy (§6.5).
+ * 8. Copies/blits: MTL4ComputeCommandEncoder copy* (Metal 4 has NO blit
+ *    encoder); blitTextureView / generateMipmaps(filtered) go through the
+ *    meta-blit render pipeline (build-time metallib, §6.6); resolveTexture
+ *    full-subresource via pass store-action resolve (§6.5).
  *
- * 9. PSO creation goes through the BRIDGE's vertex-descriptor entry
- *    (MTLDevice_newRenderPipelineStateWithVertexDescriptor, code 153).
- *    max_tessellation_factor MUST be >= 1 (Metal validation; we set 64).
+ * 9. PSO creation goes through MTL4Compiler_newRenderPipelineState with a
+ *    WMTMtl4RenderPipelineInfo: vertex/fragment LIBRARY handle + entry name
+ *    ("main"), colors[] format+blend, sample count, vertex descriptor from
+ *    the PsoVertex* structs. NO depth/stencil format (Metal 4 omits it from
+ *    the pipeline descriptor), NO tessellation fields.
  */
 
 #include <array>
@@ -65,7 +75,6 @@
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_presenter.h"
 
-#include "mtl_cmd_chunk.h"
 #include "mtl_device_impl.h"
 #include "mtl_pso_cache.h"
 
@@ -196,14 +205,14 @@ namespace dxvk::backend {
 
   private:
 
-    /* Argument-table slot map (verified against v2/air air_render_test.mm +
-     * airconv manifest, decision 3). The AIR shaders read D3D9 constant
-     * buffers at Metal buffer indices 0..2 (cF / clip|alphaTest / point|misc)
-     * and pull vertex stage-in from index 3+. So vertex streams bind at
-     * kVertexBufferBaseIndex + streamIndex, never colliding with the CBV
-     * slots. Textures use the fragment texture table; samplers/vertex-texture
-     * fetch need the argument-buffer TLAB path this per-slot ABI lacks
-     * (documented no-op below). */
+    /* Argument-table slot map (verified against v2/air air_builder buffer
+     * index assignment, decision 3). Per stage, the AIR shader reads D3D9
+     * constant buffers at Metal buffer indices 0..2 (cF / clip|alphaTest /
+     * point|misc) and pulls vertex stage-in from index 3+. VS and PS each own
+     * their own argument table (m_argTable[stage]) so their 0..2 CBV spaces
+     * never collide. Vertex streams bind at kVertexBufferBaseIndex + stream.
+     * Textures/samplers use the per-stage table's setTexture/setSamplerState
+     * resource-id slots. */
     static constexpr uint32_t kVertexBufferBaseIndex = 3u;
     /* Provisional per-draw push-constant buffer index (top of the 0..30 Metal
      * buffer table, clear of CBVs 0..2 and streams 3..18). */
@@ -237,16 +246,26 @@ namespace dxvk::backend {
       std::array<MtlClearValue, 4> clearValues = { };
       bool clearDepth = false, clearStencil = false;
       float depthClear = 1.f; uint32_t stencilClear = 0;
-      obj_handle_t encoder = 0;        // open MTLRenderCommandEncoder
+      obj_handle_t encoder = 0;        // open MTL4RenderCommandEncoder
       uint64_t encodedDraws = 0;       // watchdog budget accounting
     };
 
     Rc<MtlDeviceImpl>  m_device;
     Rc<MtlPresenter>   m_presenter;    // set via synchronizeWsi plumbing
 
-    WmtCommandBuffer   m_cmdbuf;       // open command buffer
-    CmdChunk           m_chunk;        // wmtcmd stream for the open encoder
+    WmtCommandBuffer   m_cmdbuf;       // open MTL4 command buffer (fresh/recording)
     PendingPass        m_pass;
+
+    /* 3-deep MTL4CommandAllocator ring: rotate per frame, reset the slot we
+     * are about to reuse (>= imageCount frames old, so GPU-idle). */
+    std::array<WmtAllocator, 3> m_allocators;
+    uint32_t     m_frameIndex   = 0u;
+    obj_handle_t m_allocator    = 0u;  // current frame's allocator (borrowed)
+
+    /* ONE residency set per context; per-stage argument tables (decision 3). */
+    WmtResidencySet             m_residencySet;
+    std::array<WmtArgTable, 2>  m_argTable;   // [vertex, fragment]
+    uint64_t     m_residencyEpochSerial = 0u; // max serial that used the set
 
     uint32_t           m_dirty = DirtyEverything;
 
@@ -279,31 +298,27 @@ namespace dxvk::backend {
 
     uint64_t m_currentSerial = 0;
 
-    // cached MTLFunction handles keyed by owning library (avoids per-draw
-    // newFunction churn; released on context teardown).
-    std::unordered_map<obj_handle_t, WmtFunction> m_fnCache;
-
     // per-context visibility-result buffer for occlusion queries (decision 7).
     WmtBuffer m_visBuffer;
     void*     m_visCpu   = nullptr;
     uint64_t  m_visSlot  = 0u;         // next free 8-byte counter slot
 
     // --- core internal flow -------------------------------------------------
-    void ensureCommandBuffer();
-    void materializePass();            // open encoder, fold clears into load actions
-    void closePass();                  // flush chunk -> encodeCommands -> endEncoding
+    void ensureCommandBuffer();        // rotate allocator, begin MTL4 cmdbuf, useResidencySet
+    void materializePass();            // open MTL4 render encoder, fold clears
+    void closePass();                  // endEncoding + release encoder
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
-    bool resolvePso();                 // build key from folded state, memo lookup
-    void flushVertexBuffers();
-    void flushResources();             // textures/samplers/CBVs -> wmtcmd sets + ring snapshots
-    void flushDynamicState();
-    void submit(bool present);         // tracker.onSubmit, ring.onSubmit, retirements
+    bool resolvePso();                 // build key from folded state, bind PSO
+    void bindArgumentTables();         // setArgumentTable per stage on the encoder
+    void flushVertexBuffers();         // setAddress vertex streams into VS table
+    void flushResources();             // CBVs/textures/samplers/push -> arg tables + ring
+    void flushDynamicState();          // viewport/scissor/dsso/blend/raster setters
+    void submit(bool waitCompleted);   // endCommandBuffer, commit, signalEvent, retire
     void makeResident(obj_handle_t handle);
+    void residentTextureView(const Rc<MtlTextureView>& view);
 
-    obj_handle_t resolveFunction(const Rc<MtlShaderFunction>& fn);
-    uint32_t     currentDepthFormat() const;   // WMTPixelFormat of the pass depth view
+    obj_handle_t computeEncoder();     // close pass, open a one-shot MTL4 compute encoder
     void         ensureVisBuffer();
-    void         encodeBlit(const wmtcmd_base* head);   // close pass, run one blit chunk
 
   };
 

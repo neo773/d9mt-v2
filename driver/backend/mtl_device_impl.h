@@ -22,6 +22,13 @@
 
 namespace dxvk::backend {
 
+  /* Metal 4 handle tags (additive to wmt_handle.h's set; kept here so that
+   * API-neutral file stays untouched). */
+  struct Mtl4CompilerTag;     using WmtCompiler     = WmtRef<Mtl4CompilerTag>;
+  struct Mtl4AllocatorTag;    using WmtAllocator    = WmtRef<Mtl4AllocatorTag>;
+  struct Mtl4ResidencySetTag; using WmtResidencySet = WmtRef<Mtl4ResidencySetTag>;
+  struct Mtl4ArgTableTag;     using WmtArgTable     = WmtRef<Mtl4ArgTableTag>;
+
   /* Backend payloads. The seam's POD handle mirrors the owned handle so
    * frontend fast paths (binding) never need the downcast. */
   class MtlAllocationImpl : public MtlAllocation {
@@ -97,8 +104,9 @@ namespace dxvk::backend {
     Rc<MtlEvent> createGpuEvent() override;
 
     // --- backend-internal ----------------------------------------------------
-    obj_handle_t wmtDevice() const { return m_device.handle(); }
-    obj_handle_t wmtQueue()  const { return m_queue.handle(); }
+    obj_handle_t wmtDevice()   const { return m_device.handle(); }
+    obj_handle_t wmtQueue()    const { return m_queue.handle(); }     // MTL4CommandQueue
+    obj_handle_t wmtCompiler() const { return m_compiler.handle(); }  // MTL4Compiler
 
     SubmissionTracker& submissions() { return *m_tracker; }
     UploadRing&        uploadRing()  { return *m_ring; }
@@ -111,8 +119,9 @@ namespace dxvk::backend {
 
   private:
 
-    WmtDevice m_device;
-    WmtQueue  m_queue;
+    WmtDevice   m_device;
+    WmtQueue    m_queue;      // MTL4CommandQueue
+    WmtCompiler m_compiler;   // MTL4Compiler (PSO builds)
 
     std::unique_ptr<SubmissionTracker> m_tracker;
     std::unique_ptr<UploadRing>        m_ring;

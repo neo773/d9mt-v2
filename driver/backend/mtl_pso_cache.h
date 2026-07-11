@@ -4,19 +4,16 @@
  *
  * Key design (doc 00 §1, doc 01 §5):
  *  - depth/stencil attachment formats are NOT part of the key (Metal 4
- *    removed them from the pipeline descriptor; Metal 3 winemetal still
- *    wants them in WMTRenderPipelineInfo, so the Metal-3 build path fills
- *    them from the CURRENT pass and keys them separately as a low-variant
- *    suffix — measured in v1, depth format flips are rare within a PSO).
+ *    removed them from the pipeline descriptor entirely).
  *  - vertex strides ARE part of the key (Metal bakes stride into the
  *    descriptor; the v2 stride bug made this explicit).
  *  - lookup must be cheap per draw: FNV over a packed POD key, memo of the
  *    last (key,pso) pair to skip the map entirely on same-material runs
  *    (v1's biggest PSO-path win).
  *
- * Compilation is synchronous on Metal 3 winemetal for now; the interface
- * returns a slot so an async MTL4Compiler backend can slide in without
- * changing callers (request → ready/pending).
+ * Builds go through MTL4Compiler_newRenderPipelineState (METAL 4 ONLY). The
+ * stage functions are carried as (library handle + entry name "main"); the
+ * caller passes the VS/PS metallib handles, not MTLFunction objects.
  */
 
 #include <cstdint>
@@ -91,15 +88,15 @@ namespace dxvk::backend {
 
   public:
 
-    explicit RenderPsoCache(obj_handle_t device);
+    explicit RenderPsoCache(obj_handle_t compiler);
 
     /* Returns the PSO handle, building it synchronously on miss.
-     * vsFunction/fsFunction are MTLFunction handles (borrowed).
-     * Returns 0 on build failure (caller drops the draw + logs). */
+     * vsLibrary/fsLibrary are MTLLibrary (metallib) handles (borrowed); the
+     * entry point is "main". Returns 0 on build failure (caller drops+logs). */
     obj_handle_t get(
             const RenderPsoKey& key,
-            obj_handle_t        vsFunction,
-            obj_handle_t        fsFunction);
+            obj_handle_t        vsLibrary,
+            obj_handle_t        fsLibrary);
 
     size_t size() const { return m_cache.size(); }
 
@@ -109,7 +106,7 @@ namespace dxvk::backend {
       size_t operator () (const RenderPsoKey& k) const { return k.hash(); }
     };
 
-    obj_handle_t m_device;
+    obj_handle_t m_compiler;
 
     /* one-entry memo: same-material draw runs skip the map */
     RenderPsoKey m_lastKey = { };
@@ -120,8 +117,8 @@ namespace dxvk::backend {
 
     obj_handle_t build(
             const RenderPsoKey& key,
-            obj_handle_t        vsFunction,
-            obj_handle_t        fsFunction);
+            obj_handle_t        vsLibrary,
+            obj_handle_t        fsLibrary);
 
   };
 

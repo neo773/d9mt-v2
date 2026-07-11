@@ -2279,4 +2279,17 @@ WINEMETAL_API void MTLResidencySet_commit(obj_handle_t residency_set);
 WINEMETAL_API void MTLResidencySet_requestResidency(obj_handle_t residency_set);
 WINEMETAL_API void MTLResidencySet_removeAllAllocations(obj_handle_t residency_set);
 
+/* --- drawable present (201) ------------------------------------------ *
+ * MTL4 splits Metal-3's -[MTLCommandBuffer presentDrawable:] into the queue-
+ * level handshake waitForDrawable (before commit) / signalDrawable (after
+ * commit) plus a final -[MTLDrawable present]. MTL4CommandBuffer has no
+ * presentDrawable:, so the queue path needs this explicit present entry. */
+WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable);
+
+/* --- render encoder visibility mode (202) ---------------------------- *
+ * Occlusion queries (contract 3d): the MTL4 render encoder counts samples
+ * into the pass's visibilityResultBuffer at the given byte offset. */
+WINEMETAL_API void MTL4RenderCommandEncoder_setVisibilityResultMode(
+    obj_handle_t encoder, uint32_t mode, uint64_t offset);
+
 #endif

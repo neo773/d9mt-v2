@@ -6,10 +6,11 @@
 #include "../util/log/log.h"
 
 /*
- * mtl_context_impl2.cpp — part 2 of MtlContextImpl (see mtl_context_impl.h for
- * the 9 architecture decisions). Sections: PSO resolve, argument-table flush,
- * dynamic state, transfers/blits, init/upload/discard, queries, signals,
- * lifetime, debug labels, and the query/event result subclasses.
+ * mtl_context_impl2.cpp — part 2 of the METAL 4 MtlContextImpl (see
+ * mtl_context_impl.h for the 9 architecture decisions). Sections: PSO resolve,
+ * argument-table flush, dynamic state, transfers (compute-encoder copies),
+ * init/upload/discard, queries, signals, lifetime, debug labels, and the
+ * query/event result subclasses.
  */
 
 namespace dxvk::backend {
@@ -79,39 +80,15 @@ namespace dxvk::backend {
     return MtlGpuEventStatus::Signaled;
   }
 
-  // --- resolve helpers -------------------------------------------------------
-
-  obj_handle_t MtlContextImpl::resolveFunction(const Rc<MtlShaderFunction>& fn) {
-    if (fn == nullptr || !fn->library)
-      return 0u;
-
-    auto it = m_fnCache.find(fn->library);
-    if (it != m_fnCache.end())
-      return it->second.handle();
-
-    /* AIR metallib entry point is "main" (v2/air air_builder + air_render_test);
-     * v1's SPIRV-Cross path used "main0" — this is the AIR path. */
-    obj_handle_t f = MTLLibrary_newFunction(fn->library, "main");
-    if (!f) {
-      Logger::err("MtlContextImpl: shader entry 'main' not found in library");
-      return 0u;
-    }
-    auto res = m_fnCache.emplace(fn->library, WmtFunction::adopt(f));
-    return res.first->second.handle();
-  }
-
-  uint32_t MtlContextImpl::currentDepthFormat() const {
-    const Rc<MtlTextureView>& dv = m_pass.targets.depthStencil;
-    return dv != nullptr ? uint32_t(dv->key.format) : 0u;
-  }
+  // --- PSO resolve (decision 9) ----------------------------------------------
 
   bool MtlContextImpl::resolvePso() {
     if (m_vs == nullptr)
       return false;
 
-    obj_handle_t vsFn = resolveFunction(m_vs);
-    obj_handle_t fsFn = m_fs != nullptr ? resolveFunction(m_fs) : 0u;
-    if (!vsFn)
+    obj_handle_t vsLibrary = m_vs->library;
+    obj_handle_t fsLibrary = m_fs != nullptr ? obj_handle_t(m_fs->library) : 0u;
+    if (!vsLibrary)
       return false;
 
     RenderPsoKey key = {};
@@ -161,103 +138,82 @@ namespace dxvk::backend {
     key.sampleCount     = uint8_t(m_msaa.sampleCount ? m_msaa.sampleCount : 1u);
     key.topologyClass   = uint8_t(topologyClass(m_topology));
     key.alphaToCoverage = m_msaa.alphaToCoverage ? 1u : 0u;
-    key.depthFormat     = currentDepthFormat();
+    /* depthFormat/stencilFormat stay 0 — Metal 4 omits them from the pipeline
+     * descriptor, so they must not add spurious PSO variants (decision 9). */
 
-    if (m_pass.targets.depthStencil != nullptr) {
-      const MtlFormatInfo* fi = lookupFormatInfo(m_pass.targets.depthStencil->key.format);
-      if (fi->flags & MtlFormatFlagStencil)
-        key.stencilFormat = key.depthFormat;
-    }
-
-    obj_handle_t pso = m_psoCache.get(key, vsFn, fsFn);
+    obj_handle_t pso = m_psoCache.get(key, vsLibrary, fsLibrary);
     if (!pso)
       return false;
 
-    auto* cmd = m_chunk.append<wmtcmd_render_setpso>(WMTRenderCommandSetPSO);
-    cmd->pso = pso;
+    MTL4RenderCommandEncoder_setRenderPipelineState(m_pass.encoder, pso);
     return true;
   }
 
   // --- argument-table flush (decision 3) -------------------------------------
 
   void MtlContextImpl::flushVertexBuffers() {
+    obj_handle_t table = m_argTable[0].handle();   /* vertex stage */
     for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
       VertexStream& s = m_vertexStreams[i];
       if (!s.slice.defined())
         continue;
-      auto* buf = static_cast<MtlBufferImpl*>(s.slice.buffer().ptr());
-      if (!buf)
+      const Rc<MtlBuffer>& buf = s.slice.buffer();
+      if (buf == nullptr)
         continue;
       makeResident(buf->handle.buf);
-      auto* cmd = m_chunk.append<wmtcmd_render_setbuffer>(WMTRenderCommandSetVertexBuffer);
-      cmd->buffer = buf->handle.buf;
-      cmd->offset = s.slice.offset();
-      cmd->index  = uint8_t(kVertexBufferBaseIndex + i);
+      MTL4ArgumentTable_setAddress(
+        table, buf->gpuAddress(s.slice.offset()), kVertexBufferBaseIndex + i);
     }
   }
 
   void MtlContextImpl::flushResources() {
     for (uint32_t st = 0u; st < 2u; st++) {
       StageBindings& b = m_bindings[st];
-      const bool vertex = (st == 0u);
+      obj_handle_t table = m_argTable[st].handle();
 
-      /* constant buffers at their AIR slots (0..2), with the discard/range
-       * offset folded in (bindUniformBufferRange snapshot). */
+      /* constant buffers at their AIR slots (0..2 per stage), with the
+       * discard/range offset folded in (bindUniformBufferRange snapshot). */
       for (uint32_t slot = 0u; slot < b.cbvs.size(); slot++) {
         StageBindings::CbvBinding& cbv = b.cbvs[slot];
         if (!cbv.slice.defined())
           continue;
-        auto* buf = static_cast<MtlBufferImpl*>(cbv.slice.buffer().ptr());
-        if (!buf)
+        const Rc<MtlBuffer>& buf = cbv.slice.buffer();
+        if (buf == nullptr)
           continue;
         makeResident(buf->handle.buf);
-        auto* cmd = m_chunk.append<wmtcmd_render_setbuffer>(
-          vertex ? WMTRenderCommandSetVertexBuffer : WMTRenderCommandSetFragmentBuffer);
-        cmd->buffer = buf->handle.buf;
-        cmd->offset = cbv.slice.offset() + cbv.rangeOffset;
-        cmd->index  = uint8_t(slot);
+        MTL4ArgumentTable_setAddress(
+          table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset), slot);
       }
 
-      /* textures: fragment via upstream SetFragmentTexture; vertex via the
-       * bridge addition SetVertexTexture (code 45) — D3D9 VTF supported. */
+      /* textures: setTexture by MTLResourceID into this stage's table. */
       for (uint32_t slot = 0u; slot < b.textures.size(); slot++) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr)
           continue;
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-        makeResident(tv->owned.handle());
-        auto* cmd = m_chunk.append<wmtcmd_render_settexture>(
-          vertex ? WMTRenderCommandSetVertexTexture : WMTRenderCommandSetFragmentTexture);
-        cmd->texture = tv->owned.handle();
-        cmd->index   = uint8_t(slot);
+        residentTextureView(view);
+        MTL4ArgumentTable_setTexture(table, tv->gpuResourceId, slot);
       }
 
-      /* samplers: per-slot via the bridge additions (codes 44/46). */
+      /* samplers: setSamplerState by MTLResourceID. */
       for (uint32_t slot = 0u; slot < b.samplers.size(); slot++) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
         if (sampler == nullptr)
           continue;
         auto* sp = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
-        auto* cmd = m_chunk.append<wmtcmd_render_setsamplerstate>(
-          vertex ? WMTRenderCommandSetVertexSamplerState
-                 : WMTRenderCommandSetFragmentSamplerState);
-        cmd->sampler = sp->owned.handle();
-        cmd->index   = uint8_t(slot);
+        MTL4ArgumentTable_setSamplerState(table, sp->gpuResourceId, slot);
       }
 
-      /* push data -> fresh UploadRing slice bound at the provisional push slot
-       * (snapshot semantics: encoded commands never reference rewritten mem). */
+      /* push data -> fresh UploadRing slice at the push slot (snapshot
+       * semantics: the table reads the gpuAddress at the draw snapshot, and
+       * this slice's memory is never rewritten under a queued draw). */
       if (b.pushDirtyHi > 0u) {
         uint64_t sz = b.pushDirtyHi;
         RingSlice rs = m_device->uploadRing().allocate(sz, 256u);
         if (rs.cpuPtr) {
           std::memcpy(rs.cpuPtr, b.pushData.data(), sz);
           makeResident(rs.buffer);
-          auto* cmd = m_chunk.append<wmtcmd_render_setbuffer>(
-            vertex ? WMTRenderCommandSetVertexBuffer : WMTRenderCommandSetFragmentBuffer);
-          cmd->buffer = rs.buffer;
-          cmd->offset = rs.offset;
-          cmd->index  = uint8_t(kPushConstantIndex);
+          MTL4ArgumentTable_setAddress(table, rs.gpuAddress, kPushConstantIndex);
         }
         b.pushDirtyLo = b.pushDirtyHi = 0u;
       }
@@ -265,15 +221,18 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushDynamicState() {
+    obj_handle_t enc = m_pass.encoder;
+
     /* viewport (RT-pixel coords; backing scale handled in the presenter) */
     {
-      auto* cmd = m_chunk.append<wmtcmd_render_setviewport>(WMTRenderCommandSetViewport);
-      cmd->viewport.originX = m_viewport.originX;
-      cmd->viewport.originY = m_viewport.originY;
-      cmd->viewport.width   = m_viewport.width;
-      cmd->viewport.height  = m_viewport.height;
-      cmd->viewport.znear   = m_viewport.znear;
-      cmd->viewport.zfar    = m_viewport.zfar;
+      WMTViewport vp = {};
+      vp.originX = m_viewport.originX;
+      vp.originY = m_viewport.originY;
+      vp.width   = m_viewport.width;
+      vp.height  = m_viewport.height;
+      vp.znear   = m_viewport.znear;
+      vp.zfar    = m_viewport.zfar;
+      MTL4RenderCommandEncoder_setViewport(enc, vp);
     }
 
     /* scissor — full render target when none is set */
@@ -292,42 +251,31 @@ namespace dxvk::backend {
         if (!w) { w = uint32_t(m_viewport.width); h = uint32_t(m_viewport.height); }
         sc = { 0u, 0u, w, h };
       }
-      auto* cmd = m_chunk.append<wmtcmd_render_setscissorrect>(WMTRenderCommandSetScissorRect);
-      cmd->scissor_rect.x      = sc.x;
-      cmd->scissor_rect.y      = sc.y;
-      cmd->scissor_rect.width  = sc.width;
-      cmd->scissor_rect.height = sc.height;
+      WMTScissorRect rect = {};
+      rect.x      = sc.x;
+      rect.y      = sc.y;
+      rect.width  = sc.width;
+      rect.height = sc.height;
+      MTL4RenderCommandEncoder_setScissorRect(enc, rect);
     }
 
     /* depth-stencil state object (cached in the device) + stencil ref */
     {
       obj_handle_t dsso = m_device->getDepthStencilState(m_depthStencil);
-      auto* cmd = m_chunk.append<wmtcmd_render_setdsso>(WMTRenderCommandSetDSSO);
-      cmd->dsso        = dsso;
-      cmd->stencil_ref = uint8_t(m_stencilRef);
+      MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
+      MTL4RenderCommandEncoder_setStencilReferenceValue(enc, m_stencilRef);
     }
 
-    /* blend constant + stencil ref (one combined command) */
-    {
-      auto* cmd = m_chunk.append<wmtcmd_render_setblendcolor>(WMTRenderCommandSetBlendFactorAndStencilRef);
-      cmd->red         = m_blendColor.r;
-      cmd->green       = m_blendColor.g;
-      cmd->blue        = m_blendColor.b;
-      cmd->alpha       = m_blendColor.a;
-      cmd->stencil_ref = uint8_t(m_stencilRef);
-    }
+    /* blend constant */
+    MTL4RenderCommandEncoder_setBlendColor(
+      enc, m_blendColor.r, m_blendColor.g, m_blendColor.b, m_blendColor.a);
 
-    /* rasterizer: cull / winding / fill / depth-bias / depth-clip */
-    {
-      auto* cmd = m_chunk.append<wmtcmd_render_setrasterizerstate>(WMTRenderCommandSetRasterizerState);
-      cmd->fill_mode        = WMTTriangleFillMode(m_rasterizer.fillMode);
-      cmd->cull_mode        = WMTCullMode(m_rasterizer.cullMode);
-      cmd->depth_clip_mode  = m_rasterizer.depthClip ? WMTDepthClipModeClip : WMTDepthClipModeClamp;
-      cmd->winding          = WMTWinding(m_rasterizer.frontFace);
-      cmd->depth_bias       = m_depthBias.constantFactor;
-      cmd->scole_scale      = m_depthBias.slopeFactor;   /* [sic] ABI field name */
-      cmd->depth_bias_clamp = m_depthBias.clamp;
-    }
+    /* rasterizer: cull / winding / depth-bias (fill mode + depth-clip use the
+     * Metal defaults — no MTL4 bridge setter, and D3D9 default is Fill/Clip). */
+    MTL4RenderCommandEncoder_setCullMode(enc, WMTCullMode(m_rasterizer.cullMode));
+    MTL4RenderCommandEncoder_setFrontFacingWinding(enc, WMTWinding(m_rasterizer.frontFace));
+    MTL4RenderCommandEncoder_setDepthBias(
+      enc, m_depthBias.constantFactor, m_depthBias.slopeFactor, m_depthBias.clamp);
   }
 
   void MtlContextImpl::makeResident(obj_handle_t handle) {
@@ -337,23 +285,30 @@ namespace dxvk::backend {
       if (h == handle)
         return;
     m_residentSet.push_back(handle);
-
-    auto* cmd = m_chunk.append<wmtcmd_render_useresource>(WMTRenderCommandUseResource);
-    cmd->resource = handle;
-    cmd->usage    = WMTResourceUsage(WMTResourceUsageRead | WMTResourceUsageSample);
-    cmd->stages   = WMTRenderStages(WMTRenderStageVertex | WMTRenderStageFragment);
+    MTLResidencySet_addAllocation(m_residencySet.handle(), handle);
   }
 
-  // --- transfers / blits (decision 8) ----------------------------------------
+  void MtlContextImpl::residentTextureView(const Rc<MtlTextureView>& view) {
+    if (view == nullptr)
+      return;
+    auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+    /* Track the underlying image allocation (the view shares its storage);
+     * fall back to the view handle for drawable-backed attachments whose base
+     * image carries no owned allocation. */
+    if (view->image != nullptr) {
+      auto* base = static_cast<MtlTextureImpl*>(view->image.ptr());
+      makeResident(base->owned.handle());
+    }
+    makeResident(tv->owned.handle());
+  }
 
-  void MtlContextImpl::encodeBlit(const wmtcmd_base* head) {
+  // --- transfers / blits (decision 8: MTL4 compute-encoder copies) ------------
+
+  obj_handle_t MtlContextImpl::computeEncoder() {
     if (m_pass.active)
       closePass();
     ensureCommandBuffer();
-    obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(m_cmdbuf.handle());
-    MTLBlitCommandEncoder_encodeCommands(enc, head);
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    return MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
   }
 
   void MtlContextImpl::copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -362,14 +317,13 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlBufferImpl*>(src.ptr());
     if (!d || !s)
       return;
-    CmdChunk c;
-    auto* cmd = c.append<wmtcmd_blit_copy_from_buffer_to_buffer>(WMTBlitCommandCopyFromBufferToBuffer);
-    cmd->src        = s->handle.buf;
-    cmd->src_offset = srcOff;
-    cmd->dst        = d->handle.buf;
-    cmd->dst_offset = dstOff;
-    cmd->copy_length = bytes;
-    encodeBlit(c.head());
+    obj_handle_t enc = computeEncoder();
+    makeResident(s->handle.buf);
+    makeResident(d->handle.buf);
+    MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
+      enc, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   void MtlContextImpl::uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -383,18 +337,17 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
       return;
-    CmdChunk c;
-    auto* cmd = c.append<wmtcmd_blit_copy_from_texture_to_texture>(WMTBlitCommandCopyFromTextureToTexture);
-    cmd->src        = s->texture.tex;
-    cmd->src_slice  = srcSub.baseLayer;
-    cmd->src_level  = srcSub.mipLevel;
-    cmd->src_origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
-    cmd->src_size   = { extent.width, extent.height, extent.depth };
-    cmd->dst        = d->texture.tex;
-    cmd->dst_slice  = dstSub.baseLayer;
-    cmd->dst_level  = dstSub.mipLevel;
-    cmd->dst_origin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
-    encodeBlit(c.head());
+    obj_handle_t enc = computeEncoder();
+    makeResident(s->owned.handle());
+    makeResident(d->owned.handle());
+    WMTOrigin srcOrigin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
+    WMTSize   srcSize   = { extent.width, extent.height, extent.depth };
+    WMTOrigin dstOrigin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
+    MTL4ComputeCommandEncoder_copyFromTextureToTexture(
+      enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, srcOrigin, srcSize,
+      d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, dstOrigin);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   void MtlContextImpl::copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
@@ -404,18 +357,16 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlBufferImpl*>(src.ptr());
     if (!d || !s)
       return;
-    CmdChunk c;
-    auto* cmd = c.append<wmtcmd_blit_copy_from_buffer_to_texture>(WMTBlitCommandCopyFromBufferToTexture);
-    cmd->src            = s->handle.buf;
-    cmd->src_offset     = off;
-    cmd->bytes_per_row  = uint32_t(rowAlign);
-    cmd->bytes_per_image = uint32_t(sliceAlign);
-    cmd->size           = { extent.width, extent.height, extent.depth };
-    cmd->dst            = d->texture.tex;
-    cmd->slice          = dstSub.baseLayer;
-    cmd->level          = dstSub.mipLevel;
-    cmd->origin         = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
-    encodeBlit(c.head());
+    obj_handle_t enc = computeEncoder();
+    makeResident(s->handle.buf);
+    makeResident(d->owned.handle());
+    WMTSize   size   = { extent.width, extent.height, extent.depth };
+    WMTOrigin origin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
+    MTL4ComputeCommandEncoder_copyFromBufferToTexture(
+      enc, s->handle.buf, off, rowAlign, sliceAlign, size,
+      d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, origin);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   void MtlContextImpl::copyTextureToBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize off, MtlDeviceSize rowAlign,
@@ -425,18 +376,16 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
       return;
-    CmdChunk c;
-    auto* cmd = c.append<wmtcmd_blit_copy_from_texture_to_buffer>(WMTBlitCommandCopyFromTextureToBuffer);
-    cmd->src            = s->texture.tex;
-    cmd->slice          = srcSub.baseLayer;
-    cmd->level          = srcSub.mipLevel;
-    cmd->origin         = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
-    cmd->size           = { extent.width, extent.height, extent.depth };
-    cmd->dst            = d->handle.buf;
-    cmd->offset         = off;
-    cmd->bytes_per_row  = uint32_t(rowAlign);
-    cmd->bytes_per_image = uint32_t(sliceAlign);
-    encodeBlit(c.head());
+    obj_handle_t enc = computeEncoder();
+    makeResident(s->owned.handle());
+    makeResident(d->handle.buf);
+    WMTOrigin origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
+    WMTSize   size   = { extent.width, extent.height, extent.depth };
+    MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
+      enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, origin, size,
+      d->handle.buf, off, rowAlign, sliceAlign);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   void MtlContextImpl::blitTextureView(const Rc<MtlTextureView>&, const MtlOffset3D[2],
@@ -444,8 +393,20 @@ namespace dxvk::backend {
     logOnce("MtlContextImpl::blitTextureView — meta-blit pipeline unimplemented (LOW priority)");
   }
 
-  void MtlContextImpl::generateMipmaps(const Rc<MtlTextureView>&, MtlSamplerFilter) {
-    logOnce("MtlContextImpl::generateMipmaps — unimplemented (LOW priority)");
+  void MtlContextImpl::generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter) {
+    if (view == nullptr)
+      return;
+    auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+    obj_handle_t tex = view->image != nullptr
+      ? static_cast<MtlTextureImpl*>(view->image.ptr())->owned.handle()
+      : tv->owned.handle();
+    if (!tex)
+      return;
+    obj_handle_t enc = computeEncoder();
+    makeResident(tex);
+    MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   // --- init / upload / discard (contracts 3a,3c,3g) --------------------------
@@ -454,13 +415,11 @@ namespace dxvk::backend {
     auto* b = static_cast<MtlBufferImpl*>(buffer.ptr());
     if (!b)
       return;
-    CmdChunk c;
-    auto* cmd = c.append<wmtcmd_blit_fillbuffer>(WMTBlitCommandFillBuffer);
-    cmd->buffer = b->handle.buf;
-    cmd->offset = 0u;
-    cmd->length = b->size;
-    cmd->value  = 0u;
-    encodeBlit(c.head());
+    obj_handle_t enc = computeEncoder();
+    makeResident(b->handle.buf);
+    MTL4ComputeCommandEncoder_fillBuffer(enc, b->handle.buf, 0u, b->size, 0u);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
   }
 
   void MtlContextImpl::initImage(const Rc<MtlTexture>& image) {
@@ -496,8 +455,10 @@ namespace dxvk::backend {
       info.colors[0].clear_color  = { 0.0, 0.0, 0.0, 0.0 };
     }
 
+    makeResident(t->owned.handle());
+
     /* load=Clear + store=Store clears the whole subresource with no draws. */
-    obj_handle_t enc = MTLCommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -529,6 +490,9 @@ namespace dxvk::backend {
     obj_handle_t h = MTLDevice_newBuffer(m_device->wmtDevice(), &info);
     m_visBuffer = WmtBuffer::adopt(h);
     m_visCpu    = info.memory.get();
+    /* The visibility buffer is read by the GPU across every pass — keep it
+     * resident for the context lifetime. */
+    makeResident(h);
   }
 
   void MtlContextImpl::beginQuery(const Rc<MtlQuery>& query) {
@@ -544,9 +508,9 @@ namespace dxvk::backend {
     if (m_visCpu)
       *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(m_visCpu) + q->slotOffset) = 0u;
 
-    auto* cmd = m_chunk.append<wmtcmd_render_setvisibilitymode>(WMTRenderCommandSetVisibilityMode);
-    cmd->mode   = WMTVisibilityResultModeCounting;
-    cmd->offset = q->slotOffset;
+    if (m_pass.active)
+      MTL4RenderCommandEncoder_setVisibilityResultMode(
+        m_pass.encoder, uint32_t(WMTVisibilityResultModeCounting), q->slotOffset);
   }
 
   void MtlContextImpl::endQuery(const Rc<MtlQuery>& query) {
@@ -557,9 +521,9 @@ namespace dxvk::backend {
     q->serial  = m_currentSerial;
     q->tracker = &m_device->submissions();
 
-    auto* cmd = m_chunk.append<wmtcmd_render_setvisibilitymode>(WMTRenderCommandSetVisibilityMode);
-    cmd->mode   = WMTVisibilityResultModeDisabled;
-    cmd->offset = 0u;
+    if (m_pass.active)
+      MTL4RenderCommandEncoder_setVisibilityResultMode(
+        m_pass.encoder, uint32_t(WMTVisibilityResultModeDisabled), 0u);
   }
 
   void MtlContextImpl::writeTimestamp(const Rc<MtlQuery>& query) {

@@ -6084,6 +6084,23 @@ _MTLResidencySet_removeAllAllocations(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- drawable present (201) ------------------------------------------ */
+static NTSTATUS
+_MetalDrawable_present(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTLDrawable>)params->handle present];
+  return STATUS_SUCCESS;
+}
+
+/* --- render encoder visibility mode (202) ---------------------------- */
+static NTSTATUS
+_MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
+  struct unixcall_mtl4_setvisibilitymode *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setVisibilityResultMode:(MTLVisibilityResultMode)params->mode
+                                                                 offset:(NSUInteger)params->offset];
+  return STATUS_SUCCESS;
+}
+
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
@@ -6296,6 +6313,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLResidencySet_commit,                               /* 198 */
     &_MTLResidencySet_requestResidency,                     /* 199 */
     &_MTLResidencySet_removeAllAllocations,                 /* 200 */
+    &_MetalDrawable_present,                                /* 201 */
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
 };
 
 #ifndef DXMT_NATIVE
@@ -6515,5 +6534,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLResidencySet_commit,                               /* 198 */
     &_MTLResidencySet_requestResidency,                     /* 199 */
     &_MTLResidencySet_removeAllAllocations,                 /* 200 */
+    &_MetalDrawable_present,                                /* 201 */
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
 };
 #endif

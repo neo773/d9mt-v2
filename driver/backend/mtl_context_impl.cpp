@@ -2,13 +2,15 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include "../util/log/log.h"
 
 /*
- * Implementation notes live in mtl_context_impl.h (the 9 architecture
- * decisions). Section order mirrors the header's flow: lifecycle -> pass ->
- * state -> binding -> draw -> transfer -> init -> queries -> misc.
+ * METAL 4 backend (SOURCE_OF_TRUTH §2). Implementation notes live in
+ * mtl_context_impl.h (the 9 architecture decisions). Section order mirrors the
+ * header's flow: lifecycle -> pass -> state -> binding -> draw. Part 2
+ * (resolve/arg-table flush/dynamic state/transfers/queries) is in impl2.cpp.
  */
 
 namespace dxvk::backend {
@@ -28,7 +30,31 @@ namespace dxvk::backend {
 
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
-    m_psoCache(m_device->wmtDevice()) {
+    m_psoCache(m_device->wmtCompiler()) {
+    obj_handle_t dev = m_device->wmtDevice();
+
+    /* Per-stage argument tables (decision 3). max_buffers >= 21 (push data at
+     * [[buffer(20)]]); textures/samplers 16 = D3D9 sampler slot count. */
+    WMTArgTableInfo ati = {};
+    ati.max_buffers                = 32u;
+    ati.max_textures               = 16u;
+    ati.max_samplers               = 16u;
+    ati.initialize_bindings        = 1u;
+    ati.support_attribute_strides  = 1u;
+    m_argTable[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+    m_argTable[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+
+    /* ONE residency set per context (decision 4). */
+    WMTResidencySetInfo rsi = {};
+    rsi.initial_capacity = 4096u;
+    m_residencySet = WmtResidencySet::adopt(MTLDevice_newResidencySet(dev, &rsi));
+
+    /* Allocator ring seed: slot 0 exists so pre-frame resource-init cmdbufs
+     * (before the first beginRecording) have backing memory. beginRecording
+     * rotates to slot 1 next. */
+    m_allocators[0] = WmtAllocator::adopt(MTLDevice_newCommandAllocator(dev));
+    m_allocator     = m_allocators[0].handle();
+    m_frameIndex    = 1u;
   }
 
   MtlContextImpl::~MtlContextImpl() {
@@ -40,6 +66,25 @@ namespace dxvk::backend {
 
   void MtlContextImpl::beginRecording() {
     m_dirty = DirtyEverything;
+
+    /* Rotate to a >= ring-depth-old allocator and reset it (GPU-idle). */
+    uint32_t slot = m_frameIndex % uint32_t(m_allocators.size());
+    m_frameIndex++;
+    if (!m_allocators[slot])
+      m_allocators[slot] = WmtAllocator::adopt(
+        MTLDevice_newCommandAllocator(m_device->wmtDevice()));
+    else
+      MTL4CommandAllocator_reset(m_allocators[slot].handle());
+    m_allocator = m_allocators[slot].handle();
+
+    /* Rebuild the residency set only once the epoch that last used it has
+     * retired — never evict an allocation an in-flight cmdbuf still reads. */
+    if (m_device->submissions().completedSerial() >= m_residencyEpochSerial) {
+      MTLResidencySet_removeAllAllocations(m_residencySet.handle());
+      MTLResidencySet_commit(m_residencySet.handle());
+      m_residentSet.clear();
+    }
+
     ensureCommandBuffer();
   }
 
@@ -47,8 +92,10 @@ namespace dxvk::backend {
     if (m_cmdbuf)
       return;
 
-    m_cmdbuf = WmtCommandBuffer::retain(
-      MTLCommandQueue_commandBuffer(m_device->wmtQueue()));
+    m_cmdbuf = WmtCommandBuffer::adopt(
+      MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
+    MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
+    MTL4CommandBuffer_useResidencySet(m_cmdbuf.handle(), m_residencySet.handle());
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
@@ -59,8 +106,18 @@ namespace dxvk::backend {
     if (!m_cmdbuf)
       return;
 
-    uint64_t serial = m_device->submissions().onSubmit(m_cmdbuf.handle());
-    MTLCommandBuffer_commit(m_cmdbuf.handle());
+    MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
+
+    /* Realize residency before the GPU runs this cmdbuf (decision 4). */
+    MTLResidencySet_commit(m_residencySet.handle());
+    MTLResidencySet_requestResidency(m_residencySet.handle());
+
+    obj_handle_t cb = m_cmdbuf.handle();
+    MTL4CommandQueue_commit(m_device->wmtQueue(), &cb, 1u);
+
+    /* MTL4: the completion signal is a queue-timeline op AFTER commit. */
+    uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
+    m_residencyEpochSerial = serial;
 
     m_device->uploadRing().onSubmit(serial);
 
@@ -75,11 +132,16 @@ namespace dxvk::backend {
       m_keepAlive.clear();
     }
 
+    /* The committed MTL4CommandBuffer is released only after it retires (the
+     * queue holds its own reference for the duration of GPU execution). */
+    auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
+    m_device->submissions().retireAfter(serial,
+      [doneCmd]() mutable { doneCmd->reset(); });
+
     if (waitCompleted)
       m_device->submissions().waitFor(serial);
 
     m_cmdbuf.reset();
-    m_residentSet.clear();
     m_dirty = DirtyEverything;
   }
 
@@ -99,9 +161,8 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::synchronizeWsi(MtlPresenterSync sync) {
-    /* Contract 3e: the presenter's frame-latency signal must advance every
-     * frame or the frame limiter deadlocks. Present path: close everything,
-     * hand the command buffer to the presenter for drawable scheduling. */
+    /* Contract 3e + METAL 4 present handshake (decision 5): waitForDrawable
+     * BEFORE commit, signalDrawable + drawable present AFTER commit. */
     if (m_presenter == nullptr) {
       Logger::warn("MtlContextImpl: synchronizeWsi without presenter");
       return;
@@ -111,15 +172,19 @@ namespace dxvk::backend {
       closePass();
     ensureCommandBuffer();
 
-    /* Acquire the drawable and schedule its present on THIS command buffer
-     * (presentDrawable must be recorded before commit). The presenter's
-     * present()/signalFrameLatency() then wire the release token + advance
-     * the frame-latency signal (contract 3e). */
     MtlAcquiredDrawable image = m_presenter->acquireNextImage(sync.frameId);
+
+    /* GPU-side wait: the drawable's backing texture must be released by the
+     * display before this cmdbuf writes it. Enqueued before commit. */
     if (image.valid && image.drawable)
-      MTLCommandBuffer_presentDrawable(m_cmdbuf.handle(), image.drawable);
+      MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), image.drawable);
 
     submit(false);
+
+    if (image.valid && image.drawable) {
+      MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), image.drawable);
+      MetalDrawable_present(image.drawable);
+    }
 
     if (image.valid)
       m_presenter->present(image);
@@ -182,14 +247,9 @@ namespace dxvk::backend {
 
     ensureCommandBuffer();
 
-    /* residency is per-encoder in Metal — start each pass with a clean dedup
-     * set so every shader-read resource re-emits its useResource here. */
-    m_residentSet.clear();
-
     WMTRenderPassInfo info = {};
     /* Occlusion queries write into a per-context visibility buffer bound at
-     * pass creation (decision 7); attach it to every pass so beginQuery only
-     * has to flip the visibility mode. */
+     * pass creation (decision 7). */
     info.visibility_buffer = m_visBuffer.handle();
     for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
       const auto& view = m_pass.targets.color[i];
@@ -204,7 +264,7 @@ namespace dxvk::backend {
         const auto& v = m_pass.clearValues[i];
         info.colors[i].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
       }
-      makeResident(impl->owned.handle());
+      residentTextureView(view);
     }
 
     if (m_pass.targets.depthStencil != nullptr) {
@@ -220,23 +280,30 @@ namespace dxvk::backend {
         info.stencil.store_action = WMTStoreActionStore;
         info.stencil.clear_stencil = m_pass.stencilClear;
       }
-      makeResident(impl->owned.handle());
+      residentTextureView(m_pass.targets.depthStencil);
     }
 
-    m_pass.encoder = MTLCommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+    m_pass.encoder = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
     m_pass.active = true;
     m_pass.pending = false;
     m_dirty = DirtyEverything;
+
+    /* Bind the per-stage argument tables once for the encoder's lifetime;
+     * their CONTENTS change per draw but the table->stage binding is fixed. */
+    bindArgumentTables();
+  }
+
+  void MtlContextImpl::bindArgumentTables() {
+    MTL4RenderCommandEncoder_setArgumentTable(
+      m_pass.encoder, m_argTable[0].handle(), uint64_t(WMTRenderStageVertex));
+    MTL4RenderCommandEncoder_setArgumentTable(
+      m_pass.encoder, m_argTable[1].handle(), uint64_t(WMTRenderStageFragment));
   }
 
   void MtlContextImpl::closePass() {
     if (!m_pass.active)
       return;
 
-    if (!m_chunk.empty()) {
-      MTLRenderCommandEncoder_encodeCommands(m_pass.encoder, m_chunk.head());
-      m_chunk.reset();
-    }
     MTLCommandEncoder_endEncoding(m_pass.encoder);
     NSObject_release(m_pass.encoder);
     m_pass.encoder = 0;
@@ -386,32 +453,42 @@ namespace dxvk::backend {
     if (!prepareDraw())
       return;
     for (uint32_t i = 0; i < count; i++) {
-      auto* cmd = m_chunk.append<wmtcmd_render_draw>(WMTRenderCommandDraw);
-      cmd->primitive_type = wmtPrimitive(m_topology);
-      cmd->vertex_start = args[i].firstVertex;
-      cmd->vertex_count = args[i].vertexCount;
-      cmd->instance_count = args[i].instanceCount ? args[i].instanceCount : 1u;
-      cmd->base_instance = args[i].firstInstance;
+      MTL4RenderCommandEncoder_drawPrimitives(
+        m_pass.encoder,
+        wmtPrimitive(m_topology),
+        args[i].firstVertex,
+        args[i].vertexCount,
+        args[i].instanceCount ? args[i].instanceCount : 1u,
+        args[i].firstInstance);
     }
   }
 
   void MtlContextImpl::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
     if (!prepareDraw())
       return;
-    auto* ib = static_cast<MtlBufferImpl*>(m_indexBuffer.buffer().ptr());
-    if (!ib)
+    const Rc<MtlBuffer>& ib = m_indexBuffer.buffer();
+    if (ib == nullptr)
       return;
+    const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
+    const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
+      ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
+
     for (uint32_t i = 0; i < count; i++) {
-      auto* cmd = m_chunk.append<wmtcmd_render_draw_indexed>(WMTRenderCommandDrawIndexed);
-      cmd->primitive_type = wmtPrimitive(m_topology);
-      cmd->index_type = m_indexType == MtlIndexType::Uint16 ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
-      cmd->index_buffer = ib->handle.buf;
-      cmd->index_buffer_offset = m_indexBuffer.offset()
-        + uint64_t(args[i].firstIndex) * (m_indexType == MtlIndexType::Uint16 ? 2u : 4u);
-      cmd->index_count = args[i].indexCount;
-      cmd->instance_count = args[i].instanceCount ? args[i].instanceCount : 1u;
-      cmd->base_vertex = args[i].vertexOffset;
-      cmd->base_instance = args[i].firstInstance;
+      uint64_t byteOffset = m_indexBuffer.offset() + uint64_t(args[i].firstIndex) * idxSize;
+      uint64_t gpuAddr    = ib->gpuAddress(byteOffset);
+      /* MTL4 rule: indexBufferLength is the accessible byte range from the
+       * given GPU address (to the end of the backing allocation). */
+      uint64_t accessible = ib->size > byteOffset ? ib->size - byteOffset : 0u;
+      MTL4RenderCommandEncoder_drawIndexedPrimitives(
+        m_pass.encoder,
+        wmtPrimitive(m_topology),
+        args[i].indexCount,
+        idxType,
+        gpuAddr,
+        accessible,
+        args[i].instanceCount ? args[i].instanceCount : 1u,
+        int64_t(args[i].vertexOffset),
+        args[i].firstInstance);
     }
   }
 
@@ -430,14 +507,14 @@ namespace dxvk::backend {
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();
     m_pass.encodedDraws++;
-    /* all folded state is now encoded into the chunk; the next draw only
-     * re-flushes what changes (snapshot slices already captured). */
+    /* all folded state is now bound on the encoder / argument tables; the
+     * next draw only re-flushes what changes (ring slices already snapshot). */
     m_dirty = 0u;
     return true;
   }
 
-  // (resolvePso / flushVertexBuffers / flushResources / flushDynamicState /
-  //  transfer section / init / queries / misc — continued in
-  //  mtl_context_impl2.cpp to keep TU size sane)
+  // (resolvePso / bindArgumentTables contents / flushVertexBuffers /
+  //  flushResources / flushDynamicState / transfers / init / queries / misc
+  //  continue in mtl_context_impl2.cpp to keep TU size sane)
 
 }

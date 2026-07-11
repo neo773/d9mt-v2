@@ -1,10 +1,10 @@
 /*
- * RenderPsoCache — synchronous render-PSO build through the winemetal BRIDGE
- * vertex-descriptor entry (decision 9). MtlDevice_newRenderPipelineStateWith-
- * VertexDescriptor (bridge/winemetal.h, code 153) is a d9mt addition absent
- * from third_party/winemetal; we include the bridge header FIRST so its
- * superset definitions win (shared _WINEMETAL_H guard makes the subsequent
- * third_party include via wmt_handle.h a no-op).
+ * RenderPsoCache — synchronous render-PSO build through MTL4Compiler
+ * (decision 9, METAL 4 ONLY). MTL4Compiler_newRenderPipelineState takes a
+ * WMTMtl4RenderPipelineInfo carrying the VS/PS metallib handles + entry
+ * names, colour formats+blend, sample count and the vertex descriptor — no
+ * depth/stencil format, no tessellation. We include the bridge header FIRST
+ * so its superset definitions win (shared _WINEMETAL_H guard).
  */
 #include "../../bridge/winemetal.h"
 
@@ -29,11 +29,11 @@ namespace dxvk::backend {
     }
   }
 
-  RenderPsoCache::RenderPsoCache(obj_handle_t device)
-  : m_device(device) { }
+  RenderPsoCache::RenderPsoCache(obj_handle_t compiler)
+  : m_compiler(compiler) { }
 
   obj_handle_t RenderPsoCache::get(
-    const RenderPsoKey& key, obj_handle_t vsFunction, obj_handle_t fsFunction) {
+    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary) {
     /* one-entry memo: same-material draw runs skip the map entirely */
     if (m_hasLast && m_lastKey == key)
       return m_lastPso;
@@ -46,7 +46,7 @@ namespace dxvk::backend {
       return m_lastPso;
     }
 
-    obj_handle_t pso = build(key, vsFunction, fsFunction);
+    obj_handle_t pso = build(key, vsLibrary, fsLibrary);
     if (!pso)
       return 0u;
 
@@ -58,23 +58,19 @@ namespace dxvk::backend {
   }
 
   obj_handle_t RenderPsoCache::build(
-    const RenderPsoKey& key, obj_handle_t vsFunction, obj_handle_t fsFunction) {
+    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary) {
 
-    WMTRenderPipelineInfo info = {};
-    info.vertex_function            = vsFunction;
-    info.fragment_function          = fsFunction;
-    info.rasterization_enabled      = true;
-    info.raster_sample_count        = key.sampleCount ? key.sampleCount : 1u;
-    info.alpha_to_coverage_enabled  = key.alphaToCoverage != 0u;
-    info.input_primitive_topology   = WMTPrimitiveTopologyClass(key.topologyClass);
-    info.depth_pixel_format         = WMTPixelFormat(key.depthFormat);
-    info.stencil_pixel_format       = WMTPixelFormat(key.stencilFormat);
-    /* Metal validation requires max_tessellation_factor >= 1 even for the
-     * non-tessellated path (decision 9). */
-    info.max_tessellation_factor            = 64u;
-    info.tessellation_partition_mode        = WMTTessellationPartitionModePow2;
-    info.tessellation_output_winding_order  = WMTWindingClockwise;
-    info.tessellation_factor_step           = WMTTessellationFactorStepFunctionConstant;
+    WMTMtl4RenderPipelineInfo info = {};
+    info.vertex_library            = vsLibrary;
+    info.fragment_library          = fsLibrary;
+    /* AIR entry point is "main" (air_builder + air_render_test). Fragment is
+     * optional (depth-only passes); leave its name null when no PS. */
+    info.vertex_entry_name.set("main");
+    info.fragment_entry_name.set(fsLibrary ? "main" : nullptr);
+    info.rasterization_enabled     = 1u;
+    info.raster_sample_count       = key.sampleCount ? key.sampleCount : 1u;
+    info.alpha_to_coverage_enabled = key.alphaToCoverage != 0u ? 1u : 0u;
+    info.input_primitive_topology  = uint32_t(WMTPrimitiveTopologyClass(key.topologyClass));
 
     for (uint8_t i = 0u; i < key.colorCount && i < 8u; i++) {
       const PsoColorAttachment& k = key.colors[i];
@@ -90,7 +86,7 @@ namespace dxvk::backend {
       c.dst_alpha_blend_factor = WMTBlendFactor(k.alphaDstFactor);
     }
 
-    WMTRenderPipelineVertexInfo vinfo = {};
+    WMTRenderPipelineVertexInfo& vinfo = info.vertex;
     vinfo.num_attributes = key.attrCount;
     for (uint8_t i = 0u; i < key.attrCount && i < 31u; i++) {
       const PsoVertexAttr& k = key.attrs[i];
@@ -117,8 +113,7 @@ namespace dxvk::backend {
     vinfo.num_layouts = numLayouts;
 
     obj_handle_t err = 0u;
-    obj_handle_t pso = MTLDevice_newRenderPipelineStateWithVertexDescriptor(
-      m_device, &info, &vinfo, &err);
+    obj_handle_t pso = MTL4Compiler_newRenderPipelineState(m_compiler, &info, &err);
 
     if (!pso) {
       Logger::err("RenderPsoCache: pipeline build failed");

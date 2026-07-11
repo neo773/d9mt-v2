@@ -82,7 +82,10 @@ namespace dxvk::backend {
     }
 
     m_device = WmtDevice::adopt(device);
-    m_queue = WmtQueue::adopt(MTLDevice_newCommandQueue(m_device.handle(), 64u));
+    /* METAL 4 ONLY (SOURCE_OF_TRUTH §2): the queue is an MTL4CommandQueue and
+     * PSOs build through an MTL4Compiler. No MTLCommandQueue path exists. */
+    m_queue = WmtQueue::adopt(MTLDevice_newMTL4CommandQueue(m_device.handle()));
+    m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize);

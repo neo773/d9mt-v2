@@ -8,9 +8,9 @@ SubmissionTracker::SubmissionTracker(obj_handle_t device) {
   m_event = WmtSharedEvent::adopt(MTLDevice_newSharedEvent(device));
 }
 
-uint64_t SubmissionTracker::onSubmit(obj_handle_t cmdbuf) {
+uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
   uint64_t serial = m_nextSerial++;
-  MTLCommandBuffer_encodeSignalEvent(cmdbuf, m_event.handle(), serial);
+  MTL4CommandQueue_signalEvent(queue, m_event.handle(), serial);
   return serial;
 }
 

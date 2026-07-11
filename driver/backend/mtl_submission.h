@@ -34,9 +34,11 @@ public:
   /* Serial the NEXT submission will carry. */
   uint64_t nextSerial() const { return m_nextSerial; }
 
-  /* Encodes the GPU-side signal into the command buffer and returns the
-   * serial it will signal. Call once per cmdbuf, last before commit. */
-  uint64_t onSubmit(obj_handle_t cmdbuf);
+  /* Enqueues the GPU-side signal onto the MTL4 command queue and returns the
+   * serial it will signal. METAL 4: MTL4CommandBuffer has no
+   * encodeSignalEvent — the signal is a queue-timeline op, so call this
+   * once immediately AFTER MTL4CommandQueue_commit for the cmdbuf. */
+  uint64_t onSubmit(obj_handle_t queue);
 
   /* Latest serial the GPU has fully completed (reads the shared event). */
   uint64_t completedSerial();

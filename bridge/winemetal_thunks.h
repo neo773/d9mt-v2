@@ -490,6 +490,12 @@ struct unixcall_mtl4_setblendcolor {
   float alpha;
 };
 
+struct unixcall_mtl4_setvisibilitymode {
+  obj_handle_t encoder;
+  uint64_t mode;
+  uint64_t offset;
+};
+
 struct unixcall_mtl4_draw {
   obj_handle_t encoder;
   uint64_t primitive;

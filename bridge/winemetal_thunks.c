@@ -1777,3 +1777,21 @@ MTLResidencySet_removeAllAllocations(obj_handle_t residency_set) {
   params.handle = residency_set;
   UNIX_CALL(200, &params);
 }
+
+/* --- drawable present (201) ------------------------------------------ */
+WINEMETAL_API void
+MetalDrawable_present(obj_handle_t drawable) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = drawable;
+  UNIX_CALL(201, &params);
+}
+
+/* --- render encoder visibility mode (202) ---------------------------- */
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setVisibilityResultMode(obj_handle_t encoder, uint32_t mode, uint64_t offset) {
+  struct unixcall_mtl4_setvisibilitymode params;
+  params.encoder = encoder;
+  params.mode = mode;
+  params.offset = offset;
+  UNIX_CALL(202, &params);
+}
