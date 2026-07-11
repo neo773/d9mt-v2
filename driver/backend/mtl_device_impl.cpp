@@ -353,4 +353,15 @@ namespace dxvk::backend {
     return format != MtlFormat::Invalid;
   }
 
+
+}
+
+namespace dxvk {
+
+  /* seam-visible factory (declared extern in mtl_device_stub.cpp) */
+  Rc<MtlDevice> backendCreateDevice() {
+    Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl();
+    return device->valid() ? Rc<MtlDevice>(device) : nullptr;
+  }
+
 }

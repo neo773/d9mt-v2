@@ -139,8 +139,14 @@ namespace dxvk {
   }
 
   Rc<MtlDevice> MtlAdapter::createDevice() {
-    Logger::warn("MtlAdapter::createDevice: stub");
-    return new MtlDevice();
+    /* the real backend device; defined in driver/backend (always linked) */
+    extern Rc<MtlDevice> backendCreateDevice();
+    Rc<MtlDevice> device = backendCreateDevice();
+    if (device == nullptr) {
+      Logger::err("MtlAdapter::createDevice: backend device unavailable");
+      return new MtlDevice();
+    }
+    return device;
   }
 
   uint32_t MtlInstance::adapterCount() const {

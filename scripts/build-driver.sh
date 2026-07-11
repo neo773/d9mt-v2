@@ -276,7 +276,7 @@ LINK_LOG="$BUILD/d3d9-link.log"
 # Phase C-10: the link is now FATAL. The full CORE graph (device/swapchain/
 # interface/main + seam resolvers) links d3d9.dll with all 20 d3d9.def exports;
 # the winemetal MTLDevice_* imports resolve via the bridge import lib above.
-if i686-w64-mingw32-g++ -shared -o "$BUILD/d3d9.dll" \
+if i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$BUILD/d3d9.dll" \
       -Wl,--enable-stdcall-fixup \
       "$D3D9DEF" "${OBJS[@]}" "$DXBCSM3_LIB" "$WMIMP" \
       -lgdi32 -luser32 -lole32 -lsetupapi 2>"$LINK_LOG"; then

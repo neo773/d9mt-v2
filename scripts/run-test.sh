@@ -44,15 +44,15 @@ echo "[run-test] building $NAME.exe"
 i686-w64-mingw32-gcc -O1 "$V2/test/$NAME.c" -o "$OUT/$NAME.exe" \
   -I "$V2/test" -ld3d9 -lgdi32 -luser32
 
-echo "[run-test] installing bridge winemetal builtins (backing up originals)"
-install_one() {
-  local src="$1" dst="$2"
-  [ -f "$dst" ] && [ ! -f "$dst.cx-orig" ] && cp "$dst" "$dst.cx-orig"
-  cp "$src" "$dst"
-}
-install_one "$V2/build/bridge/winemetal32.dll" "$CX/lib/wine/i386-windows/winemetal.dll"
-install_one "$V2/build/bridge/winemetal64.dll" "$CX/lib/wine/x86_64-windows/winemetal.dll"
-install_one "$V2/build/bridge/winemetal.so"    "$CX/lib/wine/x86_64-unix/winemetal.so"
+echo "[run-test] staging bridge winemetal builtins via WINEDLLPATH (no CX-tree writes)"
+# CrossOver's app bundle is TCC-protected; wine honors WINEDLLPATH as an
+# extra builtin search root instead. Layout mirrors the wine tree.
+WMTREE="$V2/build/winepath"
+mkdir -p "$WMTREE/i386-windows" "$WMTREE/x86_64-windows" "$WMTREE/x86_64-unix"
+cp "$V2/build/bridge/winemetal32.dll" "$WMTREE/i386-windows/winemetal.dll"
+cp "$V2/build/bridge/winemetal64.dll" "$WMTREE/x86_64-windows/winemetal.dll"
+cp "$V2/build/bridge/winemetal.so"    "$WMTREE/x86_64-unix/winemetal.so"
+export WINEDLLPATH="$WMTREE/i386-windows:$WMTREE/x86_64-windows:$WMTREE/x86_64-unix"
 
 echo "[run-test] deploying driver + exe to bottle '$BOTTLE'"
 cp "$V2/build/driver/d3d9.dll" "$DEPLOY/d3d9.dll"
