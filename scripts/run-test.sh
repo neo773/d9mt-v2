@@ -58,17 +58,33 @@ echo "[run-test] deploying driver + exe to bottle '$BOTTLE'"
 cp "$V2/build/driver/d3d9.dll" "$DEPLOY/d3d9.dll"
 cp "$OUT/$NAME.exe" "$DEPLOY/"
 
-echo "[run-test] launching"
+echo "[run-test] launching (absolute path)"
 export WINEDLLOVERRIDES="d3d9=n;winemetal=b"
-"$CX/bin/wine" --bottle "$BOTTLE" --cx-log "$OUT/$NAME-wine.log" \
-  start /unix "$DEPLOY/$NAME.exe" >/dev/null 2>&1 || true
+( "$CX/bin/wine" --bottle "$BOTTLE" --cx-log "$OUT/$NAME-wine.log" \
+    "$DEPLOY/$NAME.exe" >/dev/null 2>&1 & )
 
-sleep "${WAIT:-12}"
+sleep "${WAIT:-14}"
 
-echo "[run-test] screenshot"
+# Raise the wine window (accessibility) then window-capture it (screen
+# recording). Both permissions are required; without them the capture is
+# blank or of the wrong surface.
+echo "[run-test] raise + capture"
+osascript -e "tell application \"System Events\" to set frontmost of (first process whose name contains \"$NAME\") to true" 2>/dev/null || true
 osascript -e "tell application \"System Events\" to perform action \"AXRaise\" of (first window of (first process whose name contains \"$NAME\"))" 2>/dev/null || true
 sleep 1
-screencapture -x "$OUT/$NAME.png"
-echo "[run-test] -> $OUT/$NAME.png"
-echo "[run-test] driver log (if any): $DEPLOY/d3d9.log"
-tail -5 "$DEPLOY/d3d9.log" 2>/dev/null || echo "  (no driver log yet)"
+# capture the focused window only (-o no shadow, -l window id if resolvable)
+WID=$(osascript -e "tell application \"System Events\" to id of (first window of (first process whose name contains \"$NAME\"))" 2>/dev/null || true)
+if [ -n "${WID:-}" ] && [ "$WID" != "0" ]; then
+  screencapture -x -o -l "$WID" "$OUT/$NAME.png" 2>/dev/null || screencapture -x "$OUT/$NAME.png"
+else
+  screencapture -x "$OUT/$NAME.png"
+fi
+
+echo "[run-test] driver log:"
+tail -6 "$OUT/../.." 2>/dev/null; tail -8 "$DEPLOY/${NAME}_d3d9.log" 2>/dev/null || echo "  (no driver log)"
+
+echo "[run-test] verify pixels (${EXPECT:-nonblack}):"
+python3 "$V2/scripts/verify-pixels.py" "$OUT/$NAME.png" "${EXPECT:-nonblack}"
+RESULT=$?
+pkill -9 -f "$NAME.exe" 2>/dev/null || true
+exit $RESULT
