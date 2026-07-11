@@ -98,7 +98,16 @@ struct d9mt_air_reflection_entry {
   uint32_t index;             /* [[buffer/texture/sampler(index)]] or spec id */
   uint64_t byte_size;         /* buffers only                              */
   char     name[40];          /* NUL-terminated, truncated                 */
+  /* For BUFFER entries that came from a DclCbv, reg_index is the DclCbv
+   * register index (== the D3D9 frontend CbvIndex). D9MT_AIR_NO_REG_INDEX for
+   * legacy-builtin / push-data buffers and all non-buffer entries. Lets the
+   * driver map a bound constant buffer to the Metal slot the shader declares
+   * WITHOUT relying on data-derived debug names (SOURCE_OF_TRUTH §4b bug 1). */
+  uint32_t reg_index;
+  uint32_t reserved;
 };
+
+#define D9MT_AIR_NO_REG_INDEX 0xFFFFFFFFu
 
 #ifdef __cplusplus
 extern "C" {

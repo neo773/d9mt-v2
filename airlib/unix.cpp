@@ -67,17 +67,20 @@ int compileImpl(d9mt_air_compile_params* p) {
   std::vector<d9mt_air_reflection_entry> entries;
 
   auto addEntry = [&entries](uint32_t kind, uint32_t index,
-                             uint64_t byteSize, const std::string& name) {
+                             uint64_t byteSize, const std::string& name,
+                             uint32_t regIndex = D9MT_AIR_NO_REG_INDEX) {
     d9mt_air_reflection_entry entry = {};
     entry.kind = kind;
     entry.index = index;
     entry.byte_size = byteSize;
+    entry.reg_index = regIndex;
     std::strncpy(entry.name, name.c_str(), sizeof(entry.name) - 1u);
     entries.push_back(entry);
   };
 
   for (const auto& b : airBuilder.getBufferBindings())
-    addEntry(D9MT_AIR_BIND_BUFFER, b.index, b.byteSize, b.name);
+    addEntry(D9MT_AIR_BIND_BUFFER, b.index, b.byteSize, b.name,
+             b.isCbv ? b.regIndex : D9MT_AIR_NO_REG_INDEX);
 
   for (const auto& t : airBuilder.getTextureBindings()) {
     uint32_t kind = D9MT_AIR_BIND_TEXTURE_2D;

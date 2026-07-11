@@ -77,6 +77,8 @@ public:
     std::string name;
     uint32_t    index = 0u;    /* Metal [[buffer(index)]] */
     uint64_t    byteSize = 0u; /* allocation size of the pointee */
+    bool        isCbv = false; /* came from a DclCbv (vs legacy builtin / push) */
+    uint32_t    regIndex = 0u; /* DclCbv register index (== D3D9 CbvIndex) */
   };
 
   /** Shader stage seen on the IR entry point (valid after buildMetallib). */

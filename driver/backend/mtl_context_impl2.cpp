@@ -172,20 +172,33 @@ namespace dxvk::backend {
       StageBindings& b = m_bindings[st];
       obj_handle_t table = m_argTable[st].handle();
 
-      /* constant buffers at their AIR slots (0..2 per stage), with the
-       * discard/range offset folded in (bindUniformBufferRange snapshot). */
+      /* The bound shader for this stage carries the CbvIndex -> AIR Metal
+       * buffer-slot map (reflection-derived, SOURCE_OF_TRUTH §4b bug 1). The
+       * frontend binds CBVs at raw CbvIndex; we translate to the slot the AIR
+       * shader actually declares so CBVs land at 0..2 (or wherever air_builder
+       * put them) and never collide with vertex streams (kVertexBufferBaseIndex)
+       * or push data (kPushConstantIndex). */
+      const Rc<MtlShaderFunction>& fn = (st == 0u) ? m_vs : m_fs;
+
+      /* constant buffers at their AIR slots, with the discard/range offset
+       * folded in (bindUniformBufferRange snapshot). */
       for (uint32_t slot = 0u; slot < b.cbvs.size(); slot++) {
         StageBindings::CbvBinding& cbv = b.cbvs[slot];
         if (!cbv.slice.defined())
           continue;
+
+        /* Only bind CBVs the shader actually declares, at their AIR slot. */
+        int32_t airSlot = (fn != nullptr && slot < fn->cbvSlotMap.size())
+          ? int32_t(fn->cbvSlotMap[slot]) : -1;
+        if (airSlot < 0)
+          continue;
+
         const Rc<MtlBuffer>& buf = cbv.slice.buffer();
         if (buf == nullptr)
           continue;
-        /* Guard against a constant buffer with no valid backing storage: a
-         * bound CBV whose MtlBuffer has null/garbage storage would fault on
-         * gpuAddress and GPU-fault if bound. (Root cause: a stage-N constant
-         * buffer bound before its ring storage was allocated — surfaced by
-         * this warning; the frontend should not bind an unbacked CBV.) */
+        /* Defense-in-depth: a CBV whose MtlBuffer has null/garbage storage
+         * would fault on gpuAddress. With the reflection-driven mapping this
+         * should never trigger (we only bind declared CBVs). */
         if (buf->storage() == nullptr
          || uintptr_t(buf->storage().ptr()) < 0x10000u) {
           logOnce("MtlContextImpl: skipped CBV with no backing storage "
@@ -194,7 +207,8 @@ namespace dxvk::backend {
         }
         makeResident(buf->handle.buf);
         MTL4ArgumentTable_setAddress(
-          table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset), slot);
+          table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset),
+          uint32_t(airSlot));
       }
 
       /* textures: setTexture by MTLResourceID into this stage's table. */

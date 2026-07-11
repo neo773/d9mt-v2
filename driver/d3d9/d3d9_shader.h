@@ -48,6 +48,24 @@ namespace dxvk {
   };
 
   /**
+   * \brief CbvIndex -> AIR Metal buffer-slot map (SOURCE_OF_TRUTH §4b bug 1).
+   *
+   * The frontend binds each D3D9 constant buffer at its raw CbvIndex, but the
+   * AIR shader declares its constant buffers at DIFFERENT Metal [[buffer(n)]]
+   * slots (air_builder assigns them). This table, built from the d9mtair
+   * reflection blob per compiled shader, maps each CbvIndex (0..7) to the Metal
+   * slot the shader actually reads (-1 = the shader does not declare that
+   * buffer). Threaded onto MtlShaderFunction and consumed by the backend's
+   * arg-table flush so a CBV lands where the shader reads it and never collides
+   * with a vertex stream (kVertexBufferBaseIndex) or push data (slot 20).
+   * Size 8 matches D3D9ShaderResourceMapping::CbvIndex::Count (asserted below).
+   */
+  struct D3D9CbvSlotMap {
+    std::array<int8_t, 8> slot;
+    D3D9CbvSlotMap() { slot.fill(int8_t(-1)); }
+  };
+
+  /**
    * \brief Neutral Metal shader-backend interface (was DxvkIrShader-shaped)
    *
    * One object per unique (SM3 bytecode + options). getMetallib() is the Phase-B
@@ -103,8 +121,11 @@ namespace dxvk {
     // backend on (prevStageIoHash, specStateHash) — the shared bytecodeHash is
     // implicit in the object identity.
     //   specStateHash — hash of the referenced D3D9SpecData bytes.
+    //   outCbvMap — if non-null, filled with the CbvIndex->AIR-slot mapping
+    //   derived from the d9mtair reflection blob (SOURCE_OF_TRUTH §4b bug 1).
     virtual std::vector<uint8_t> getMetallib(const PairedStageIo& paired,
-                                             uint64_t             specStateHash) = 0;
+                                             uint64_t             specStateHash,
+                                             D3D9CbvSlotMap*      outCbvMap = nullptr) = 0;
   };
 
   /**
@@ -141,6 +162,9 @@ namespace dxvk {
       return std::make_pair(IsVSSampler(index) ? MtlStageVertex : MtlStageFragment, index);
     }
   };
+
+  static_assert(D3D9ShaderResourceMapping::CbvIndex::Count <= 8,
+                "D3D9CbvSlotMap must hold every CbvIndex");
 
   // PHASE-D: factory that will build an ID3D9MetalShaderBackend from SM3 bytecode +
   // options + analysis. Declared here; the impl (air-backed) lives in the REWRITE

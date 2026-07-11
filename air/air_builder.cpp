@@ -2180,6 +2180,8 @@ std::vector<uint8_t> AirBuilder::buildMetallib() {
     BufferBinding binding;
     binding.name = buf.name;
     binding.index = buf.bufferIndex;
+    binding.isCbv = buf.isCbv;
+    binding.regIndex = buf.regIndex;
     binding.byteSize = buf.type
       ? impl.mod->getDataLayout().getTypeAllocSize(buf.type).getFixedSize()
       : 0u;

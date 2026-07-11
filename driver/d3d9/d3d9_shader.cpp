@@ -12,6 +12,16 @@
 
 namespace dxvk {
 
+  // Copy the reflection-derived CbvIndex->AIR-slot map onto the compiled Metal
+  // shader function so the backend arg-table flush can place each constant
+  // buffer where the shader reads it (SOURCE_OF_TRUTH §4b bug 1).
+  static void ApplyCbvSlotMap(const Rc<MtlShaderFunction>& fn, const D3D9CbvSlotMap& map) {
+    if (fn == nullptr)
+      return;
+    for (size_t i = 0u; i < fn->cbvSlotMap.size(); i++)
+      fn->cbvSlotMap[i] = (i < map.slot.size()) ? map.slot[i] : int8_t(-1);
+  }
+
   D3D9CommonShader::D3D9CommonShader(
           D3D9DeviceEx*             pDevice,
     const D3D9ShaderModuleKey&      ShaderKey,
@@ -41,8 +51,9 @@ namespace dxvk {
     // into a bindable Metal shader function. This is the VS/FF shader and the
     // fallback PS; VS<->PS interpolant-reconciled PS variants are produced lazily
     // through GetShaderForLinkage() once the paired VS is known (doc 03 §2b/§2d).
+    D3D9CbvSlotMap cbvMap;
     std::vector<uint8_t> metallib = m_backend->getMetallib(
-      ID3D9MetalShaderBackend::PairedStageIo { }, 0u);
+      ID3D9MetalShaderBackend::PairedStageIo { }, 0u, &cbvMap);
 
     if (metallib.empty()) {
       Logger::err(str::format("D3D9 shader: Phase-B metallib empty for ", m_name));
@@ -54,6 +65,8 @@ namespace dxvk {
 
     if (m_shader == nullptr)
       Logger::err(str::format("D3D9 shader: newLibrary failed for ", m_name));
+    else
+      ApplyCbvSlotMap(m_shader, cbvMap);
   }
 
 
@@ -83,7 +96,8 @@ namespace dxvk {
 
     // The backend memoizes the compiled metallib on (prevIoHash, spec); here we
     // additionally memoize the metallib->MtlShaderFunction wrap per prev layout.
-    std::vector<uint8_t> metallib = m_backend->getMetallib(paired, 0u);
+    D3D9CbvSlotMap cbvMap;
+    std::vector<uint8_t> metallib = m_backend->getMetallib(paired, 0u, &cbvMap);
 
     Rc<MtlShaderFunction> fn = m_shader;  // fall back to the unpaired shader
 
@@ -91,10 +105,12 @@ namespace dxvk {
       auto compiled = m_device->GetDXVKDevice()->createShaderFunction(
         m_backend->stage(), metallib.data(), metallib.size());
 
-      if (compiled != nullptr)
+      if (compiled != nullptr) {
+        ApplyCbvSlotMap(compiled, cbvMap);
         fn = compiled;
-      else
+      } else {
         Logger::err(str::format("D3D9 shader: linkage newLibrary failed for ", m_name));
+      }
     }
 
     m_linkageCache->functions.emplace(prevIoHash, fn);

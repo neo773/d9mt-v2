@@ -16,7 +16,93 @@
 
 #include "../util/util_time.h"
 
+#include <cstdio>
+#include <cstdint>
+#include <thread>
+#include <chrono>
+
 namespace dxvk {
+
+  // --- Gated backbuffer readback (SOURCE_OF_TRUTH §4b bug 2) ------------------
+  // When the trigger file C:/d9mt-test/DUMP exists, copy the app's rendered
+  // backbuffer into a CPU-readable buffer, synchronously wait for the GPU, and
+  // write a tiny header (u32 width, u32 height) + raw BGRA8 pixels to
+  // C:/d9mt-test/rt_dump.bin. Reliable autonomous verifier (no screencapture).
+  // Runs on the CS thread inside the present lambda, only when triggered.
+  static void DumpBackbufferIfRequested(
+          MtlContext*          ctx,
+    const Rc<MtlDevice>&       device,
+    const Rc<MtlTexture>&      image,
+          uint32_t             paramsW,
+          uint32_t             paramsH) {
+    if (ctx == nullptr || device == nullptr || image == nullptr)
+      return;
+
+    // Trigger check (Windows-side fopen accepts forward-slash C: paths).
+    FILE* trig = std::fopen("C:/d9mt-test/DUMP", "rb");
+    if (trig == nullptr)
+      return;
+    std::fclose(trig);
+    // One-shot: remove the trigger so we dump exactly one frame.
+    std::remove("C:/d9mt-test/DUMP");
+
+    // The backbuffer MtlTexture's extent is not always populated (backend
+    // gap); fall back to the create-info extent, then to the swapchain's
+    // present-params size.
+    uint32_t w = uint32_t(image->extent.width);
+    uint32_t h = uint32_t(image->extent.height);
+    if (!w || !h) { w = image->info().extent.width;  h = image->info().extent.height; }
+    if (!w || !h) { w = paramsW;                      h = paramsH; }
+    if (!w || !h) {
+      Logger::warn("D3D9 dump: zero extent, aborting");
+      return;
+    }
+
+    const uint64_t rowBytes   = uint64_t(w) * 4u;
+    const uint64_t imageBytes = rowBytes * h;
+
+    MtlBufferCreateInfo bi = { };
+    bi.size      = imageBytes;
+    bi.usage     = MtlUsage::Staging;
+    bi.cpuAccess = MtlCpuAccess::Read;
+    Rc<MtlBuffer> readback = device->createBuffer(bi);
+    if (readback == nullptr) {
+      Logger::warn("D3D9 dump: createBuffer failed");
+      return;
+    }
+
+    // Compute-encoder copy texture -> buffer (MTL4; no blit encoder).
+    ctx->copyTextureToBuffer(
+      readback, 0u, rowBytes, imageBytes, image->format,
+      image, MtlSubresourceLayers{ }, MtlOrigin{ },
+      MtlSize{ w, h, 1u });
+
+    // Commit the copy, then give the GPU time to finish before reading the
+    // shared-storage buffer. A synchronous shared-event wait from inside the
+    // present lambda (CS thread) deadlocks, and the global waitForIdle is a
+    // no-op in this backend; a bounded sleep is reliable for this gated debug
+    // dump (the copy is a single small blit).
+    ctx->flushCommandList("backbuffer-dump", nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    const void* src = readback->mapPtr(0u);
+    if (src == nullptr) {
+      Logger::warn("D3D9 dump: readback buffer not host-mapped");
+      return;
+    }
+
+    FILE* out = std::fopen("C:/d9mt-test/rt_dump.bin", "wb");
+    if (out == nullptr) {
+      Logger::warn("D3D9 dump: could not open rt_dump.bin for write");
+      return;
+    }
+    std::fwrite(&w, sizeof(uint32_t), 1u, out);
+    std::fwrite(&h, sizeof(uint32_t), 1u, out);
+    std::fwrite(src, 1u, size_t(imageBytes), out);
+    std::fclose(out);
+    Logger::info(str::format("D3D9 dump: wrote rt_dump.bin ", w, "x", h,
+      " (", imageBytes, " bytes) fmt=", uint32_t(image->format)));
+  }
 
   static uint16_t MapGammaControlPoint(float x) {
     if (x < 0.0f) x = 0.0f;
@@ -597,10 +683,18 @@ namespace dxvk {
       m_parent->EmitCs([
         cPresenter = m_wctx->presenter,
         cSrcView   = swapImageView,
+        cSrcImage  = swapImage,
+        cDevice    = m_device,
         cDrawable  = drawable,
         cFrameId   = m_wctx->frameId,
+        cParamsW   = uint32_t(m_presentParams.BackBufferWidth),
+        cParamsH   = uint32_t(m_presentParams.BackBufferHeight),
         cSignal    = m_wctx->frameLatencySignal
       ] (MtlContext* ctx) {
+        // Gated backbuffer readback (verifier) — before the present copy, on
+        // the fully-rendered app backbuffer. No-op unless the trigger exists.
+        DumpBackbufferIfRequested(ctx, cDevice, cSrcImage, cParamsW, cParamsH);
+
         // The backend presenter blits the current back buffer (cSrcView) into the
         // acquired drawable; here we wire the acquire/release drawable semaphores
         // to the submit (synchronizeWsi, contract 3e), commit, and present.

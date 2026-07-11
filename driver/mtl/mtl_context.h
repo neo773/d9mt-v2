@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 
 #include "mtl_types.h"
 #include "mtl_resource.h"
@@ -50,6 +51,12 @@ namespace dxvk {
     MtlShaderStage  stage = MtlShaderStage::Vertex;
     MtlObjectHandle library = MtlNullHandle;
     // PHASE-C: reflection (DxvkShaderMetadata-equivalent), entry name.
+
+    // CbvIndex -> AIR Metal buffer-slot map (SOURCE_OF_TRUTH §4b bug 1). The
+    // frontend binds constant buffers at raw CbvIndex; the AIR shader reads them
+    // at these Metal [[buffer(n)]] slots. -1 = the shader does not declare that
+    // buffer. Index by D3D9 CbvIndex (0..7); consumed by the arg-table flush.
+    std::array<int8_t, 8> cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };
   };
 
   class MtlCommandBuffer : public RcObject { };   // MTL4CommandBuffer

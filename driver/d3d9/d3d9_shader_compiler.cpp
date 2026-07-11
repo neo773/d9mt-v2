@@ -666,6 +666,24 @@ namespace dxvk {
       return std::nullopt;
     }
 
+    // The dword value a spec constant folds to when compiled with defaults:
+    // the canonical D3D9 default render state. Alpha test defaults to disabled
+    // (compare == Always) rather than the zero-initialized Never, so the PS
+    // alpha-test epilogue passes fragments instead of killing them all.
+    static uint32_t defaultSpecDword(uint32_t specId) {
+      D3D9SpecData def = { };
+      def.setAlphaCompareOp(MtlCompareFunction::Always);
+      static_assert(sizeof(D3D9SpecData) % sizeof(uint32_t) == 0u,
+                    "D3D9SpecData must be dword-packed for spec folding");
+      if (specId >= sizeof(D3D9SpecData) / sizeof(uint32_t))
+        return 0u;
+      uint32_t dword = 0u;
+      std::memcpy(&dword,
+        reinterpret_cast<const uint8_t*>(&def) + specId * sizeof(uint32_t),
+        sizeof(uint32_t));
+      return dword;
+    }
+
     dxbc_spv::ir::SsaDef emitSpecConstant(uint32_t specId) {
       using namespace dxbc_spv;
 
@@ -682,7 +700,16 @@ namespace dxvk {
       auto& specDef = m_specConstants.at(specId);
 
       if (!specDef) {
-        specDef = m_builder.add(ir::Op::DclSpecConstant(ir::ScalarType::eU32, m_entryPoint, specId, 0u));
+        // Spec constants are folded to their DEFAULTS this phase (function-
+        // constant PSO plumbing pending). The fold default must be the real
+        // D3D9 default render state, not raw zero: e.g. the alpha-compare-op
+        // packed in spec dword 0 defaults to MtlCompareFunction::Never(0),
+        // which makes the PS alpha-test epilogue DISCARD every fragment and
+        // renders nothing. Fold to a canonical default-state D3D9SpecData
+        // (alpha test disabled == Always) so shaders draw when the app leaves
+        // these states at their D3D9 defaults (SOURCE_OF_TRUTH §4b).
+        specDef = m_builder.add(ir::Op::DclSpecConstant(
+          ir::ScalarType::eU32, m_entryPoint, specId, defaultSpecDword(specId)));
         m_builder.add(ir::Op::DebugName(specDef, s_specNames.at(specId)));
       }
 
@@ -1169,7 +1196,8 @@ namespace dxvk {
       return m_outputIoHash;
     }
 
-    std::vector<uint8_t> getMetallib(const PairedStageIo& paired, uint64_t specStateHash) override {
+    std::vector<uint8_t> getMetallib(const PairedStageIo& paired, uint64_t specStateHash,
+                                     D3D9CbvSlotMap* outCbvMap = nullptr) override {
       using namespace dxbc_spv;
 
       if (m_ir.empty())
@@ -1186,8 +1214,11 @@ namespace dxvk {
       {
         std::lock_guard lock(m_metallibMutex);
         auto it = m_metallibCache.find(cacheKey);
-        if (it != m_metallibCache.end())
-          return it->second;
+        if (it != m_metallibCache.end()) {
+          if (outCbvMap)
+            *outCbvMap = it->second.cbvMap;
+          return it->second.metallib;
+        }
       }
 
       // Phase B — restore the cached legalized IR (doc 03 §1b step 1).
@@ -1290,12 +1321,62 @@ namespace dxvk {
       metallib.resize(params.out_size);
       reflection.resize(params.out_reflection_size);
 
+      // Parse the reflection blob into a CbvIndex->AIR-slot map (§4b bug 1).
+      D3D9CbvSlotMap cbvMap = parseReflectionCbvMap(reflection);
+
       {
         std::lock_guard lock(m_metallibMutex);
-        m_metallibCache.emplace(cacheKey, metallib);
+        MetallibCacheEntry entry;
+        entry.metallib = metallib;
+        entry.cbvMap   = cbvMap;
+        m_metallibCache.emplace(cacheKey, std::move(entry));
       }
 
+      if (outCbvMap)
+        *outCbvMap = cbvMap;
+
       return metallib;
+    }
+
+    // Build the CbvIndex -> AIR Metal buffer-slot map from a d9mtair reflection
+    // blob. The frontend binds each D3D9 constant buffer at its raw CbvIndex;
+    // the AIR shader declares them at the Metal [[buffer(n)]] slots reported
+    // here. Each DclCbv reflection entry carries reg_index == the CbvIndex the
+    // frontend passed to DclCbv (setup*Cbv / clip / shared), so we map directly
+    // without relying on data-derived debug names (SOURCE_OF_TRUTH §4b bug 1).
+    D3D9CbvSlotMap parseReflectionCbvMap(const std::vector<uint8_t>& blob) const {
+      using Cbv = D3D9ShaderResourceMapping::CbvIndex;
+      D3D9CbvSlotMap map;
+
+      if (blob.size() < sizeof(d9mt_air_reflection_header))
+        return map;
+
+      d9mt_air_reflection_header hdr = { };
+      std::memcpy(&hdr, blob.data(), sizeof(hdr));
+
+      size_t off = sizeof(hdr);
+      for (uint32_t i = 0u; i < hdr.entry_count; i++) {
+        if (off + sizeof(d9mt_air_reflection_entry) > blob.size())
+          break;
+        d9mt_air_reflection_entry e = { };
+        std::memcpy(&e, blob.data() + off, sizeof(e));
+        off += sizeof(e);
+
+        if (e.kind != D9MT_AIR_BIND_BUFFER)
+          continue;
+
+        e.name[sizeof(e.name) - 1u] = '\0';
+
+        // Only DclCbv-backed buffers carry a valid reg_index (== CbvIndex).
+        if (e.reg_index != D9MT_AIR_NO_REG_INDEX && e.reg_index < uint32_t(Cbv::Count))
+          map.slot[e.reg_index] = int8_t(e.index);
+
+        Logger::debug(str::format("D3D9 AIR reflect ", m_name, ": buffer name='",
+          e.name, "' metalSlot=", e.index, " size=", e.byte_size,
+          " regIndex=", int32_t(e.reg_index)));
+      }
+
+      return map;
     }
 
     bool valid() const {
@@ -1310,9 +1391,15 @@ namespace dxvk {
     std::vector<uint8_t> m_ir;             // serialized legalized IR (Phase A)
     uint64_t             m_outputIoHash = 0u;  // hash of the output interpolant IoMap
 
-    // Phase-B metallib cache, keyed on (prevStageIoHash, specStateHash).
-    std::mutex                                        m_metallibMutex;
-    std::unordered_map<uint64_t, std::vector<uint8_t>> m_metallibCache;
+    // Phase-B metallib cache, keyed on (prevStageIoHash, specStateHash). Stores
+    // the metallib bytes AND the reflection-derived CbvIndex->AIR-slot map so a
+    // cache hit still yields the binding map (SOURCE_OF_TRUTH §4b bug 1).
+    struct MetallibCacheEntry {
+      std::vector<uint8_t> metallib;
+      D3D9CbvSlotMap       cbvMap;
+    };
+    std::mutex                                          m_metallibMutex;
+    std::unordered_map<uint64_t, MetallibCacheEntry>    m_metallibCache;
 
     // Stable hash of a shader's output IoMap (location type + index/built-in +
     // component mask + semantic name/index). Two VS whose PS-facing interpolant
