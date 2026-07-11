@@ -37,9 +37,10 @@ namespace dxvk::backend {
     obj_handle_t dev = m_device->wmtDevice();
 
     /* Per-stage argument tables (decision 3). max_buffers >= 21 (push data at
-     * [[buffer(20)]]); textures/samplers 16 = D3D9 sampler slot count. */
+     * [[buffer(20)]]); textures/samplers 16 = D3D9 sampler slot count.
+     * Metal 4 validation: "max buffer bind count must not be more than 31". */
     WMTArgTableInfo ati = {};
-    ati.max_buffers                = 32u;
+    ati.max_buffers                = 31u;
     ati.max_textures               = 16u;
     ati.max_samplers               = 16u;
     ati.initialize_bindings        = 1u;
@@ -166,7 +167,9 @@ namespace dxvk::backend {
       if (f) {
         std::fclose(f);
         std::remove("C:\\d9mt-test\\GPUCAP");
+        Logger::info("D9MT-GPUCAPTURE trigger hit — starting capture");
         gpuCaptureStart(device, s_gpuCaptureCommits);
+        Logger::info("D9MT-GPUCAPTURE startCapture returned");
       }
     }
   }

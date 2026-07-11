@@ -1057,6 +1057,9 @@ namespace dxvk {
     for (uint32_t a = 0; a < arraySlices; a++) {
       // The docs claim that the dirty box is just a performance optimization, however in practice games rely on it.
       const D3DBOX& box = srcTexInfo->GetDirtyBox(a);
+      { static int n=0; if (n++<8) Logger::info(str::format(
+          "D9MT-UPDTEX box L", box.Left, " T", box.Top, " R", box.Right,
+          " B", box.Bottom, " F", box.Front, " K", box.Back)); }
       if (box.Left >= box.Right || box.Top >= box.Bottom || box.Front >= box.Back)
         continue;
 
@@ -5063,7 +5066,7 @@ namespace dxvk {
       pLockedBox->RowPitch   = align(std::max(desc.Width >> MipLevel, 1u), 4);
       pLockedBox->SlicePitch = pLockedBox->RowPitch * std::max(desc.Height >> MipLevel, 1u);
     }
-    else if (likely(!formatInfo->flags & MtlFormatFlagMultiPlane)) {
+    else if (likely(!(formatInfo->flags & MtlFormatFlagMultiPlane))) {
       pLockedBox->RowPitch   = align(formatInfo->elementSize * blockCount.width, 4);
       pLockedBox->SlicePitch = pLockedBox->RowPitch * blockCount.height;
     } else {
@@ -5260,6 +5263,12 @@ namespace dxvk {
 
       alignedExtent = util::snapExtent3D(alignedDestOffset, alignedExtent, dstTexLevelExtent);
       alignedExtent = util::snapExtent3D(alignedSrcOffset, alignedExtent, srcTexLevelExtent);
+      { static int n=0; if (n++<8) Logger::info(str::format(
+          "D9MT-UPDTEXBUF src=", SrcExtent.width, "x", SrcExtent.height,
+          " blocks=", extentBlockCount.width, "x", extentBlockCount.height,
+          " aligned=", alignedExtent.width, "x", alignedExtent.height,
+          " dstLvl=", dstTexLevelExtent.width, "x", dstTexLevelExtent.height,
+          " srcLvl=", srcTexLevelExtent.width, "x", srcTexLevelExtent.height)); }
 
       MtlOrigin srcOffsetBlockCount = util::computeBlockOffset(alignedSrcOffset, util::formatBlockSize(formatInfo));
       MtlExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, util::formatBlockSize(formatInfo));

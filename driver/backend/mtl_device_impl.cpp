@@ -161,6 +161,16 @@ namespace dxvk::backend {
     texture->extent = info.extent;
     texture->gpuResourceId = texInfo.gpu_resource_id;
     texture->info = info;
+    /* Base-class metadata the frontend reads via image->info() and
+     * mipLevelExtent() — unset it reports 1x1 extents (UpdateTexture upload
+     * regions collapse to a single texel: black game textures). */
+    texture->m_info.type        = info.type;
+    texture->m_info.format      = info.format;
+    texture->m_info.extent      = info.extent;
+    texture->m_info.mipLevels   = info.mipLevels ? info.mipLevels : 1u;
+    texture->m_info.numLayers   = info.arrayLayers ? info.arrayLayers : 1u;
+    texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
+    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     return texture;
   }
 
@@ -169,10 +179,21 @@ namespace dxvk::backend {
     auto* impl = static_cast<MtlTextureImpl*>(image.ptr());
 
     WMTTextureSwizzleChannels swizzle;
-    swizzle.r = WMTTextureSwizzle(key.swizzle.r);
-    swizzle.g = WMTTextureSwizzle(key.swizzle.g);
-    swizzle.b = WMTTextureSwizzle(key.swizzle.b);
-    swizzle.a = WMTTextureSwizzle(key.swizzle.a);
+    if (key.usage & MtlTextureUsageRenderTarget) {
+      /* Metal strips RenderTarget usage from texture views with a
+       * non-identity swizzle — an RTV/DSV built with the sampling swizzle
+       * (e.g. X8R8G8B8's {R,G,B,One}) silently loses attachability and every
+       * render pass on it is invalid. Attachments always use identity. */
+      swizzle.r = WMTTextureSwizzleRed;
+      swizzle.g = WMTTextureSwizzleGreen;
+      swizzle.b = WMTTextureSwizzleBlue;
+      swizzle.a = WMTTextureSwizzleAlpha;
+    } else {
+      swizzle.r = WMTTextureSwizzle(key.swizzle.r);
+      swizzle.g = WMTTextureSwizzle(key.swizzle.g);
+      swizzle.b = WMTTextureSwizzle(key.swizzle.b);
+      swizzle.a = WMTTextureSwizzle(key.swizzle.a);
+    }
 
     MtlImageCreateInfo viewShape = impl->info;
     viewShape.arrayLayers = key.layerCount;
