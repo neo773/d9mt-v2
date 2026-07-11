@@ -1,0 +1,19 @@
+driver/backend/mtl_presenter_impl.cpp
+  s_02998b4ed19c89::t_a870286ce9a8e2 71-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "75c794d9bc8324ed2a5df816e078314329578655",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
