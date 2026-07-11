@@ -1795,3 +1795,15 @@ MTL4RenderCommandEncoder_setVisibilityResultMode(obj_handle_t encoder, uint32_t 
   params.offset = offset;
   UNIX_CALL(202, &params);
 }
+
+/* --- cross-encoder producer barrier (203) --------------------------- */
+WINEMETAL_API void
+MTL4CommandEncoder_barrier(obj_handle_t encoder, uint64_t after_stages,
+                           uint64_t before_queue_stages, uint64_t visibility_options) {
+  struct unixcall_mtl4_barrier params;
+  params.encoder = encoder;
+  params.after_stages = after_stages;
+  params.before_stages = before_queue_stages;
+  params.visibility = visibility_options;
+  UNIX_CALL(203, &params);
+}

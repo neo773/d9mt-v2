@@ -581,6 +581,13 @@ struct unixcall_mtl4_newrenderpso {
   obj_handle_t ret_pso;
 };
 
+struct unixcall_mtl4_barrier {
+  obj_handle_t encoder;
+  uint64_t after_stages;
+  uint64_t before_stages;
+  uint64_t visibility;
+};
+
 #pragma pack(pop)
 
 #endif

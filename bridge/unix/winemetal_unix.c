@@ -6101,6 +6101,21 @@ _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- cross-encoder producer barrier (203) --------------------------- *
+ * -[MTL4CommandEncoder barrierAfterStages:beforeQueueStages:visibilityOptions:]
+ * is declared on the MTL4CommandEncoder protocol both the render and compute
+ * encoders adopt, so one thunk orders either encoder's writes ahead of later
+ * queue stages (SOURCE_OF_TRUTH §4c). */
+static NTSTATUS
+_MTL4CommandEncoder_barrier(void *obj) {
+  struct unixcall_mtl4_barrier *params = obj;
+  [(id<MTL4CommandEncoder>)params->encoder
+      barrierAfterStages:(MTLStages)params->after_stages
+       beforeQueueStages:(MTLStages)params->before_stages
+       visibilityOptions:(MTL4VisibilityOptions)params->visibility];
+  return STATUS_SUCCESS;
+}
+
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
@@ -6315,6 +6330,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLResidencySet_removeAllAllocations,                 /* 200 */
     &_MetalDrawable_present,                                /* 201 */
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
+    &_MTL4CommandEncoder_barrier,                           /* 203 */
 };
 
 #ifndef DXMT_NATIVE
@@ -6536,5 +6552,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLResidencySet_removeAllAllocations,                 /* 200 */
     &_MetalDrawable_present,                                /* 201 */
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
+    &_MTL4CommandEncoder_barrier,                           /* 203 */
 };
 #endif

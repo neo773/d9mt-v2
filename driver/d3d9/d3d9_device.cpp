@@ -7025,7 +7025,13 @@ namespace dxvk {
     MtlRasterizerState state = { };
     state.setCullMode(DecodeCullMode(D3DCULL(rs[D3DRS_CULLMODE])));
     state.setDepthClip(true);
-    state.setFrontFace(MtlWinding::Clockwise);
+    /* D3D9 evaluates front-face winding in its left-handed, Y-down screen
+     * space; the Metal render target is effectively Y-flipped relative to it,
+     * so a D3D9 "front" (clockwise in D3D9 space) triangle presents as
+     * counter-clockwise to Metal. Declare CCW as front-facing so DecodeCullMode
+     * (D3DCULL_CW->cull Front, D3DCULL_CCW->cull Back) culls the correct side.
+     * Hardcoded Clockwise silently culled all default (D3DCULL_CCW) geometry. */
+    state.setFrontFace(MtlWinding::CounterClockwise);
     state.setPolygonMode(DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE])));
     state.setFlatShading(m_state.renderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT);
     state.setSampleCount(m_state.renderStates[D3DRS_MULTISAMPLEANTIALIAS]

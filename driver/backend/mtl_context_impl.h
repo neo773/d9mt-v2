@@ -157,6 +157,8 @@ namespace dxvk::backend {
     void pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) override;
 
     void bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) override;
+    void emitGraphicsBarrier(MtlStageMask srcStages, MtlBarrierScope srcScope,
+                             MtlStageMask dstStages, MtlBarrierScope dstScope) override;
     void clearRenderTarget(const Rc<MtlTextureView>& view, MtlAspectMask clear,
                            MtlClearValue value, MtlAspectMask discard) override;
 
@@ -319,6 +321,13 @@ namespace dxvk::backend {
 
     obj_handle_t computeEncoder();     // close pass, open a one-shot MTL4 compute encoder
     void         ensureVisBuffer();
+
+    /* Metal 4 has no driver hazard tracking (SOURCE_OF_TRUTH §4c). Emit a
+     * PRODUCER queue barrier on the OUTGOING encoder before endEncoding: its
+     * `afterStages` writes are ordered ahead of ALL later queue stages, so a
+     * subsequent encoder (draw vertex-fetch, RT sample, present/readback copy)
+     * observes them. Coarse-but-correct; narrow the stage masks later. */
+    void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages);
 
   };
 

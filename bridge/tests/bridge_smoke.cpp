@@ -445,6 +445,15 @@ int main(int argc, char** argv) {
     draw.vertex_start = 0; draw.vertex_count = 3; draw.instance_count = 1; draw.base_instance = 0;
     funcs[187](&draw);
 
+    /* producer barrier (203): order this render pass's fragment writes ahead
+     * of all later queue stages — proves the barrier entry encodes cleanly. */
+    struct unixcall_mtl4_barrier bar = {};
+    bar.encoder = enc4.ret;
+    bar.after_stages = WMTStageFragment;
+    bar.before_stages = WMTStageAll;
+    bar.visibility = WMTVisibilityOptionDevice;
+    funcs[203](&bar);
+
     struct unixcall_generic_obj_noret endEnc = {};
     endEnc.handle = enc4.ret; funcs[33](&endEnc); /* shared MTLCommandEncoder_endEncoding */
 

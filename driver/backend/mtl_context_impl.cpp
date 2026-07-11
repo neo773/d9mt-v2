@@ -304,6 +304,11 @@ namespace dxvk::backend {
     if (!m_pass.active)
       return;
 
+    /* §4c: order this pass's fragment (color/depth) writes ahead of every
+     * later queue stage — a subsequent encoder that samples this RT as a
+     * texture, or copies it (present blit / gated readback), must observe the
+     * finished pixels. Metal 4 does no implicit render-pass transition. */
+    emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
     MTLCommandEncoder_endEncoding(m_pass.encoder);
     NSObject_release(m_pass.encoder);
     m_pass.encoder = 0;

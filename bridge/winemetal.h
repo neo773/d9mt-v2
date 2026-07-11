@@ -2291,4 +2291,39 @@ WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable);
 WINEMETAL_API void MTL4RenderCommandEncoder_setVisibilityResultMode(
     obj_handle_t encoder, uint32_t mode, uint64_t offset);
 
+/* --- cross-encoder producer barrier (203) --------------------------- *
+ * Metal 4 has no driver hazard tracking (SOURCE_OF_TRUTH §4c). The prior
+ * bridge only exposed within-encoder memory barriers (WMTCompute/Render
+ * CommandMemoryBarrier); this adds the MTL4CommandEncoder-level PRODUCER
+ * queue barrier -[MTL4CommandEncoder barrierAfterStages:beforeQueueStages:
+ * visibilityOptions:]. Emitted on the OUTGOING encoder (compute copy /
+ * render pass) before endEncoding, it orders that encoder's writes
+ * (afterStages) ahead of later queue stages (beforeQueueStages) so a
+ * subsequent encoder's read sees them. Both MTL4RenderCommandEncoder and
+ * MTL4ComputeCommandEncoder conform to MTL4CommandEncoder, so one entry
+ * serves both. Mirrors MTLStages / MTL4VisibilityOptions from the SDK. */
+enum WMTStages : uint64_t {
+  WMTStageVertex                = 1ull << 0,
+  WMTStageFragment              = 1ull << 1,
+  WMTStageTile                  = 1ull << 2,
+  WMTStageObject                = 1ull << 3,
+  WMTStageMesh                  = 1ull << 4,
+  WMTStageResourceState         = 1ull << 26,
+  WMTStageDispatch              = 1ull << 27,
+  WMTStageBlit                  = 1ull << 28,
+  WMTStageAccelerationStructure = 1ull << 29,
+  WMTStageMachineLearning       = 1ull << 30,
+  WMTStageAll                   = 0x7fffffffffffffffull,
+};
+
+enum WMTVisibilityOptions : uint64_t {
+  WMTVisibilityOptionNone          = 0ull,
+  WMTVisibilityOptionDevice        = 1ull << 0,
+  WMTVisibilityOptionResourceAlias = 1ull << 1,
+};
+
+WINEMETAL_API void MTL4CommandEncoder_barrier(
+    obj_handle_t encoder, uint64_t after_stages,
+    uint64_t before_queue_stages, uint64_t visibility_options);
+
 #endif

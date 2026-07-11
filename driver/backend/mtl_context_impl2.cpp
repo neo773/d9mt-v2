@@ -337,6 +337,28 @@ namespace dxvk::backend {
     return MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
   }
 
+  void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages) {
+    if (!encoder)
+      return;
+    /* Producer queue barrier: order `afterStages` on this (outgoing) encoder
+     * ahead of ALL later queue stages, flushing writes to device memory so a
+     * later encoder's read is coherent (SOURCE_OF_TRUTH §4c). */
+    MTL4CommandEncoder_barrier(encoder, afterStages, uint64_t(WMTStageAll),
+                               uint64_t(WMTVisibilityOptionDevice));
+  }
+
+  void MtlContextImpl::emitGraphicsBarrier(MtlStageMask, MtlBarrierScope,
+                                           MtlStageMask, MtlBarrierScope) {
+    /* Frontend hazard hook (d3d9_device feedback-loop path). Our coarse
+     * per-encoder producer barriers (closePass + each transfer) already order
+     * render/compute writes ahead of later reads across encoders; a same-
+     * encoder RT->texture feedback loop is handled by re-materializing the
+     * pass. If a pass is open, flush its fragment writes to device memory so
+     * an immediately following read in a fresh encoder is coherent. */
+    if (m_pass.active)
+      emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+  }
+
   void MtlContextImpl::copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                                   const Rc<MtlBuffer>& src, MtlDeviceSize srcOff, MtlDeviceSize bytes) {
     auto* d = static_cast<MtlBufferImpl*>(dst.ptr());
@@ -348,6 +370,9 @@ namespace dxvk::backend {
     makeResident(d->handle.buf);
     MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
       enc, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
+    /* §4c: make this copy's write visible to the later draw/copy that reads it
+     * (e.g. a DEFAULT-pool vertex buffer uploaded here then fetched by the VS). */
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -372,6 +397,7 @@ namespace dxvk::backend {
     MTL4ComputeCommandEncoder_copyFromTextureToTexture(
       enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, srcOrigin, srcSize,
       d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, dstOrigin);
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -391,6 +417,7 @@ namespace dxvk::backend {
     MTL4ComputeCommandEncoder_copyFromBufferToTexture(
       enc, s->handle.buf, off, rowAlign, sliceAlign, size,
       d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, origin);
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -410,6 +437,7 @@ namespace dxvk::backend {
     MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
       enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, origin, size,
       d->handle.buf, off, rowAlign, sliceAlign);
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -431,6 +459,7 @@ namespace dxvk::backend {
     obj_handle_t enc = computeEncoder();
     makeResident(tex);
     MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -444,6 +473,7 @@ namespace dxvk::backend {
     obj_handle_t enc = computeEncoder();
     makeResident(b->handle.buf);
     MTL4ComputeCommandEncoder_fillBuffer(enc, b->handle.buf, 0u, b->size, 0u);
+    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
@@ -485,6 +515,8 @@ namespace dxvk::backend {
 
     /* load=Clear + store=Store clears the whole subresource with no draws. */
     obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+    /* §4c: order the clear's fragment write ahead of a later sample/copy. */
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
     MTLCommandEncoder_endEncoding(enc);
     NSObject_release(enc);
   }
