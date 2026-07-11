@@ -1,0 +1,28 @@
+scripts/run-test.sh
+  s_099954a5f894ee::t_607b2a94f05978 47-55
+scripts/install-bridge-builtins.sh
+  s_099954a5f894ee::t_02d4e5bcdb6f4d 1-36
+driver/mtl/mtl_device_stub.cpp
+  s_099954a5f894ee::t_0cd69d13934fdb 142-149
+scripts/build-driver.sh
+  s_099954a5f894ee::t_fc60a935bb6d20 279
+driver/backend/mtl_device_impl.cpp
+  s_099954a5f894ee::t_0cd69d13934fdb 356,364-366
+  s_099954a5f894ee::t_7609df32bd534e 357-363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6b4608f40c73913128b6ae67932141b0eab1b0f0",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
