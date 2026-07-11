@@ -718,3 +718,44 @@ Build GREEN at 59 CORE TUs, gate PASS. build-driver.sh CORE list adds device.cpp
    D3D9State<> ctor/dtor + D3D9ShaderModuleSet::GetShaderModule + DxvkD3D8Bridge (their .cpp into CORE).
    `_imp__MTLDevice_*` winemetal imports come from driver/backend (concurrent agent) — link against
    the mtl_*_stub seam only if absent.
+
+## Phase C-10 — d3d9.dll LINKS (fatal), 20/20 def exports (2026-07-11, solo)
+
+From-scratch `bash scripts/build-driver.sh` is **GREEN: 70 CORE TUs**, Vulkan gate **PASS**,
+and **d3d9.dll LINKS (fatal)** at ~31.9 MB with **all 20 d3d9.def exports** present
+(objdump EAT: 20 Export RVA entries — 17 named + 3 NONAME by ordinal: base[16]
+Direct3D9ForceHybridEnumeration, base[28257] DXVK_RegisterAnnotation, base[28258]
+DXVK_UnRegisterAnnotation). Link step is now FATAL in build-driver.sh; the winemetal
+`MTLDevice_*` imports resolve via the bridge-generated import lib.
+
+### Files landed
+- **d3d9_swapchain.cpp** — REWRITE onto MtlPresenter. Present path wires the REAL seam
+  (contract 3e): `acquireNextImage(frameId)` → EmitCs `{ synchronizeWsi(sync);
+  flushCommandList; presenter->present(drawable); presenter->signalFrameLatency(frameId);
+  frameLatencySignal->signal(frameId) }` → FlushCsChunk; SyncFrameLatency waits the fence.
+  `Rc<Presenter>`→`Rc<MtlPresenter>`, `PresenterSync`→`MtlAcquiredDrawable/MtlPresenterSync`,
+  `VkSurfaceFormatKHR GetSurfaceFormat`→`MtlFormat`, `UpdatePresentParameters`→ presenter->recreate
+  on extent change. PHASE-E neuters (logged): GetFrontBufferData readback (heavy Vk image
+  machinery, screenshot path), SetGammaRamp/cursor (was DxvkSwapchainBlitter — dropped),
+  UpdateTargetFrameRate frame-limiter, createLatencyTracker (Reflex). ID3D9VkExtSwapchain dropped.
+- **d3d9_interface.cpp** — D3D9InterfaceEx onto `Singleton<MtlInstance>` (acquire() — no
+  DxvkInstanceFlag), adapter enum + CreateDeviceEx (`GetDXVKAdapter()->createDevice()`→Rc<MtlDevice>),
+  ValidatePresentationParameters{,Ex}. Dropped ID3D9VkInterop/Ext QI branches; Find9On12Args LUID
+  match neutered (no D3D12 interop).
+- **d3d9_main.cpp** — the 20 exports + `D3D9GlobalAnnotationList::s_instance` storage. Logger::s_instance
+  NOT redefined (util/log/log.cpp owns it). Direct3DCreate9On12{,Ex} route through CreateD3D9.
+- **d3d9_bridge.cpp** — DxvkD3D8Bridge/InterfaceBridge (VkOffset3D/VkExtent3D→MtlOrigin/MtlExtent3D).
+- **d3d9_com_guid.cpp** (NEW, minimal local firewall) — logQueryInterfaceError + operator<<(REFIID)
+  without the d3d11/dxgi pull that keeps util/com/com_guid.cpp excluded.
+- **d3d9_options.cpp** (edit) — ctor `Rc<DxvkDevice>`→`Rc<MtlDevice>`; VK_DRIVER_ID matchesDriver
+  quirk probe neutered (hasMulz=false).
+- **d3d9_shader.cpp** (edit) — D3D9ShaderModuleSet::GetShaderModule PHASE-D cache stub (default
+  D3D9CommonShader, no air backend).
+- **dxvk/dxvk_allocator.cpp** (copied, Vulkan-free) — DxvkPage/PoolAllocator backing MemoryFilePool.
+
+### build-driver.sh
+CORE additions (now fatal): dxvk_allocator.cpp, util_unmap.cpp (un-excluded), d3d9_state.cpp,
+d3d9_options.cpp, d3d9_bridge.cpp, d3d9_window.cpp, d3d9_com_guid.cpp, d3d9_shader_validator.cpp,
++ swapchain/interface/main. Import lib now built from `build/bridge/winemetal.def`
+(full def incl. MTLDevice_newRenderPipelineStateWithVertexDescriptor) with `--dllname winemetal.dll`,
+falling back to third_party/winemetal only if the bridge is unbuilt. Link step made FATAL.

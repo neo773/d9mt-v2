@@ -43,7 +43,7 @@ CORE=()
 for f in "$DRV"/util/*.cpp "$DRV"/util/sync/*.cpp "$DRV"/util/log/*.cpp \
          "$DRV"/util/config/*.cpp "$DRV"/util/com/*.cpp "$DRV"/util/sha1/*.cpp; do
   case "$f" in
-    */util_unmap.cpp|*/com_guid.cpp|*/com_destruction_notifier.cpp) continue ;;
+    */com_guid.cpp|*/com_destruction_notifier.cpp) continue ;;
   esac
   CORE+=("$f")
 done
@@ -52,6 +52,9 @@ CORE+=("$DRV"/wsi/wsi_platform.cpp "$DRV"/wsi/win32/wsi_monitor_win32.cpp \
        "$DRV"/wsi/win32/wsi_platform_win32.cpp "$DRV"/wsi/win32/wsi_window_win32.cpp)
 # cs + mtl seam.
 CORE+=("$DRV"/cs/dxvk_cs.cpp)
+# dxvk_allocator: the page/pool allocator backing MemoryFilePool (util_unmap.cpp).
+# Vulkan-free (pure bit/page math); copied from upstream to the driver tree.
+CORE+=("$DRV"/dxvk/dxvk_allocator.cpp)
 CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
        "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp)
 # backend/ — the real winemetal-backed Metal 3 backend (MtlContextImpl +
@@ -104,6 +107,19 @@ CORE+=("$DRV"/d3d9/d3d9_adapter.cpp "$DRV"/d3d9/d3d9_multithread.cpp \
 # Phase C-9 STAGE-2: the device linchpin (semantic port onto the Mtl seam) + the
 # swapchain (MtlPresenter) + interface/main (the 20 d3d9.def COM exports).
 CORE+=("$DRV"/d3d9/d3d9_device.cpp)
+# Phase C-10 link-frontier resolvers (promoted to fatal CORE):
+#   d3d9_state       : D3D9State<dynamic_item>/<static_item> ctor/dtor instantiation.
+#   d3d9_options     : D3D9Options ctor ported off DxvkDevice->MtlDevice (VK_DRIVER_ID
+#                      driver-quirk probe neutered — no Metal analogue).
+#   d3d9_bridge      : DxvkD3D8Bridge/InterfaceBridge (VkOffset3D->MtlOrigin).
+#   d3d9_window      : HookWindowProc/ResetWindowProc/D3D9WindowMessageFilter/
+#                      ActivateFocusWindow used by swapchain + interface.
+#   d3d9_com_guid    : minimal local logQueryInterfaceError/operator<<(GUID) firewall
+#                      (util/com/com_guid.cpp stays excluded — pulls d3d11/dxgi).
+CORE+=("$DRV"/d3d9/d3d9_state.cpp "$DRV"/d3d9/d3d9_options.cpp \
+       "$DRV"/d3d9/d3d9_bridge.cpp "$DRV"/d3d9/d3d9_window.cpp \
+       "$DRV"/d3d9/d3d9_com_guid.cpp "$DRV"/d3d9/d3d9_shader_validator.cpp)
+# swapchain (MtlPresenter) + interface/main (the 20 d3d9.def COM exports).
 [ -f "$DRV"/d3d9/d3d9_swapchain.cpp ] && CORE+=("$DRV"/d3d9/d3d9_swapchain.cpp)
 [ -f "$DRV"/d3d9/d3d9_interface.cpp ] && CORE+=("$DRV"/d3d9/d3d9_interface.cpp)
 [ -f "$DRV"/d3d9/d3d9_main.cpp ] && CORE+=("$DRV"/d3d9/d3d9_main.cpp)
@@ -227,30 +243,41 @@ rm -f "$DXBCSM3_LIB"
 i686-w64-mingw32-ar rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
 
-WMDEF="$V2/third_party/winemetal/winemetal32.def"
+# winemetal import lib: prefer the bridge-generated def (build-bridge.sh emits the
+# full winemetal.def incl. MTLDevice_newRenderPipelineStateWithVertexDescriptor,
+# the vertex-descriptor pipeline entry the pso-cache imports). Fall back to the
+# older third_party def only if the bridge hasn't been built.
+WMDEF="$V2/build/bridge/winemetal.def"
+[ -f "$WMDEF" ] || WMDEF="$V2/third_party/winemetal/winemetal32.def"
 WMIMP="$BUILD/libwinemetal32.a"
 D3D9DEF="$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def"
 if command -v i686-w64-mingw32-dlltool >/dev/null && [ -f "$WMDEF" ]; then
-  i686-w64-mingw32-dlltool -d "$WMDEF" -l "$WMIMP" 2>/dev/null \
-    && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes)"
+  i686-w64-mingw32-dlltool -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+    && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
+# Phase C-10: the link is now FATAL. The full CORE graph (device/swapchain/
+# interface/main + seam resolvers) links d3d9.dll with all 20 d3d9.def exports;
+# the winemetal MTLDevice_* imports resolve via the bridge import lib above.
 if i686-w64-mingw32-g++ -shared -o "$BUILD/d3d9.dll" \
       -Wl,--enable-stdcall-fixup \
       "$D3D9DEF" "${OBJS[@]}" "$DXBCSM3_LIB" "$WMIMP" \
       -lgdi32 -luser32 -lole32 -lsetupapi 2>"$LINK_LOG"; then
   echo "  d3d9.dll LINKED: $BUILD/d3d9.dll ($(wc -c < "$BUILD/d3d9.dll") bytes)"
+  nexp="$(i686-w64-mingw32-objdump -p "$BUILD/d3d9.dll" | grep -cE 'Export RVA' || true)"
+  echo "  d3d9.dll exports (Export Address Table RVA entries): $nexp"
 else
   undef="$( { grep -oE 'undefined reference to [`'"'"'"][^'"'"'\"\`]+' "$LINK_LOG" || true; } | sed 's/.*to .//' | sort -u)"
   noexp="$( { grep -oE 'cannot export [A-Za-z0-9_]+' "$LINK_LOG" || true; } | sed 's/cannot export //' | sort -u)"
   nu="$(printf '%s\n' "$undef" | grep -c . || true)"
   ne="$(printf '%s\n' "$noexp" | grep -c . || true)"
-  echo "  d3d9.dll link: INCOMPLETE — $ne unexported d3d9.def entries (device/main/interface graph),"
-  echo "                 $nu undefined references (pure build-input gaps)."
-  echo "    --- d3d9.def exports still undefined (need d3d9_main/interface/device port): ---"
-  printf '%s\n' "$noexp" | sed 's/^/    /'
-  echo "    --- undefined references: ---"
-  printf '%s\n' "$undef" | head -40 | sed 's/^/    /'
+  echo "  d3d9.dll link: FAILED — $ne unexported d3d9.def entries, $nu undefined references." >&2
+  echo "    --- d3d9.def exports still undefined: ---" >&2
+  printf '%s\n' "$noexp" | sed 's/^/    /' >&2
+  echo "    --- undefined references: ---" >&2
+  printf '%s\n' "$undef" | head -40 | sed 's/^/    /' >&2
+  echo "FATAL: d3d9.dll link failed" >&2
+  exit 1
 fi
 
 echo "=== [driver] build OK ==="

@@ -29,8 +29,11 @@ namespace dxvk {
   }
 
 
-  D3D9Options::D3D9Options(const Rc<DxvkDevice>& device, const Config& config) {
-    const Rc<DxvkAdapter> adapter = device != nullptr ? device->adapter() : nullptr;
+  D3D9Options::D3D9Options(const Rc<MtlDevice>& device, const Config& config) {
+    // PHASE-C10: was Rc<DxvkDevice>/DxvkAdapter. The MtlDevice/MtlAdapter seam has
+    // no Vulkan VK_DRIVER_ID probe, so the driver-quirk detection below (hasMulz)
+    // is neutered to false — Metal is a single, known backend.
+    (void)device;
 
     // Fetch these as a string representing a hexadecimal number and parse it.
     this->customVendorId                = parsePciId(config.getOption<std::string>("d3d9.customVendorId"));
@@ -86,11 +89,8 @@ namespace dxvk {
     // Clamp LOD bias so that people don't abuse this in unintended ways
     this->samplerLodBias = dxvk::fclamp(this->samplerLodBias, -2.0f, 1.0f);
 
-    bool hasMulz = adapter != nullptr
-                  && (adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
-                   || adapter->matchesDriver(VK_DRIVER_ID_MESA_NVK)
-                   || adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE, Version(2, 0, 316), Version())
-                   || adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(565, 57, 1), Version()));
+    // PHASE-C10 (was VK_DRIVER_ID matchesDriver probe — no Metal analogue).
+    bool hasMulz = false;
     std::string floatEmulation = Config::toLower(config.getOption<std::string>("d3d9.floatEmulation", "auto"));
     if (floatEmulation == "strict") {
       this->d3d9FloatEmulation = D3D9FloatEmulation::Strict;
