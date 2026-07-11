@@ -1,5 +1,7 @@
 #include "d3d9_device.h"
 
+#include "../util/sync/sync_spinlock.h"   // sync::spin (present in util/sync)
+
 namespace dxvk {
 
   D3D9DeviceLock D3D9Multithread::LockContested(uint32_t threadId) {

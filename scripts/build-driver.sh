@@ -77,6 +77,17 @@ CORE+=("$DRV"/d3d9/d3d9_buffer.cpp "$DRV"/d3d9/d3d9_surface.cpp \
 CORE+=("$DRV"/d3d9/d3d9_swvp_emu.cpp "$DRV"/d3d9/d3d9_annotation.cpp)
 CORE+=("$DRV"/d3d9/d3d9_query.cpp "$DRV"/d3d9/d3d9_initializer.cpp)
 CORE+=("$DRV"/d3d9/d3d9_constant_buffer.cpp)
+# Phase C-8 STAGE-2 bodies (compile fatal; resolve link-frontier symbols):
+#   d3d9_adapter             : caps tables onto MtlAdapter/MtlDeviceInfo (MtlGpuVendor
+#                              seam add; CheckDeviceVkFormat dropped, MSAA via maxSampleCount).
+#   d3d9_multithread         : LockContested via sync::spin (util/sync).
+#   d3d9_stateblock          : Vulkan-clean KEEP body.
+#   d3d9_vertex_declaration  : Vulkan-clean KEEP body.
+# d3d9_format_helpers is now a header-only neutral stub (YUV converter dead — all
+# conversion formats map to MtlFormat::Invalid); its .cpp is not compiled.
+CORE+=("$DRV"/d3d9/d3d9_adapter.cpp "$DRV"/d3d9/d3d9_multithread.cpp \
+       "$DRV"/d3d9/d3d9_stateblock.cpp "$DRV"/d3d9/d3d9_vertex_declaration.cpp \
+       "$DRV"/d3d9/d3d9_monitor.cpp)
 # Phase C-5 STAGE-1 probe: header-only TU proving the ported device-graph headers
 #   (common_buffer/common_texture/resource/subresource/surface/volume/buffer/query)
 #   form a closed, Vulkan-free compile unit on the Mtl seam. Grows as device.h /

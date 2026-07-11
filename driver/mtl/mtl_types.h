@@ -530,12 +530,27 @@ namespace dxvk {
     uint64_t used      = 0u;   // bytes in flight
   };
 
+  // PHASE-C7: PCI vendor IDs the D3D9 adapter reports (was DxvkGpuVendor,
+  // dxvk_adapter.h). Pure identity values, no Vulkan. The frontend advertises a
+  // synthetic GPU (AMD RX 6700 XT by default) to games, so these are the values
+  // it compares/reports against, not a real Metal-device property.
+  enum class MtlGpuVendor : uint32_t {
+    Amd    = 0x1002,
+    Nvidia = 0x10de,
+    Intel  = 0x8086,
+  };
+
   struct MtlDeviceInfo {
-    char     name[256]        = { };
-    uint64_t maxBufferLength  = 0u;
-    uint32_t maxTextureSize2D = 16384u;
-    uint32_t maxAnisotropy    = 16u;
-    bool     supportsBCFormats = true;
+    char         name[256]        = { };
+    uint64_t     maxBufferLength  = 0u;
+    uint32_t     maxTextureSize2D = 16384u;
+    uint32_t     maxAnisotropy    = 16u;
+    bool         supportsBCFormats = true;
+    // Synthetic identity the adapter reports (backend fills or leaves default).
+    MtlGpuVendor vendor           = MtlGpuVendor::Amd;
+    uint32_t     deviceId         = 0x73df;   // RX 6700 XT
+    uint32_t     maxSampleCount   = 8u;        // MSAA cap (color+depth, 2D)
+    float        maxPointSize     = 256.0f;
   };
 
 }

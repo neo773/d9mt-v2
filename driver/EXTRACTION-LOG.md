@@ -545,3 +545,104 @@ Build GREEN, nothing half-written on disk. Remaining, in dependency order:
 
 DoD remaining: d3d9.dll LINKS (20/20 def exports resolved; missing backend symbols →
 minimal seam stubs). Vulkan gate already PASS with whitelist empty; keep it that way.
+
+## Phase C-8 — adapter + multithread + support bodies ported; device.cpp mechanical layer (partial) (2026-07-11, solo/sequential)
+
+Resumed STAGE 2 solo from PHASE-C7-CHECKPOINT. Ported the two small target files
+(**d3d9_adapter.cpp**, **d3d9_multithread.cpp**) + the support bodies device.cpp
+transitively needs, and promoted each to **fatal CORE**. Began d3d9_device.cpp
+(the 9288-line linchpin) — its file-level mechanical layer is applied but it is a
+genuine multi-session semantic port (below), so it is **not** yet in driver/ (the
+ZERO-Vulkan gate forbids a partially-ported TU on disk). From-scratch
+`bash scripts/build-driver.sh` is GREEN: **51 CORE TUs** (was 46),
+`libdriver_core.a` ~16.8 MB, **Vulkan gate PASS** (whitelist empty). d3d9.dll link
+still INCOMPLETE — 20 unexported def entries + 35 undefined refs, ~all D3D9DeviceEx::*
+(device.cpp) + the CORE-excluded com_guid.cpp (logQueryInterfaceError, operator<<(GUID))
++ util_unmap.cpp (MemoryFilePool). `D3D9Adapter::CheckDeviceMultiSampleType`,
+`D3D9Multithread::LockContested`, and all d3d9_monitor IsSupported*Format/
+GetMonitorFormatBpp are now RESOLVED (moved out of the frontier).
+
+### Files DONE this resume (fatal CORE, compile Vulkan-free)
+| File | Kind | Notes / substitutions |
+|---|---|---|
+| d3d9_adapter.cpp | PORT (caps) | `DxvkGpuVendor`→**`MtlGpuVendor`** (new seam enum); ctor `m_caps(*Instance,Adapter->handle(),nullptr)`→`m_caps(Adapter->deviceInfo())`; `D3D9VkFormatTable(this,Adapter,opts)`→`D3D9MtlFormatTable(this,opts)`; all `mapping.FormatColor/FormatSrgb==VK_FORMAT_UNDEFINED`→`==MtlFormat::Invalid`; `mapping.Aspect!=VK_IMAGE_ASPECT_COLOR_BIT`→`!=MtlAspectColor`. **CheckDeviceVkFormat(VkFormat,…) DELETED** — CheckDeviceFormat now returns support directly from the valid D3D9_MTL_FORMAT_MAPPING (Apple GPUs support the standard usages universally for mapped formats). **CheckDeviceMultiSampleType** Vulkan sample-count probe (framebuffer*SampleCounts + DxvkFormatQuery + getFormatLimits) rewritten to a single `m_caps.maxSampleCount` ceiling bitmask (Metal has one device-wide sample-count cap for color+depth 2D). GetDeviceCaps `limits.pointSizeRange[1]`→`m_caps.maxPointSize`. GetAdapterLUID/CacheIdentifierInfo drop `getProperties().vk11/vk12/core` — identity synthesized from MtlDeviceInfo (vendor/deviceId/name) + ordinal-derived GUID/LUID; `props.vk12.driverID==VK_DRIVER_ID_NVIDIA_PROPRIETARY` collapses to `options.hideNvidiaGpu`. |
+| d3d9_multithread.cpp | PORT (trivial) | `#include "../util/sync/sync_spinlock.h"` added (sync::spin present in util/sync — **no vendoring needed**, task's conditional not triggered). Body byte-identical. |
+| d3d9_format_helpers.h | STUB (header-only) | D3D9FormatHelper (Vulkan compute YUV/packed converter) neutralized to inline no-op — all conversion formats map to MtlFormat::Invalid so ConvertFormat is dead. `.cpp` removed (Vulkan; unused). PHASE-E: real MSL-compute converter. |
+| d3d9_stateblock.cpp | KEEP (verbatim) | Vulkan-clean; added to CORE. |
+| d3d9_vertex_declaration.cpp | KEEP (verbatim) | Vulkan-clean; added to CORE. |
+| d3d9_monitor.cpp | KEEP (verbatim) | Vulkan-clean; added to CORE (resolves adapter's IsSupported*Format/GetMonitorFormatBpp). |
+
+### SEAM CHANGES this resume (logged per plan)
+- **`MtlGpuVendor`** (mtl_types.h) — was `DxvkGpuVendor` (dxvk_adapter.h): `{Amd=0x1002,
+  Nvidia=0x10de, Intel=0x8086}`. Pure PCI-vendor identity, no Vulkan. Non-breaking.
+- **`MtlDeviceInfo` extended** (mtl_types.h) — added `vendor`, `deviceId`, `maxSampleCount`
+  (=8), `maxPointSize` (=256.0f) so the adapter can source its synthetic identity + caps
+  from the seam struct instead of VkPhysicalDeviceProperties. Backend fills or defaults.
+
+### d3d9_device.cpp — mechanical layer applied, semantic body is the standing multi-session task
+The **file-level mechanical retype is done** and preserved at
+`scratchpad/device-wip/d3d9_device.cpp.mechanical-layer` (NOT on disk in driver/,
+because a half-ported TU with live `Vk*` fails the ZERO-Vulkan gate — the gate is
+all-or-nothing per TU). Applied so far (verified by grep): `DxvkContext`→`MtlContext`
+(67), `DxvkBufferSlice`→`MtlBufferSlice` (15), `VkDeviceSize`→`MtlDeviceSize`,
+`DxvkImageView`→`MtlTextureView`, `DxvkImage{,ViewKey,CreateInfo}`/`DxvkBufferCreateInfo`/
+`DxvkFormatInfo`/`DxvkLatencyTracker`/`DxvkStagingBufferStats`/`DxvkGpuVendor`,
+`VkImageSubresource{Layers,Range}`/`VkExtent{2,3}D`/`VkClearValue`, and the 1:1 ctx->
+method renames (`bindResourceImageView`→`bindTexture`, `bindResourceSampler`→`bindSampler`,
+`bindResourceBufferView`→`bindBufferView`, `setBlendConstants`→`setBlendColor`,
+`copyImage{,ToBuffer}`→`copyTexture{,ToBuffer}`, `copyBufferToImage`→`copyBufferToTexture`,
+`resolveImage`→`resolveTexture`, `blitImageView`→`blitTextureView`,
+`ensureImageCompatibility`→`ensureTextureUsage`), + dead `../dxvk/dxvk_{adapter,instance}.h`
+includes retargeted to `../mtl/mtl_device.h`.
+
+**What REMAINS (the real body, ~400+ compiler errors after the mechanical layer):** this
+is a semantic rewrite, NOT a token swap, exactly as PHASE-C4/C5 predicted. The interlocking
+sites (each needs per-use judgement, seam has different field names / shapes):
+- **VK_* constant families** with no 1:1 sed: `VK_IMAGE_ASPECT_{COLOR,DEPTH,STENCIL}_BIT`→
+  `MtlAspect{Color,Depth,Stencil}`; `VK_INDEX_TYPE_UINT{16,32}`→`MtlIndexType::Uint{16,32}`;
+  `VK_RESOLVE_MODE_*`→`MtlResolveMode::*`; and the **barrier/feedback-loop path**
+  (`VK_PIPELINE_STAGE_*`, `VK_ACCESS_*`, `VkImageLayout`, `m_hazardLayout`,
+  `feedbackLoopAspects`, `VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT`) which is a
+  genuine semantic rewrite onto `emitGraphicsBarrier(MtlStageMask,MtlBarrierScope,…)` +
+  the doc 01 contract-3b auto-barrier model — no mechanical mapping.
+- **Field-name deltas**: `VkImageSubresourceLayers.aspectMask/baseArrayLayer`→
+  `MtlSubresourceLayers.aspects/baseLayer`; `VkOffset3D`→`MtlOrigin` in copies vs
+  `MtlOffset3D` in blit corner-boxes (per-use); `DxvkFormatInfo->blockSize`(VkExtent3D)/
+  `->flags.test(DxvkFormatFlag::X)`/`->aspectMask`→`MtlFormatInfo.blockWidth/blockHeight/
+  flags(bitmask)/aspects`; `DxvkImageUsageInfo`→`MtlTextureUsage`.
+- **Signature-changed ctx-> calls** needing arg rewrites (not just names):
+  `draw(count, VkDrawIndirectCommand*)`→`draw(count, MtlDrawArgs*)` (fields are
+  field-compatible — good), `drawIndexed` (idem, MtlDrawIndexedArgs compatible),
+  `setInputAssemblyState(DxvkInputAssemblyState)`→`setPrimitiveTopology(MtlPrimitiveTopology)`,
+  `setInputLayout(n,DxvkVertexInput*,…)`→`setVertexLayout(n,MtlVertexAttr*,n,MtlVertexLayout*)`,
+  `clearRenderTarget`/`clearImageView`/`resolveTexture`/`blitTextureView`/`ensureTextureUsage`
+  arg-lists, `transformImage` (drop OldLayout/NewLayout — 2 layout args deleted).
+- **Dropped-member uses to delete**: `m_dxvkShaderOptions` (6), `m_hazardLayout` (3),
+  `m_depthBiasRepresentation` (8); `D3D9ShaderCreateInfo` drop irCreateInfo;
+  `D3D9ShaderModuleKey` build from Sha1Hash+MtlShaderStage (was `DxvkShaderHash`).
+- The **UploadManagedTexture conversion branch** (`d3d9_device.cpp:~5370-5416`) uses
+  `formatInfo->blockSize/planes`, `DxvkFormatFlag::MultiPlane`, `util::computeBlockCount`,
+  `util::packImageData` — Vulkan-util with no seam equivalent; PHASE-E-neuter (dead: all
+  conversion formats Invalid) rather than port.
+
+### PHASE-C8-CHECKPOINT — exact position + resume plan
+Build GREEN at 51 CORE TUs, gate PASS, nothing half-written on disk in driver/. The
+device.cpp mechanical layer is banked in scratchpad for the successor. Remaining, in
+dependency order (unchanged from C-7 items 2–5, now with the mechanical layer pre-done):
+1. **d3d9_device.cpp** — resume from the scratchpad mechanical-layer copy; work the ~400
+   semantic sites above (barrier/RT path is the hard core), OR per the finale directive
+   STUB whole methods with `// PHASE-C8-TODO` compiling bodies to reach LINK, logging the
+   cut list. Resolves the bulk of the 35 undefined D3D9DeviceEx::* refs. Its own session.
+2. **d3d9_swapchain.cpp** — REWRITE onto MtlPresenter (createMtlPresenter/acquire/present/
+   frame-latency; blitter/hud/colorspace/HDR deleted).
+3. **d3d9_interface.cpp + d3d9_main.cpp** — the 20 def exports (Direct3DCreate9*, D3D9on12,
+   D3DPERF_*, DebugSet*, DXVK_*RegisterAnnotation, PSGP*). main.cpp instantiates
+   D3D9InterfaceEx (needs the full device stack) — do LAST.
+4. Seam-stub the residual backend/util refs: `D3D9GlobalAnnotationList::s_instance`,
+   `logQueryInterfaceError`/`operator<<(GUID)` (CORE-excluded com_guid.cpp — firewall or
+   vendor), `MemoryFilePool::*` (util_unmap.cpp — excluded).
+
+**DoD status: PARTIAL.** Two of the four target files (adapter, multithread) + their support
+graph (format_helpers stub, stateblock, vertex_declaration, monitor) DONE + fatal + Vk-free.
+device.cpp mechanical layer done (banked). d3d9.dll does **NOT** yet LINK — the
+device.cpp semantic body + swapchain + interface/main remain (the standing multi-session port).
