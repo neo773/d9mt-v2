@@ -6781,11 +6781,16 @@ namespace dxvk {
 
     // MtlViewport is flat (originX/Y, width/height, znear/zfar, scissor) — was
     // DxvkViewport { VkViewport viewport; VkRect2D scissor; }.
+    //
+    // NO Vulkan viewport flip here: DXVK flips (originY = Y+H, height = -H)
+    // because Vulkan clip space is +Y-down. Metal clip space is +Y-up like
+    // D3D9 — the inherited flip rendered everything upside down (GTA IV's
+    // legal screen). Top-left origin, positive height.
     MtlViewport state = { };
-    state.originX = float(vp.X)     + cf;
-    state.originY = float(vp.Height + vp.Y) + cf;
-    state.width   =  float(vp.Width);
-    state.height  = -float(vp.Height);
+    state.originX = float(vp.X) + cf;
+    state.originY = float(vp.Y) + cf;
+    state.width   = float(vp.Width);
+    state.height  = float(vp.Height);
     state.znear   = std::clamp(vp.MinZ,                            0.0f, 1.0f);
     state.zfar    = std::clamp(std::max(vp.MaxZ, vp.MinZ + zBias), 0.0f, 1.0f);
 
@@ -7024,13 +7029,12 @@ namespace dxvk {
     MtlRasterizerState state = { };
     state.setCullMode(DecodeCullMode(D3DCULL(rs[D3DRS_CULLMODE])));
     state.setDepthClip(true);
-    /* D3D9 evaluates front-face winding in its left-handed, Y-down screen
-     * space; the Metal render target is effectively Y-flipped relative to it,
-     * so a D3D9 "front" (clockwise in D3D9 space) triangle presents as
-     * counter-clockwise to Metal. Declare CCW as front-facing so DecodeCullMode
-     * (D3DCULL_CW->cull Front, D3DCULL_CCW->cull Back) culls the correct side.
-     * Hardcoded Clockwise silently culled all default (D3DCULL_CCW) geometry. */
-    state.setFrontFace(MtlWinding::CounterClockwise);
+    /* With the un-flipped viewport (see BindViewportAndScissor) the D3D9
+     * screen-space winding maps 1:1 to Metal: D3D9's front face is clockwise
+     * (D3DCULL_CCW default culls counter-clockwise). Declare CW as front so
+     * DecodeCullMode (D3DCULL_CW->cull Front, D3DCULL_CCW->cull Back) culls
+     * the correct side. CCW-front belonged to the old flipped-viewport world. */
+    state.setFrontFace(MtlWinding::Clockwise);
     state.setPolygonMode(DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE])));
     state.setFlatShading(m_state.renderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT);
     state.setSampleCount(m_state.renderStates[D3DRS_MULTISAMPLEANTIALIAS]
