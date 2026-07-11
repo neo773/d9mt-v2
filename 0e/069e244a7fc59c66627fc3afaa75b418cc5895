@@ -1,0 +1,84 @@
+driver/backend/mtl_cmd_chunk.h
+  s_099954a5f894ee::t_ad418b39d6ca41 21
+driver/backend/mtl_device_impl.h
+  s_099954a5f894ee::t_7cc2b8aa920e49 17
+  s_099954a5f894ee::t_2388c1b87f0e12 91-93,101-103
+  s_099954a5f894ee::t_7cb56ec17747e9 118-120
+  s_099954a5f894ee::t_4f7ffafb6c5556 104
+scripts/build-driver.sh
+  s_099954a5f894ee::t_cf2b5b438a8cd5 57-69
+driver/backend/mtl_presenter_impl.h
+  s_099954a5f894ee::t_847e64beecf969 1-24
+driver/mtl/mtl_device.h
+  s_099954a5f894ee::t_597c8aa2a7c25c 158-161
+scripts/audit-port-diff.sh
+  s_099954a5f894ee::t_18cbbf7c30d343 1-73
+bridge/UPSTREAM
+  s_099954a5f894ee::t_073924204ce596 10-23
+driver/backend/mtl_device_impl.cpp
+  s_099954a5f894ee::t_a7b84a094dfb9d 272
+  s_099954a5f894ee::t_cc326759902918 3
+  s_099954a5f894ee::t_c9f7ceeb20354c 258-271,273-305
+driver/mtl/mtl_resource.h
+  s_099954a5f894ee::t_b7eda0da778b38 88-93
+  s_099954a5f894ee::t_83f36aeed35fac 246-247
+  s_099954a5f894ee::t_a36f8c03f27a4f 156-161
+  s_099954a5f894ee::t_03cd9e71416a50 114-122,128-129,134-139
+  s_099954a5f894ee::t_11415329a462bc 140,221-235,242-245,254-262
+  s_099954a5f894ee::t_cae5b6c3526928 248-253
+  s_099954a5f894ee::t_9dee68466cbb42 141
+driver/backend/mtl_context_impl2.cpp
+  s_099954a5f894ee::t_dc5d063e11f9c0 1-220,223-228,231-234,236,246-606
+  s_099954a5f894ee::t_466b3f14dbe026 221-222,229-230,235,237-245
+driver/mtl/mtl_context.h
+  s_099954a5f894ee::t_72ffa030787c44 83-87
+driver/backend/mtl_presenter_impl.cpp
+  s_099954a5f894ee::t_a8cf44062a7332 1-113
+driver/backend/mtl_pso_cache.cpp
+  s_099954a5f894ee::t_a78e216fa10af4 1-131
+driver/backend/wmt_handle.h
+  s_099954a5f894ee::t_c8eb0effa026d5 14-17
+driver/mtl/mtl_types.h
+  s_099954a5f894ee::t_929a53c0b51ce8 407-415
+  s_099954a5f894ee::t_b1ee3ddcb74d85 321-334,342-345,355-362,367,372-379,393-404
+  s_099954a5f894ee::t_0030c39ee14957 281-282
+  s_099954a5f894ee::t_a629f2eff9ac17 584,588-596,605
+  s_099954a5f894ee::t_8a4fc8c2d3ef00 554,559-562
+  s_099954a5f894ee::t_e8f7970c32bf46 261-262
+  s_099954a5f894ee::t_7844820a92ec41 555-558,565-566
+  s_099954a5f894ee::t_f427194fbfd78c 265-266,269-272
+  s_099954a5f894ee::t_526a126aa13ae5 405-406,567
+driver/backend/mtl_context_impl.cpp
+  s_099954a5f894ee::t_aa454a9d000e09 205
+  s_099954a5f894ee::t_0df1ce5d7fb761 3-5
+  s_099954a5f894ee::t_50eadf7d931349 407,410
+  s_099954a5f894ee::t_4eb69b0c9dfecb 89-92
+  s_099954a5f894ee::t_54cfbea40689ba 185-188,190-193
+  s_099954a5f894ee::t_b4731c0571904c 433-435
+  s_099954a5f894ee::t_bfc8f1d6fca726 113-121,123-126
+driver/backend/mtl_context_impl.h
+  s_099954a5f894ee::t_73fc56d04f35cf 121-195,199-210
+  s_099954a5f894ee::t_92bf8b99295504 62,74-97
+  s_099954a5f894ee::t_af611122c61bfe 282-290,295,303-306
+  s_099954a5f894ee::t_10ac9f924fe9cb 98
+  s_099954a5f894ee::t_bf79527bd6397b 211
+  s_099954a5f894ee::t_8a2bdf2b6c28e9 307
+bridge/tests/bridge_smoke.cpp
+  s_099954a5f894ee::t_79feaa68f0bef5 151-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0e069e244a7fc59c66627fc3afaa75b418cc5895",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
