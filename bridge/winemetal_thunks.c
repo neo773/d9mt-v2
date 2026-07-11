@@ -1327,3 +1327,453 @@ MTLDevice_updateSparseTextureMappings(
   UNIX_CALL(146, &params);
   return params.ret != 0;
 }
+
+/* ===================================================================== *
+ * d9mt addition: Metal 4 surface PE-side marshalling (codes 157..200).
+ * Shared thunks (params are all 8-byte / arch-invariant); wow64 twin table
+ * points at the same functions.
+ * ===================================================================== */
+
+/* --- device factories (157..162) ------------------------------------- */
+static obj_handle_t
+wmt_mtl4_device_new(obj_handle_t device, uint32_t code) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(code, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4CommandQueue(obj_handle_t device) {
+  return wmt_mtl4_device_new(device, 157);
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newCommandAllocator(obj_handle_t device) {
+  return wmt_mtl4_device_new(device, 158);
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4CommandBuffer(obj_handle_t device) {
+  return wmt_mtl4_device_new(device, 159);
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newArgumentTable(obj_handle_t device, const struct WMTArgTableInfo *info) {
+  struct unixcall_mtl4_new_from_desc params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = 0;
+  UNIX_CALL(160, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4Compiler(obj_handle_t device) {
+  return wmt_mtl4_device_new(device, 161);
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newResidencySet(obj_handle_t device, const struct WMTResidencySetInfo *info) {
+  struct unixcall_mtl4_new_from_desc params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = 0;
+  UNIX_CALL(162, &params);
+  return params.ret;
+}
+
+/* --- command allocator (163) ----------------------------------------- */
+WINEMETAL_API void
+MTL4CommandAllocator_reset(obj_handle_t allocator) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = allocator;
+  UNIX_CALL(163, &params);
+}
+
+/* --- command buffer (164..166) --------------------------------------- */
+WINEMETAL_API void
+MTL4CommandBuffer_beginCommandBuffer(obj_handle_t cmdbuf, obj_handle_t allocator) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = cmdbuf;
+  params.arg = allocator;
+  UNIX_CALL(164, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_endCommandBuffer(obj_handle_t cmdbuf) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = cmdbuf;
+  UNIX_CALL(165, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_useResidencySet(obj_handle_t cmdbuf, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = cmdbuf;
+  params.arg = residency_set;
+  UNIX_CALL(166, &params);
+}
+
+/* --- command queue (167..171) ---------------------------------------- */
+WINEMETAL_API void
+MTL4CommandQueue_commit(obj_handle_t queue, const obj_handle_t *cmdbufs, uint64_t count) {
+  struct unixcall_mtl4_queue_commit params;
+  params.queue = queue;
+  WMT_MEMPTR_SET(params.cmdbufs, cmdbufs);
+  params.count = count;
+  UNIX_CALL(167, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_waitForDrawable(obj_handle_t queue, obj_handle_t drawable) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = drawable;
+  UNIX_CALL(168, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_signalDrawable(obj_handle_t queue, obj_handle_t drawable) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = drawable;
+  UNIX_CALL(169, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(170, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value) {
+  struct unixcall_generic_obj_obj_uint64_noret params;
+  params.handle = queue;
+  params.arg0 = event;
+  params.arg1 = value;
+  UNIX_CALL(171, &params);
+}
+
+/* --- argument table (172..175) --------------------------------------- */
+WINEMETAL_API void
+MTL4ArgumentTable_setAddress(obj_handle_t table, uint64_t gpu_address, uint64_t index) {
+  struct unixcall_mtl4_argtable_setaddress params;
+  params.table = table;
+  params.gpu_address = gpu_address;
+  params.stride = 0;
+  params.index = index;
+  UNIX_CALL(172, &params);
+}
+
+WINEMETAL_API void
+MTL4ArgumentTable_setAddressWithStride(obj_handle_t table, uint64_t gpu_address, uint64_t stride, uint64_t index) {
+  struct unixcall_mtl4_argtable_setaddress params;
+  params.table = table;
+  params.gpu_address = gpu_address;
+  params.stride = stride;
+  params.index = index;
+  UNIX_CALL(173, &params);
+}
+
+WINEMETAL_API void
+MTL4ArgumentTable_setTexture(obj_handle_t table, uint64_t gpu_resource_id, uint64_t index) {
+  struct unixcall_mtl4_argtable_setresource params;
+  params.table = table;
+  params.gpu_resource_id = gpu_resource_id;
+  params.index = index;
+  UNIX_CALL(174, &params);
+}
+
+WINEMETAL_API void
+MTL4ArgumentTable_setSamplerState(obj_handle_t table, uint64_t gpu_resource_id, uint64_t index) {
+  struct unixcall_mtl4_argtable_setresource params;
+  params.table = table;
+  params.gpu_resource_id = gpu_resource_id;
+  params.index = index;
+  UNIX_CALL(175, &params);
+}
+
+/* --- render command encoder (176..188) ------------------------------- */
+WINEMETAL_API obj_handle_t
+MTL4CommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassInfo *info) {
+  struct unixcall_generic_obj_uint64_obj_ret params;
+  params.handle = cmdbuf;
+  params.arg = PtrToUInt64(info);
+  params.ret = 0;
+  UNIX_CALL(176, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setArgumentTable(obj_handle_t encoder, obj_handle_t table, uint64_t stages) {
+  struct unixcall_mtl4_setargumenttable params;
+  params.encoder = encoder;
+  params.table = table;
+  params.stages = stages;
+  UNIX_CALL(177, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setRenderPipelineState(obj_handle_t encoder, obj_handle_t pso) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = encoder;
+  params.arg = pso;
+  UNIX_CALL(178, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setViewport(obj_handle_t encoder, struct WMTViewport viewport) {
+  struct unixcall_mtl4_setviewport params;
+  params.encoder = encoder;
+  params.viewport = viewport;
+  UNIX_CALL(179, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setScissorRect(obj_handle_t encoder, struct WMTScissorRect rect) {
+  struct unixcall_mtl4_setscissorrect params;
+  params.encoder = encoder;
+  params.rect = rect;
+  UNIX_CALL(180, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setDepthStencilState(obj_handle_t encoder, obj_handle_t dss) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = encoder;
+  params.arg = dss;
+  UNIX_CALL(181, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setCullMode(obj_handle_t encoder, enum WMTCullMode mode) {
+  struct unixcall_generic_obj_uint64_noret params;
+  params.handle = encoder;
+  params.arg = (uint64_t)mode;
+  UNIX_CALL(182, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setFrontFacingWinding(obj_handle_t encoder, enum WMTWinding winding) {
+  struct unixcall_generic_obj_uint64_noret params;
+  params.handle = encoder;
+  params.arg = (uint64_t)winding;
+  UNIX_CALL(183, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setDepthBias(obj_handle_t encoder, float bias, float slope_scale, float clamp) {
+  struct unixcall_mtl4_setdepthbias params;
+  params.encoder = encoder;
+  params.bias = bias;
+  params.slope_scale = slope_scale;
+  params.clamp = clamp;
+  params.padding = 0;
+  UNIX_CALL(184, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setBlendColor(obj_handle_t encoder, float red, float green, float blue, float alpha) {
+  struct unixcall_mtl4_setblendcolor params;
+  params.encoder = encoder;
+  params.red = red;
+  params.green = green;
+  params.blue = blue;
+  params.alpha = alpha;
+  UNIX_CALL(185, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_setStencilReferenceValue(obj_handle_t encoder, uint32_t reference) {
+  struct unixcall_generic_obj_uint64_noret params;
+  params.handle = encoder;
+  params.arg = (uint64_t)reference;
+  UNIX_CALL(186, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_drawPrimitives(
+    obj_handle_t encoder, enum WMTPrimitiveType primitive, uint64_t vertex_start, uint64_t vertex_count,
+    uint64_t instance_count, uint64_t base_instance
+) {
+  struct unixcall_mtl4_draw params;
+  params.encoder = encoder;
+  params.primitive = (uint64_t)primitive;
+  params.vertex_start = vertex_start;
+  params.vertex_count = vertex_count;
+  params.instance_count = instance_count;
+  params.base_instance = base_instance;
+  UNIX_CALL(187, &params);
+}
+
+WINEMETAL_API void
+MTL4RenderCommandEncoder_drawIndexedPrimitives(
+    obj_handle_t encoder, enum WMTPrimitiveType primitive, uint64_t index_count, enum WMTIndexType index_type,
+    uint64_t index_buffer_gpu_address, uint64_t index_buffer_length, uint64_t instance_count, int64_t base_vertex,
+    uint64_t base_instance
+) {
+  struct unixcall_mtl4_draw_indexed params;
+  params.encoder = encoder;
+  params.primitive = (uint64_t)primitive;
+  params.index_count = index_count;
+  params.index_type = (uint64_t)index_type;
+  params.index_buffer = index_buffer_gpu_address;
+  params.index_buffer_length = index_buffer_length;
+  params.instance_count = instance_count;
+  params.base_vertex = base_vertex;
+  params.base_instance = base_instance;
+  UNIX_CALL(188, &params);
+}
+
+/* --- compute command encoder (189..195) ------------------------------ */
+WINEMETAL_API obj_handle_t
+MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = cmdbuf;
+  params.ret = 0;
+  UNIX_CALL(189, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
+    obj_handle_t encoder, obj_handle_t src, uint64_t src_offset, obj_handle_t dst, uint64_t dst_offset, uint64_t size
+) {
+  struct unixcall_mtl4_copy_buf_buf params;
+  params.encoder = encoder;
+  params.src = src;
+  params.dst = dst;
+  params.src_offset = src_offset;
+  params.dst_offset = dst_offset;
+  params.size = size;
+  UNIX_CALL(190, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_copyFromBufferToTexture(
+    obj_handle_t encoder, obj_handle_t src_buffer, uint64_t src_offset, uint64_t src_bytes_per_row,
+    uint64_t src_bytes_per_image, struct WMTSize src_size, obj_handle_t dst_texture, uint64_t dst_slice,
+    uint64_t dst_level, struct WMTOrigin dst_origin
+) {
+  struct unixcall_mtl4_copy_buf_tex params;
+  params.encoder = encoder;
+  params.src_buffer = src_buffer;
+  params.dst_texture = dst_texture;
+  params.src_offset = src_offset;
+  params.src_bytes_per_row = src_bytes_per_row;
+  params.src_bytes_per_image = src_bytes_per_image;
+  params.src_size = src_size;
+  params.dst_slice = dst_slice;
+  params.dst_level = dst_level;
+  params.dst_origin = dst_origin;
+  UNIX_CALL(191, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_copyFromTextureToTexture(
+    obj_handle_t encoder, obj_handle_t src, uint64_t src_slice, uint64_t src_level, struct WMTOrigin src_origin,
+    struct WMTSize src_size, obj_handle_t dst, uint64_t dst_slice, uint64_t dst_level, struct WMTOrigin dst_origin
+) {
+  struct unixcall_mtl4_copy_tex_tex params;
+  params.encoder = encoder;
+  params.src = src;
+  params.dst = dst;
+  params.src_slice = src_slice;
+  params.src_level = src_level;
+  params.src_origin = src_origin;
+  params.src_size = src_size;
+  params.dst_slice = dst_slice;
+  params.dst_level = dst_level;
+  params.dst_origin = dst_origin;
+  UNIX_CALL(192, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
+    obj_handle_t encoder, obj_handle_t src_texture, uint64_t src_slice, uint64_t src_level, struct WMTOrigin src_origin,
+    struct WMTSize src_size, obj_handle_t dst_buffer, uint64_t dst_offset, uint64_t dst_bytes_per_row,
+    uint64_t dst_bytes_per_image
+) {
+  struct unixcall_mtl4_copy_tex_buf params;
+  params.encoder = encoder;
+  params.src_texture = src_texture;
+  params.dst_buffer = dst_buffer;
+  params.src_slice = src_slice;
+  params.src_level = src_level;
+  params.src_origin = src_origin;
+  params.src_size = src_size;
+  params.dst_offset = dst_offset;
+  params.dst_bytes_per_row = dst_bytes_per_row;
+  params.dst_bytes_per_image = dst_bytes_per_image;
+  UNIX_CALL(193, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_fillBuffer(obj_handle_t encoder, obj_handle_t buffer, uint64_t offset, uint64_t length, uint32_t value) {
+  struct unixcall_mtl4_fillbuffer params;
+  params.encoder = encoder;
+  params.buffer = buffer;
+  params.offset = offset;
+  params.length = length;
+  params.value = value;
+  params.padding = 0;
+  UNIX_CALL(194, &params);
+}
+
+WINEMETAL_API void
+MTL4ComputeCommandEncoder_generateMipmaps(obj_handle_t encoder, obj_handle_t texture) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = encoder;
+  params.arg = texture;
+  UNIX_CALL(195, &params);
+}
+
+/* --- compiler + render pipeline (196) -------------------------------- */
+WINEMETAL_API obj_handle_t
+MTL4Compiler_newRenderPipelineState(obj_handle_t compiler, const struct WMTMtl4RenderPipelineInfo *info, obj_handle_t *err_out) {
+  struct unixcall_mtl4_newrenderpso params;
+  params.compiler = compiler;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret_error = 0;
+  params.ret_pso = 0;
+  UNIX_CALL(196, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_pso;
+}
+
+/* --- residency set (197..200) ---------------------------------------- */
+WINEMETAL_API void
+MTLResidencySet_addAllocation(obj_handle_t residency_set, obj_handle_t resource) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = residency_set;
+  params.arg = resource;
+  UNIX_CALL(197, &params);
+}
+
+WINEMETAL_API void
+MTLResidencySet_commit(obj_handle_t residency_set) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = residency_set;
+  UNIX_CALL(198, &params);
+}
+
+WINEMETAL_API void
+MTLResidencySet_requestResidency(obj_handle_t residency_set) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = residency_set;
+  UNIX_CALL(199, &params);
+}
+
+WINEMETAL_API void
+MTLResidencySet_removeAllAllocations(obj_handle_t residency_set) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = residency_set;
+  UNIX_CALL(200, &params);
+}

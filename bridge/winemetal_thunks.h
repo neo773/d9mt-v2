@@ -417,6 +417,164 @@ struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers {
   obj_handle_t ret;
 };
 
+/* ===================================================================== *
+ * d9mt addition: Metal 4 surface param structs (dispatch codes 157..200).
+ * Every member is 8-byte / arch-invariant, so each 64-bit unix thunk is
+ * wow64 byte-compatible (shared thunk, no thunk32 twin). Device factories
+ * and single-handle ops reuse the generic unixcall_* structs above:
+ *   newMTL4CommandQueue/newCommandAllocator/newMTL4CommandBuffer/
+ *   newMTL4Compiler + computeCommandEncoder  -> unixcall_generic_obj_obj_ret
+ *   renderCommandEncoder                     -> unixcall_generic_obj_uint64_obj_ret
+ *   reset/endCommandBuffer/RS commit/req/removeAll -> unixcall_generic_obj_noret
+ *   beginCommandBuffer/useResidencySet/setPSO/setDepthStencil/
+ *   RS addAllocation/generateMipmaps/queue wait+signal drawable
+ *                                            -> unixcall_generic_obj_obj_noret
+ *   setCullMode/setFrontFacingWinding/setStencilRef -> unixcall_generic_obj_uint64_noret
+ *   queue signalEvent/waitForEvent           -> unixcall_generic_obj_obj_uint64_noret
+ * ===================================================================== */
+
+struct unixcall_mtl4_new_from_desc {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret;
+};
+
+struct unixcall_mtl4_queue_commit {
+  obj_handle_t queue;
+  struct WMTConstMemoryPointer cmdbufs;
+  uint64_t count;
+};
+
+struct unixcall_mtl4_argtable_setaddress {
+  obj_handle_t table;
+  uint64_t gpu_address;
+  uint64_t stride;
+  uint64_t index;
+};
+
+struct unixcall_mtl4_argtable_setresource {
+  obj_handle_t table;
+  uint64_t gpu_resource_id;
+  uint64_t index;
+};
+
+struct unixcall_mtl4_setargumenttable {
+  obj_handle_t encoder;
+  obj_handle_t table;
+  uint64_t stages;
+};
+
+struct unixcall_mtl4_setviewport {
+  obj_handle_t encoder;
+  struct WMTViewport viewport;
+};
+
+struct unixcall_mtl4_setscissorrect {
+  obj_handle_t encoder;
+  struct WMTScissorRect rect;
+};
+
+struct unixcall_mtl4_setdepthbias {
+  obj_handle_t encoder;
+  float bias;
+  float slope_scale;
+  float clamp;
+  uint32_t padding;
+};
+
+struct unixcall_mtl4_setblendcolor {
+  obj_handle_t encoder;
+  float red;
+  float green;
+  float blue;
+  float alpha;
+};
+
+struct unixcall_mtl4_draw {
+  obj_handle_t encoder;
+  uint64_t primitive;
+  uint64_t vertex_start;
+  uint64_t vertex_count;
+  uint64_t instance_count;
+  uint64_t base_instance;
+};
+
+struct unixcall_mtl4_draw_indexed {
+  obj_handle_t encoder;
+  uint64_t primitive;
+  uint64_t index_count;
+  uint64_t index_type;
+  uint64_t index_buffer;
+  uint64_t index_buffer_length;
+  uint64_t instance_count;
+  int64_t base_vertex;
+  uint64_t base_instance;
+};
+
+struct unixcall_mtl4_copy_buf_buf {
+  obj_handle_t encoder;
+  obj_handle_t src;
+  obj_handle_t dst;
+  uint64_t src_offset;
+  uint64_t dst_offset;
+  uint64_t size;
+};
+
+struct unixcall_mtl4_copy_buf_tex {
+  obj_handle_t encoder;
+  obj_handle_t src_buffer;
+  obj_handle_t dst_texture;
+  uint64_t src_offset;
+  uint64_t src_bytes_per_row;
+  uint64_t src_bytes_per_image;
+  struct WMTSize src_size;
+  uint64_t dst_slice;
+  uint64_t dst_level;
+  struct WMTOrigin dst_origin;
+};
+
+struct unixcall_mtl4_copy_tex_tex {
+  obj_handle_t encoder;
+  obj_handle_t src;
+  obj_handle_t dst;
+  uint64_t src_slice;
+  uint64_t src_level;
+  struct WMTOrigin src_origin;
+  struct WMTSize src_size;
+  uint64_t dst_slice;
+  uint64_t dst_level;
+  struct WMTOrigin dst_origin;
+};
+
+struct unixcall_mtl4_copy_tex_buf {
+  obj_handle_t encoder;
+  obj_handle_t src_texture;
+  obj_handle_t dst_buffer;
+  uint64_t src_slice;
+  uint64_t src_level;
+  struct WMTOrigin src_origin;
+  struct WMTSize src_size;
+  uint64_t dst_offset;
+  uint64_t dst_bytes_per_row;
+  uint64_t dst_bytes_per_image;
+};
+
+struct unixcall_mtl4_fillbuffer {
+  obj_handle_t encoder;
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint64_t length;
+  uint32_t value;
+  uint32_t padding;
+};
+
+struct unixcall_mtl4_newrenderpso {
+  obj_handle_t compiler;
+  struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
 #pragma pack(pop)
 
 #endif

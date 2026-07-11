@@ -280,6 +280,209 @@ int main(int argc, char** argv) {
     printf("render-pass sampler/texture encode: ok (status completed)\n");
   }
 
+  /* --- Metal 4 surface (codes 157..200) ---------------------------------- *
+   * Drives the full MTL4 path present-less: queue + allocator + command buffer,
+   * an argument table, a residency set, an MTL4Compiler-built render PSO (entry
+   * 196) from the same vs/ps libraries, then a real render pass encoding ONE
+   * draw through an MTL4RenderCommandEncoder. Resources are made resident and
+   * argument-table addresses bound so the draw does not GPU-fault. Completion
+   * is observed by signaling a shared event on the queue after commit and
+   * waiting on it (MTL4 has no cmdbuf status). */
+  {
+    struct unixcall_generic_obj_obj_ret mk = {};
+    mk.handle = dev0.ret; funcs[157](&mk);
+    obj_handle_t queue4 = mk.ret;
+    if (!queue4) { fprintf(stderr, "FAIL: newMTL4CommandQueue\n"); return 1; }
+
+    mk = {}; mk.handle = dev0.ret; funcs[158](&mk);
+    obj_handle_t allocator = mk.ret;
+    if (!allocator) { fprintf(stderr, "FAIL: newCommandAllocator\n"); return 1; }
+
+    mk = {}; mk.handle = dev0.ret; funcs[159](&mk);
+    obj_handle_t cmdbuf4 = mk.ret;
+    if (!cmdbuf4) { fprintf(stderr, "FAIL: newMTL4CommandBuffer\n"); return 1; }
+
+    mk = {}; mk.handle = dev0.ret; funcs[161](&mk);
+    obj_handle_t compiler = mk.ret;
+    if (!compiler) { fprintf(stderr, "FAIL: newMTL4Compiler\n"); return 1; }
+
+    WMTArgTableInfo atInfo = {};
+    atInfo.max_buffers = 32; atInfo.max_textures = 16; atInfo.max_samplers = 16;
+    atInfo.initialize_bindings = 1; atInfo.support_attribute_strides = 1;
+    struct unixcall_mtl4_new_from_desc atCall = {};
+    atCall.device = dev0.ret; atCall.info.set(&atInfo); funcs[160](&atCall);
+    obj_handle_t argtable = atCall.ret;
+    if (!argtable) { fprintf(stderr, "FAIL: newArgumentTable\n"); return 1; }
+
+    WMTResidencySetInfo rsInfo = {}; rsInfo.initial_capacity = 8;
+    struct unixcall_mtl4_new_from_desc rsCall = {};
+    rsCall.device = dev0.ret; rsCall.info.set(&rsInfo); funcs[162](&rsCall);
+    obj_handle_t resset = rsCall.ret;
+    if (!resset) { fprintf(stderr, "FAIL: newResidencySet\n"); return 1; }
+
+    /* MTL4Compiler render PSO from the vs/ps libraries (entry 196) */
+    obj_handle_t vsLibH = loadLibrary(funcs, dev0.ret, vsLib);
+    obj_handle_t psLibH = loadLibrary(funcs, dev0.ret, psLib);
+    const char* mainName = "main";
+
+    WMTMtl4RenderPipelineInfo p4 = {};
+    p4.colors[0].pixel_format = WMTPixelFormatBGRA8Unorm;
+    p4.colors[0].write_mask = 0xf;
+    p4.vertex_library = vsLibH;
+    p4.fragment_library = psLibH;
+    p4.vertex_entry_name.set((void*)mainName);
+    p4.fragment_entry_name.set((void*)mainName);
+    p4.raster_sample_count = 1;
+    /* Unspecified: the AIR vertex shader writes [[point_size]], which Metal
+     * rejects against an explicit Triangle topology (matches the code-153
+     * classic path, which also leaves topology unspecified). */
+    p4.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
+    p4.rasterization_enabled = 1;
+    p4.vertex.num_attributes = 2;
+    p4.vertex.attributes[0] = { WMTAttributeFormatFloat4, 0u, 3u };
+    p4.vertex.attributes[1] = { WMTAttributeFormatFloat4, 16u, 3u };
+    p4.vertex.num_layouts = 4;
+    p4.vertex.layouts[3] = { 32u, WMTVertexStepFunctionPerVertex, 1u };
+
+    struct unixcall_mtl4_newrenderpso psoCall4 = {};
+    psoCall4.compiler = compiler; psoCall4.info.set(&p4); funcs[196](&psoCall4);
+    if (!psoCall4.ret_pso) {
+      char errbuf[1024] = {0};
+      if (psoCall4.ret_error) {
+        struct unixcall_generic_obj_obj_ret d = {}; d.handle = psoCall4.ret_error; funcs[28](&d);
+        if (d.ret) {
+          struct unixcall_nsstring_getcstring gc = {};
+          gc.str = d.ret; gc.buffer_ptr = uint64_t(uintptr_t(errbuf));
+          gc.max_length = sizeof(errbuf); gc.encoding = WMTUTF8StringEncoding; funcs[8](&gc);
+        }
+      }
+      fprintf(stderr, "FAIL: MTL4Compiler render PSO: %s\n", errbuf);
+      return 1;
+    }
+    printf("MTL4 compiler PSO: ok\n");
+
+    /* a resident buffer (bound at argument-table indices the shader reads) */
+    WMTBufferInfo bufInfo = {};
+    bufInfo.length = 65536;
+    bufInfo.options = (enum WMTResourceOptions)0; /* shared */
+    struct unixcall_mtldevice_newbuffer bufCall = {};
+    bufCall.device = dev0.ret; bufCall.info.set(&bufInfo); funcs[18](&bufCall);
+    if (!bufCall.ret) { fprintf(stderr, "FAIL: newBuffer(mtl4)\n"); return 1; }
+    uint64_t bufAddr = bufInfo.gpu_address;
+
+    WMTTextureInfo t4 = {};
+    t4.pixel_format = WMTPixelFormatBGRA8Unorm;
+    t4.width = 4; t4.height = 4; t4.depth = 1; t4.array_length = 1;
+    t4.type = WMTTextureType2D; t4.mipmap_level_count = 1; t4.sample_count = 1;
+    t4.usage = (enum WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead);
+    t4.options = WMTResourceStorageModePrivate;
+    struct unixcall_mtldevice_newtexture t4Call = {};
+    t4Call.device = dev0.ret; t4Call.info.set(&t4); funcs[21](&t4Call);
+    if (!t4Call.ret) { fprintf(stderr, "FAIL: newTexture(mtl4)\n"); return 1; }
+
+    /* residency: add buffer + texture, commit, request */
+    struct unixcall_generic_obj_obj_noret addCall = {};
+    addCall.handle = resset; addCall.arg = bufCall.ret; funcs[197](&addCall);
+    addCall.handle = resset; addCall.arg = t4Call.ret; funcs[197](&addCall);
+    struct unixcall_generic_obj_noret rsOp = {};
+    rsOp.handle = resset; funcs[198](&rsOp); /* commit */
+    rsOp.handle = resset; funcs[199](&rsOp); /* requestResidency */
+
+    /* begin command buffer + attach residency set */
+    struct unixcall_generic_obj_obj_noret beginCall = {};
+    beginCall.handle = cmdbuf4; beginCall.arg = allocator; funcs[164](&beginCall);
+    struct unixcall_generic_obj_obj_noret useRs = {};
+    useRs.handle = cmdbuf4; useRs.arg = resset; funcs[166](&useRs);
+
+    /* bind buffer address across the slots the shader may read (stage-in buf3,
+     * push buf20, plus 0..7) and the texture at texture slot 0 */
+    for (uint64_t idx = 0; idx <= 20; idx++) {
+      struct unixcall_mtl4_argtable_setaddress sa = {};
+      sa.table = argtable; sa.gpu_address = bufAddr; sa.stride = 0; sa.index = idx;
+      funcs[172](&sa);
+    }
+    {
+      struct unixcall_mtl4_argtable_setresource st = {};
+      st.table = argtable; st.gpu_resource_id = t4.gpu_resource_id; st.index = 0;
+      funcs[174](&st);
+    }
+
+    /* render pass over the 4x4 RT */
+    WMTRenderPassInfo pass4 = {};
+    pass4.colors[0].texture = t4Call.ret;
+    pass4.colors[0].load_action = WMTLoadActionClear;
+    pass4.colors[0].store_action = WMTStoreActionStore;
+    pass4.colors[0].clear_color = { 0.1, 0.2, 0.3, 1.0 };
+    pass4.default_raster_sample_count = 1;
+    pass4.render_target_width = 4; pass4.render_target_height = 4;
+
+    struct unixcall_generic_obj_uint64_obj_ret enc4 = {};
+    enc4.handle = cmdbuf4; enc4.arg = uint64_t(uintptr_t(&pass4)); funcs[176](&enc4);
+    if (!enc4.ret) { fprintf(stderr, "FAIL: MTL4 renderCommandEncoder\n"); return 1; }
+
+    struct unixcall_mtl4_setargumenttable sat = {};
+    sat.encoder = enc4.ret; sat.table = argtable; sat.stages = 1 | 2; funcs[177](&sat);
+
+    struct unixcall_generic_obj_obj_noret setPso = {};
+    setPso.handle = enc4.ret; setPso.arg = psoCall4.ret_pso; funcs[178](&setPso);
+
+    struct unixcall_mtl4_setviewport vp = {};
+    vp.encoder = enc4.ret; vp.viewport = { 0, 0, 4, 4, 0, 1 }; funcs[179](&vp);
+    struct unixcall_mtl4_setscissorrect sc = {};
+    sc.encoder = enc4.ret; sc.rect = { 0, 0, 4, 4 }; funcs[180](&sc);
+
+    struct unixcall_generic_obj_uint64_noret u1 = {};
+    u1.handle = enc4.ret; u1.arg = WMTCullModeNone; funcs[182](&u1);        /* setCullMode */
+    u1.handle = enc4.ret; u1.arg = WMTWindingClockwise; funcs[183](&u1);    /* setFrontFacingWinding */
+    u1.handle = enc4.ret; u1.arg = 0; funcs[186](&u1);                      /* setStencilReferenceValue */
+    struct unixcall_mtl4_setdepthbias db = {};
+    db.encoder = enc4.ret; funcs[184](&db);
+    struct unixcall_mtl4_setblendcolor bc = {};
+    bc.encoder = enc4.ret; bc.alpha = 1.0f; funcs[185](&bc);
+
+    struct unixcall_mtl4_draw draw = {};
+    draw.encoder = enc4.ret; draw.primitive = WMTPrimitiveTypeTriangle;
+    draw.vertex_start = 0; draw.vertex_count = 3; draw.instance_count = 1; draw.base_instance = 0;
+    funcs[187](&draw);
+
+    struct unixcall_generic_obj_noret endEnc = {};
+    endEnc.handle = enc4.ret; funcs[33](&endEnc); /* shared MTLCommandEncoder_endEncoding */
+
+    struct unixcall_generic_obj_noret endCb = {};
+    endCb.handle = cmdbuf4; funcs[165](&endCb);
+
+    obj_handle_t cbArray[1] = { cmdbuf4 };
+    struct unixcall_mtl4_queue_commit commit4 = {};
+    commit4.queue = queue4; commit4.cmdbufs.set(cbArray); commit4.count = 1;
+    funcs[167](&commit4);
+
+    /* completion: signal a shared event on the queue after the commit, wait */
+    struct unixcall_generic_obj_obj_ret evMk = {};
+    evMk.handle = dev0.ret; funcs[15](&evMk);
+    obj_handle_t event = evMk.ret;
+    if (event) {
+      struct unixcall_generic_obj_obj_uint64_noret sig = {};
+      sig.handle = queue4; sig.arg0 = event; sig.arg1 = 1; funcs[170](&sig);
+      struct unixcall_mtlsharedevent_waituntilsignaledvalue wev = {};
+      wev.event = event; wev.value = 1; wev.timeout_ms = 5000;
+      funcs[130](&wev);
+      /* waitUntilSignaledValue returns YES when the value is reached (the
+       * unix side stores that return in ret_timeout, despite the name), NO on
+       * an actual timeout. */
+      if (!wev.ret_timeout) {
+        fprintf(stderr, "FAIL: MTL4 command buffer did not complete (event timeout)\n");
+        return 1;
+      }
+      printf("MTL4 render pass draw + commit: ok (event completed)\n");
+    } else {
+      printf("MTL4 render pass draw + commit: ok (no crash; event unavailable)\n");
+    }
+
+    /* MTL4CommandAllocator_reset (163) is safe once the buffer completed */
+    struct unixcall_generic_obj_noret rst = {};
+    rst.handle = allocator; funcs[163](&rst);
+  }
+
   /* --- AIR thunk parity --------------------------------------------------- */
   std::vector<uint8_t> irBlob = serializeSm3(sm3Bin);
 

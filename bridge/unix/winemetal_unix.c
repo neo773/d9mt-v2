@@ -11,6 +11,20 @@
 #import <CoreFoundation/CFRunLoop.h>
 #import <Metal/Metal.h>
 #import <Metal/MTL4CommandQueue.h>
+/* d9mt addition: full Metal 4 surface (codes 157..200). Explicit MTL4 imports
+ * so the bridge builds even where <Metal/Metal.h> does not umbrella every
+ * MTL4 header on this SDK. */
+#import <Metal/MTL4CommandAllocator.h>
+#import <Metal/MTL4CommandBuffer.h>
+#import <Metal/MTL4ArgumentTable.h>
+#import <Metal/MTL4RenderCommandEncoder.h>
+#import <Metal/MTL4ComputeCommandEncoder.h>
+#import <Metal/MTL4RenderPass.h>
+#import <Metal/MTL4Compiler.h>
+#import <Metal/MTL4RenderPipeline.h>
+#import <Metal/MTL4PipelineState.h>
+#import <Metal/MTL4LibraryFunctionDescriptor.h>
+#import <Metal/MTLResidencySet.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/QuartzCore.h>
 #include "objc/objc-runtime.h"
@@ -5553,6 +5567,523 @@ thunk_D9MTAirFree(void *args) {
   return STATUS_SUCCESS;
 }
 
+/* ===================================================================== *
+ * d9mt addition: the full Metal 4 surface (dispatch codes 157..200).
+ * Obj-C (MRC, like the rest of this file). Handles are id<...> casts.
+ * ===================================================================== */
+
+/* --- device factories (157..162) ------------------------------------- */
+static NTSTATUS
+_MTLDevice_newMTL4CommandQueue(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newMTL4CommandQueue];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newCommandAllocator(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCommandAllocator];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newMTL4CommandBuffer(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCommandBuffer];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newArgumentTable(void *obj) {
+  struct unixcall_mtl4_new_from_desc *params = obj;
+  const struct WMTArgTableInfo *info = params->info.ptr;
+  MTL4ArgumentTableDescriptor *desc = [[MTL4ArgumentTableDescriptor alloc] init];
+  desc.maxBufferBindCount = info->max_buffers;
+  desc.maxTextureBindCount = info->max_textures;
+  desc.maxSamplerStateBindCount = info->max_samplers;
+  desc.initializeBindings = info->initialize_bindings ? YES : NO;
+  desc.supportAttributeStrides = info->support_attribute_strides ? YES : NO;
+  NSError *err = NULL;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->device newArgumentTableWithDescriptor:desc error:&err];
+  [desc release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newMTL4Compiler(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor alloc] init];
+  NSError *err = NULL;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCompilerWithDescriptor:desc error:&err];
+  [desc release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newResidencySet(void *obj) {
+  struct unixcall_mtl4_new_from_desc *params = obj;
+  const struct WMTResidencySetInfo *info = params->info.ptr;
+  MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
+  desc.initialCapacity = info->initial_capacity;
+  NSError *err = NULL;
+  params->ret = (obj_handle_t)[(id<MTLDevice>)params->device newResidencySetWithDescriptor:desc error:&err];
+  [desc release];
+  return STATUS_SUCCESS;
+}
+
+/* --- command allocator (163) ----------------------------------------- */
+static NTSTATUS
+_MTL4CommandAllocator_reset(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTL4CommandAllocator>)params->handle reset];
+  return STATUS_SUCCESS;
+}
+
+/* --- command buffer (164..166) --------------------------------------- */
+static NTSTATUS
+_MTL4CommandBuffer_beginCommandBuffer(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandBuffer>)params->handle beginCommandBufferWithAllocator:(id<MTL4CommandAllocator>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandBuffer_endCommandBuffer(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTL4CommandBuffer>)params->handle endCommandBuffer];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandBuffer_useResidencySet(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandBuffer>)params->handle useResidencySet:(id<MTLResidencySet>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+/* --- command queue (167..171) ---------------------------------------- */
+static NTSTATUS
+_MTL4CommandQueue_commit(void *obj) {
+  struct unixcall_mtl4_queue_commit *params = obj;
+  const obj_handle_t *handles = params->cmdbufs.ptr;
+  NSUInteger count = (NSUInteger)params->count;
+  /* obj_handle_t is a uint64 id-bitpattern; MTL4 commit wants a contiguous
+   * id<MTL4CommandBuffer>[] — reinterpret the handle array in place. */
+  [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_waitForDrawable(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle waitForDrawable:(id<MTLDrawable>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_signalDrawable(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle signalDrawable:(id<MTLDrawable>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_signalEvent(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle signalEvent:(id<MTLEvent>)params->arg0 value:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_waitForEvent(void *obj) {
+  struct unixcall_generic_obj_obj_uint64_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle waitForEvent:(id<MTLEvent>)params->arg0 value:params->arg1];
+  return STATUS_SUCCESS;
+}
+
+/* --- argument table (172..175) --------------------------------------- */
+static NTSTATUS
+_MTL4ArgumentTable_setAddress(void *obj) {
+  struct unixcall_mtl4_argtable_setaddress *params = obj;
+  [(id<MTL4ArgumentTable>)params->table setAddress:(MTLGPUAddress)params->gpu_address atIndex:(NSUInteger)params->index];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ArgumentTable_setAddressWithStride(void *obj) {
+  struct unixcall_mtl4_argtable_setaddress *params = obj;
+  [(id<MTL4ArgumentTable>)params->table setAddress:(MTLGPUAddress)params->gpu_address
+                                   attributeStride:(NSUInteger)params->stride
+                                           atIndex:(NSUInteger)params->index];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ArgumentTable_setTexture(void *obj) {
+  struct unixcall_mtl4_argtable_setresource *params = obj;
+  MTLResourceID rid = { params->gpu_resource_id };
+  [(id<MTL4ArgumentTable>)params->table setTexture:rid atIndex:(NSUInteger)params->index];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ArgumentTable_setSamplerState(void *obj) {
+  struct unixcall_mtl4_argtable_setresource *params = obj;
+  MTLResourceID rid = { params->gpu_resource_id };
+  [(id<MTL4ArgumentTable>)params->table setSamplerState:rid atIndex:(NSUInteger)params->index];
+  return STATUS_SUCCESS;
+}
+
+/* --- render command encoder (176..188) ------------------------------- */
+static MTL4RenderPassDescriptor *
+_wm_mtl4_render_pass_descriptor(const struct WMTRenderPassInfo *info) {
+  MTL4RenderPassDescriptor *descriptor = [[MTL4RenderPassDescriptor alloc] init];
+  for (unsigned i = 0; i < 8; i++) {
+    if (!info->colors[i].texture)
+      continue;
+    descriptor.colorAttachments[i].clearColor = MTLClearColorMake(
+        info->colors[i].clear_color.r, info->colors[i].clear_color.g, info->colors[i].clear_color.b,
+        info->colors[i].clear_color.a
+    );
+    descriptor.colorAttachments[i].level = info->colors[i].level;
+    descriptor.colorAttachments[i].slice = info->colors[i].slice;
+    descriptor.colorAttachments[i].depthPlane = info->colors[i].depth_plane;
+    descriptor.colorAttachments[i].texture = (id<MTLTexture>)info->colors[i].texture;
+    descriptor.colorAttachments[i].loadAction = (MTLLoadAction)info->colors[i].load_action;
+    descriptor.colorAttachments[i].storeAction = (MTLStoreAction)info->colors[i].store_action;
+    descriptor.colorAttachments[i].resolveTexture = (id<MTLTexture>)info->colors[i].resolve_texture;
+    descriptor.colorAttachments[i].resolveLevel = info->colors[i].resolve_level;
+    descriptor.colorAttachments[i].resolveSlice = info->colors[i].resolve_slice;
+    descriptor.colorAttachments[i].resolveDepthPlane = info->colors[i].resolve_depth_plane;
+  }
+  if (info->depth.texture) {
+    descriptor.depthAttachment.clearDepth = info->depth.clear_depth;
+    descriptor.depthAttachment.depthPlane = info->depth.depth_plane;
+    descriptor.depthAttachment.level = info->depth.level;
+    descriptor.depthAttachment.slice = info->depth.slice;
+    descriptor.depthAttachment.texture = (id<MTLTexture>)info->depth.texture;
+    descriptor.depthAttachment.loadAction = (MTLLoadAction)info->depth.load_action;
+    descriptor.depthAttachment.storeAction = (MTLStoreAction)info->depth.store_action;
+  }
+  if (info->stencil.texture) {
+    descriptor.stencilAttachment.clearStencil = info->stencil.clear_stencil;
+    descriptor.stencilAttachment.depthPlane = info->stencil.depth_plane;
+    descriptor.stencilAttachment.level = info->stencil.level;
+    descriptor.stencilAttachment.slice = info->stencil.slice;
+    descriptor.stencilAttachment.texture = (id<MTLTexture>)info->stencil.texture;
+    descriptor.stencilAttachment.loadAction = (MTLLoadAction)info->stencil.load_action;
+    descriptor.stencilAttachment.storeAction = (MTLStoreAction)info->stencil.store_action;
+  }
+  descriptor.defaultRasterSampleCount = info->default_raster_sample_count;
+  descriptor.renderTargetArrayLength = info->render_target_array_length;
+  descriptor.renderTargetHeight = info->render_target_height;
+  descriptor.renderTargetWidth = info->render_target_width;
+  descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+  if (info->tile_height && info->tile_width) {
+    descriptor.tileWidth = info->tile_width;
+    descriptor.tileHeight = info->tile_height;
+  }
+  return descriptor;
+}
+
+static NTSTATUS
+_MTL4CommandBuffer_renderCommandEncoder(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  const struct WMTRenderPassInfo *info = (const struct WMTRenderPassInfo *)params->arg;
+  MTL4RenderPassDescriptor *descriptor = _wm_mtl4_render_pass_descriptor(info);
+  params->ret = (obj_handle_t)[(id<MTL4CommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setArgumentTable(void *obj) {
+  struct unixcall_mtl4_setargumenttable *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setArgumentTable:(id<MTL4ArgumentTable>)params->table
+                                                        atStages:(MTLRenderStages)params->stages];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setRenderPipelineState(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->handle setRenderPipelineState:(id<MTLRenderPipelineState>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setViewport(void *obj) {
+  struct unixcall_mtl4_setviewport *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setViewport:*(MTLViewport *)&params->viewport];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setScissorRect(void *obj) {
+  struct unixcall_mtl4_setscissorrect *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setScissorRect:*(MTLScissorRect *)&params->rect];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setDepthStencilState(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->handle setDepthStencilState:(id<MTLDepthStencilState>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setCullMode(void *obj) {
+  struct unixcall_generic_obj_uint64_noret *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->handle setCullMode:(MTLCullMode)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setFrontFacingWinding(void *obj) {
+  struct unixcall_generic_obj_uint64_noret *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->handle setFrontFacingWinding:(MTLWinding)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setDepthBias(void *obj) {
+  struct unixcall_mtl4_setdepthbias *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setDepthBias:params->bias
+                                                  slopeScale:params->slope_scale
+                                                       clamp:params->clamp];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setBlendColor(void *obj) {
+  struct unixcall_mtl4_setblendcolor *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder setBlendColorRed:params->red
+                                                          green:params->green
+                                                           blue:params->blue
+                                                          alpha:params->alpha];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_setStencilReferenceValue(void *obj) {
+  struct unixcall_generic_obj_uint64_noret *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->handle setStencilReferenceValue:(uint32_t)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_drawPrimitives(void *obj) {
+  struct unixcall_mtl4_draw *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder drawPrimitives:(MTLPrimitiveType)params->primitive
+                                                   vertexStart:(NSUInteger)params->vertex_start
+                                                   vertexCount:(NSUInteger)params->vertex_count
+                                                 instanceCount:(NSUInteger)params->instance_count
+                                                  baseInstance:(NSUInteger)params->base_instance];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4RenderCommandEncoder_drawIndexedPrimitives(void *obj) {
+  struct unixcall_mtl4_draw_indexed *params = obj;
+  [(id<MTL4RenderCommandEncoder>)params->encoder drawIndexedPrimitives:(MTLPrimitiveType)params->primitive
+                                                           indexCount:(NSUInteger)params->index_count
+                                                            indexType:(MTLIndexType)params->index_type
+                                                          indexBuffer:(MTLGPUAddress)params->index_buffer
+                                                    indexBufferLength:(NSUInteger)params->index_buffer_length
+                                                        instanceCount:(NSUInteger)params->instance_count
+                                                           baseVertex:(NSInteger)params->base_vertex
+                                                         baseInstance:(NSUInteger)params->base_instance];
+  return STATUS_SUCCESS;
+}
+
+/* --- compute command encoder (189..195) ------------------------------ */
+static NTSTATUS
+_MTL4CommandBuffer_computeCommandEncoder(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(id<MTL4CommandBuffer>)params->handle computeCommandEncoder];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_copyFromBufferToBuffer(void *obj) {
+  struct unixcall_mtl4_copy_buf_buf *params = obj;
+  [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromBuffer:(id<MTLBuffer>)params->src
+                                                   sourceOffset:(NSUInteger)params->src_offset
+                                                       toBuffer:(id<MTLBuffer>)params->dst
+                                              destinationOffset:(NSUInteger)params->dst_offset
+                                                           size:(NSUInteger)params->size];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_copyFromBufferToTexture(void *obj) {
+  struct unixcall_mtl4_copy_buf_tex *params = obj;
+  MTLSize src_size = { (NSUInteger)params->src_size.width, (NSUInteger)params->src_size.height, (NSUInteger)params->src_size.depth };
+  MTLOrigin dst_origin = { (NSUInteger)params->dst_origin.x, (NSUInteger)params->dst_origin.y, (NSUInteger)params->dst_origin.z };
+  [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromBuffer:(id<MTLBuffer>)params->src_buffer
+                                                   sourceOffset:(NSUInteger)params->src_offset
+                                              sourceBytesPerRow:(NSUInteger)params->src_bytes_per_row
+                                            sourceBytesPerImage:(NSUInteger)params->src_bytes_per_image
+                                                     sourceSize:src_size
+                                                      toTexture:(id<MTLTexture>)params->dst_texture
+                                               destinationSlice:(NSUInteger)params->dst_slice
+                                               destinationLevel:(NSUInteger)params->dst_level
+                                              destinationOrigin:dst_origin];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_copyFromTextureToTexture(void *obj) {
+  struct unixcall_mtl4_copy_tex_tex *params = obj;
+  MTLOrigin src_origin = { (NSUInteger)params->src_origin.x, (NSUInteger)params->src_origin.y, (NSUInteger)params->src_origin.z };
+  MTLSize src_size = { (NSUInteger)params->src_size.width, (NSUInteger)params->src_size.height, (NSUInteger)params->src_size.depth };
+  MTLOrigin dst_origin = { (NSUInteger)params->dst_origin.x, (NSUInteger)params->dst_origin.y, (NSUInteger)params->dst_origin.z };
+  [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromTexture:(id<MTLTexture>)params->src
+                                                     sourceSlice:(NSUInteger)params->src_slice
+                                                     sourceLevel:(NSUInteger)params->src_level
+                                                    sourceOrigin:src_origin
+                                                      sourceSize:src_size
+                                                       toTexture:(id<MTLTexture>)params->dst
+                                                destinationSlice:(NSUInteger)params->dst_slice
+                                                destinationLevel:(NSUInteger)params->dst_level
+                                               destinationOrigin:dst_origin];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_copyFromTextureToBuffer(void *obj) {
+  struct unixcall_mtl4_copy_tex_buf *params = obj;
+  MTLOrigin src_origin = { (NSUInteger)params->src_origin.x, (NSUInteger)params->src_origin.y, (NSUInteger)params->src_origin.z };
+  MTLSize src_size = { (NSUInteger)params->src_size.width, (NSUInteger)params->src_size.height, (NSUInteger)params->src_size.depth };
+  [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromTexture:(id<MTLTexture>)params->src_texture
+                                                     sourceSlice:(NSUInteger)params->src_slice
+                                                     sourceLevel:(NSUInteger)params->src_level
+                                                    sourceOrigin:src_origin
+                                                      sourceSize:src_size
+                                                        toBuffer:(id<MTLBuffer>)params->dst_buffer
+                                               destinationOffset:(NSUInteger)params->dst_offset
+                                          destinationBytesPerRow:(NSUInteger)params->dst_bytes_per_row
+                                        destinationBytesPerImage:(NSUInteger)params->dst_bytes_per_image];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_fillBuffer(void *obj) {
+  struct unixcall_mtl4_fillbuffer *params = obj;
+  NSRange range = NSMakeRange((NSUInteger)params->offset, (NSUInteger)params->length);
+  [(id<MTL4ComputeCommandEncoder>)params->encoder fillBuffer:(id<MTLBuffer>)params->buffer
+                                                     range:range
+                                                     value:(uint8_t)params->value];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4ComputeCommandEncoder_generateMipmaps(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4ComputeCommandEncoder>)params->handle generateMipmapsForTexture:(id<MTLTexture>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+/* --- compiler + render pipeline (196) -------------------------------- */
+static NTSTATUS
+_MTL4Compiler_newRenderPipelineState(void *obj) {
+  struct unixcall_mtl4_newrenderpso *params = obj;
+  const struct WMTMtl4RenderPipelineInfo *info = params->info.ptr;
+  MTL4RenderPipelineDescriptor *descriptor = [[MTL4RenderPipelineDescriptor alloc] init];
+
+  MTL4LibraryFunctionDescriptor *vfd = [[MTL4LibraryFunctionDescriptor alloc] init];
+  vfd.library = (id<MTLLibrary>)info->vertex_library;
+  vfd.name = [NSString stringWithUTF8String:(const char *)info->vertex_entry_name.ptr];
+  descriptor.vertexFunctionDescriptor = vfd;
+  [vfd release];
+
+  if (info->fragment_library && info->fragment_entry_name.ptr) {
+    MTL4LibraryFunctionDescriptor *ffd = [[MTL4LibraryFunctionDescriptor alloc] init];
+    ffd.library = (id<MTLLibrary>)info->fragment_library;
+    ffd.name = [NSString stringWithUTF8String:(const char *)info->fragment_entry_name.ptr];
+    descriptor.fragmentFunctionDescriptor = ffd;
+    [ffd release];
+  }
+
+  for (unsigned i = 0; i < 8; i++) {
+    descriptor.colorAttachments[i].pixelFormat = to_metal_pixel_format(info->colors[i].pixel_format);
+    descriptor.colorAttachments[i].blendingState =
+        info->colors[i].blending_enabled ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
+    descriptor.colorAttachments[i].writeMask = (MTLColorWriteMask)info->colors[i].write_mask;
+    descriptor.colorAttachments[i].rgbBlendOperation = (MTLBlendOperation)info->colors[i].rgb_blend_operation;
+    descriptor.colorAttachments[i].alphaBlendOperation = (MTLBlendOperation)info->colors[i].alpha_blend_operation;
+    descriptor.colorAttachments[i].sourceRGBBlendFactor = (MTLBlendFactor)info->colors[i].src_rgb_blend_factor;
+    descriptor.colorAttachments[i].sourceAlphaBlendFactor = (MTLBlendFactor)info->colors[i].src_alpha_blend_factor;
+    descriptor.colorAttachments[i].destinationRGBBlendFactor = (MTLBlendFactor)info->colors[i].dst_rgb_blend_factor;
+    descriptor.colorAttachments[i].destinationAlphaBlendFactor = (MTLBlendFactor)info->colors[i].dst_alpha_blend_factor;
+  }
+
+  const struct WMTRenderPipelineVertexInfo *vertex_info = &info->vertex;
+  if (vertex_info->num_attributes || vertex_info->num_layouts) {
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    for (unsigned i = 0; i < vertex_info->num_attributes && i < 31; i++) {
+      const struct WMTVertexAttributeInfo *attr = &vertex_info->attributes[i];
+      vd.attributes[i].format = (MTLVertexFormat)attr->format;
+      vd.attributes[i].offset = attr->offset;
+      vd.attributes[i].bufferIndex = attr->buffer_index;
+    }
+    for (unsigned i = 0; i < vertex_info->num_layouts && i < 31; i++) {
+      const struct WMTVertexBufferLayoutInfo *layout = &vertex_info->layouts[i];
+      if (!layout->stride && layout->step_function == WMTVertexStepFunctionPerVertex)
+        continue;
+      vd.layouts[i].stride = layout->stride;
+      vd.layouts[i].stepFunction = (MTLVertexStepFunction)layout->step_function;
+      vd.layouts[i].stepRate = layout->step_function == WMTVertexStepFunctionConstant ? 0 : layout->step_rate;
+    }
+    descriptor.vertexDescriptor = vd;
+  }
+
+  descriptor.rasterSampleCount = info->raster_sample_count ? info->raster_sample_count : 1;
+  descriptor.alphaToCoverageState =
+      info->alpha_to_coverage_enabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+  descriptor.rasterizationEnabled = info->rasterization_enabled ? YES : NO;
+  descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
+
+  NSError *err = NULL;
+  params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
+                                                                                     compilerTaskOptions:nil
+                                                                                                   error:&err];
+  params->ret_error = (obj_handle_t)err;
+  [descriptor release];
+  return STATUS_SUCCESS;
+}
+
+/* --- residency set (197..200) ---------------------------------------- */
+static NTSTATUS
+_MTLResidencySet_addAllocation(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTLResidencySet>)params->handle addAllocation:(id<MTLAllocation>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLResidencySet_commit(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTLResidencySet>)params->handle commit];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLResidencySet_requestResidency(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTLResidencySet>)params->handle requestResidency];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLResidencySet_removeAllAllocations(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(id<MTLResidencySet>)params->handle removeAllAllocations];
+  return STATUS_SUCCESS;
+}
+
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
@@ -5719,6 +6250,52 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_D9MTAirVersion,
     &thunk_D9MTAirCompile,
     &thunk_D9MTAirFree,
+    /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step in both
+       tables. All param layouts are 8-byte/arch-invariant: shared thunks. */
+    &_MTLDevice_newMTL4CommandQueue,                        /* 157 */
+    &_MTLDevice_newCommandAllocator,                        /* 158 */
+    &_MTLDevice_newMTL4CommandBuffer,                       /* 159 */
+    &_MTLDevice_newArgumentTable,                           /* 160 */
+    &_MTLDevice_newMTL4Compiler,                            /* 161 */
+    &_MTLDevice_newResidencySet,                            /* 162 */
+    &_MTL4CommandAllocator_reset,                           /* 163 */
+    &_MTL4CommandBuffer_beginCommandBuffer,                 /* 164 */
+    &_MTL4CommandBuffer_endCommandBuffer,                   /* 165 */
+    &_MTL4CommandBuffer_useResidencySet,                    /* 166 */
+    &_MTL4CommandQueue_commit,                              /* 167 */
+    &_MTL4CommandQueue_waitForDrawable,                     /* 168 */
+    &_MTL4CommandQueue_signalDrawable,                      /* 169 */
+    &_MTL4CommandQueue_signalEvent,                         /* 170 */
+    &_MTL4CommandQueue_waitForEvent,                        /* 171 */
+    &_MTL4ArgumentTable_setAddress,                         /* 172 */
+    &_MTL4ArgumentTable_setAddressWithStride,               /* 173 */
+    &_MTL4ArgumentTable_setTexture,                         /* 174 */
+    &_MTL4ArgumentTable_setSamplerState,                    /* 175 */
+    &_MTL4CommandBuffer_renderCommandEncoder,               /* 176 */
+    &_MTL4RenderCommandEncoder_setArgumentTable,            /* 177 */
+    &_MTL4RenderCommandEncoder_setRenderPipelineState,      /* 178 */
+    &_MTL4RenderCommandEncoder_setViewport,                 /* 179 */
+    &_MTL4RenderCommandEncoder_setScissorRect,              /* 180 */
+    &_MTL4RenderCommandEncoder_setDepthStencilState,        /* 181 */
+    &_MTL4RenderCommandEncoder_setCullMode,                 /* 182 */
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding,       /* 183 */
+    &_MTL4RenderCommandEncoder_setDepthBias,                /* 184 */
+    &_MTL4RenderCommandEncoder_setBlendColor,               /* 185 */
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue,    /* 186 */
+    &_MTL4RenderCommandEncoder_drawPrimitives,              /* 187 */
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives,       /* 188 */
+    &_MTL4CommandBuffer_computeCommandEncoder,              /* 189 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer,     /* 190 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture,    /* 191 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture,   /* 192 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer,    /* 193 */
+    &_MTL4ComputeCommandEncoder_fillBuffer,                 /* 194 */
+    &_MTL4ComputeCommandEncoder_generateMipmaps,            /* 195 */
+    &_MTL4Compiler_newRenderPipelineState,                  /* 196 */
+    &_MTLResidencySet_addAllocation,                        /* 197 */
+    &_MTLResidencySet_commit,                               /* 198 */
+    &_MTLResidencySet_requestResidency,                     /* 199 */
+    &_MTLResidencySet_removeAllAllocations,                 /* 200 */
 };
 
 #ifndef DXMT_NATIVE
@@ -5891,5 +6468,52 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk_D9MTAirVersion,
     &thunk_D9MTAirCompile,
     &thunk_D9MTAirFree,
+    /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step with
+       __wine_unix_call_funcs above. Params are 8-byte/arch-invariant, so the
+       64-bit thunks are byte-compatible for wow64: shared, no thunk32 twins. */
+    &_MTLDevice_newMTL4CommandQueue,                        /* 157 */
+    &_MTLDevice_newCommandAllocator,                        /* 158 */
+    &_MTLDevice_newMTL4CommandBuffer,                       /* 159 */
+    &_MTLDevice_newArgumentTable,                           /* 160 */
+    &_MTLDevice_newMTL4Compiler,                            /* 161 */
+    &_MTLDevice_newResidencySet,                            /* 162 */
+    &_MTL4CommandAllocator_reset,                           /* 163 */
+    &_MTL4CommandBuffer_beginCommandBuffer,                 /* 164 */
+    &_MTL4CommandBuffer_endCommandBuffer,                   /* 165 */
+    &_MTL4CommandBuffer_useResidencySet,                    /* 166 */
+    &_MTL4CommandQueue_commit,                              /* 167 */
+    &_MTL4CommandQueue_waitForDrawable,                     /* 168 */
+    &_MTL4CommandQueue_signalDrawable,                      /* 169 */
+    &_MTL4CommandQueue_signalEvent,                         /* 170 */
+    &_MTL4CommandQueue_waitForEvent,                        /* 171 */
+    &_MTL4ArgumentTable_setAddress,                         /* 172 */
+    &_MTL4ArgumentTable_setAddressWithStride,               /* 173 */
+    &_MTL4ArgumentTable_setTexture,                         /* 174 */
+    &_MTL4ArgumentTable_setSamplerState,                    /* 175 */
+    &_MTL4CommandBuffer_renderCommandEncoder,               /* 176 */
+    &_MTL4RenderCommandEncoder_setArgumentTable,            /* 177 */
+    &_MTL4RenderCommandEncoder_setRenderPipelineState,      /* 178 */
+    &_MTL4RenderCommandEncoder_setViewport,                 /* 179 */
+    &_MTL4RenderCommandEncoder_setScissorRect,              /* 180 */
+    &_MTL4RenderCommandEncoder_setDepthStencilState,        /* 181 */
+    &_MTL4RenderCommandEncoder_setCullMode,                 /* 182 */
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding,       /* 183 */
+    &_MTL4RenderCommandEncoder_setDepthBias,                /* 184 */
+    &_MTL4RenderCommandEncoder_setBlendColor,               /* 185 */
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue,    /* 186 */
+    &_MTL4RenderCommandEncoder_drawPrimitives,              /* 187 */
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives,       /* 188 */
+    &_MTL4CommandBuffer_computeCommandEncoder,              /* 189 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer,     /* 190 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture,    /* 191 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture,   /* 192 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer,    /* 193 */
+    &_MTL4ComputeCommandEncoder_fillBuffer,                 /* 194 */
+    &_MTL4ComputeCommandEncoder_generateMipmaps,            /* 195 */
+    &_MTL4Compiler_newRenderPipelineState,                  /* 196 */
+    &_MTLResidencySet_addAllocation,                        /* 197 */
+    &_MTLResidencySet_commit,                               /* 198 */
+    &_MTLResidencySet_requestResidency,                     /* 199 */
+    &_MTLResidencySet_removeAllAllocations,                 /* 200 */
 };
 #endif

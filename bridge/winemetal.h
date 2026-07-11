@@ -2125,4 +2125,158 @@ WINEMETAL_API obj_handle_t MTLDevice_newTileRenderPipelineState(
     obj_handle_t device, const struct WMTTileRenderPipelineInfo *info, obj_handle_t *err_out
 );
 
+/* ===================================================================== *
+ * d9mt addition: the full Metal 4 surface (dispatch codes 157..200).
+ *
+ * DXMT's winemetal4 exposes only counter/timestamp heaps; the Metal-4-only
+ * backend (v2/docs/SOURCE_OF_TRUTH.md §2) needs the command queue/allocator/
+ * buffer, argument table, render + compute encoders, MTL4Compiler pipeline
+ * creation and residency sets. All entries are additive, appended after the
+ * last existing dispatch index (156), never renumbering existing ones. Every
+ * WMT* struct member is 8-byte / arch-invariant so the 64-bit unix thunks are
+ * wow64 byte-compatible (shared thunks, no thunk32 twins needed).
+ *
+ * SDK signature notes (verified against MacOSX.sdk MTL4*.h, macOS 26):
+ *  - Device factories are -newMTL4CommandQueue / -newCommandAllocator /
+ *    -newCommandBuffer / -newArgumentTableWithDescriptor: /
+ *    -newCompilerWithDescriptor: / -newResidencySetWithDescriptor:.
+ *  - MTL4ArgumentTable binds by MTLGPUAddress (setAddress:atIndex:) and
+ *    MTLResourceID (setTexture:/setSamplerState:atIndex:); there is no
+ *    per-slot buffer/sampler object binding.
+ *  - MTL4RenderCommandEncoder setArgumentTable:atStages: takes an
+ *    MTLRenderStages bitmask (vertex=1<<0, fragment=1<<1).
+ *  - MTL4CommandEncoder (both render + compute) declares -endEncoding, so the
+ *    existing MTLCommandEncoder_endEncoding (code 33) ends MTL4 encoders too
+ *    (ObjC dispatch is by selector); no distinct MTL4 end entry is added.
+ *  - MTL4 pipeline blend enable is the MTL4BlendState enum, not a BOOL, and
+ *    alpha-to-coverage is MTL4AlphaToCoverageState; the functions are set via
+ *    MTL4LibraryFunctionDescriptor{ .name, .library } wrapped in a
+ *    MTL4RenderPipelineDescriptor, and the compiler entry takes the base
+ *    MTL4PipelineDescriptor. Depth/stencil format is NOT in the descriptor.
+ * ===================================================================== */
+
+/* --- device factories (157..162) ------------------------------------- */
+
+struct WMTArgTableInfo {
+  uint32_t max_buffers;
+  uint32_t max_textures;
+  uint32_t max_samplers;
+  uint8_t initialize_bindings;
+  uint8_t support_attribute_strides;
+  uint8_t padding[2];
+};
+
+struct WMTResidencySetInfo {
+  uint64_t initial_capacity;
+};
+
+WINEMETAL_API obj_handle_t MTLDevice_newMTL4CommandQueue(obj_handle_t device);
+WINEMETAL_API obj_handle_t MTLDevice_newCommandAllocator(obj_handle_t device);
+WINEMETAL_API obj_handle_t MTLDevice_newMTL4CommandBuffer(obj_handle_t device);
+WINEMETAL_API obj_handle_t MTLDevice_newArgumentTable(obj_handle_t device, const struct WMTArgTableInfo *info);
+WINEMETAL_API obj_handle_t MTLDevice_newMTL4Compiler(obj_handle_t device);
+WINEMETAL_API obj_handle_t MTLDevice_newResidencySet(obj_handle_t device, const struct WMTResidencySetInfo *info);
+
+/* --- command allocator (163) ----------------------------------------- */
+WINEMETAL_API void MTL4CommandAllocator_reset(obj_handle_t allocator);
+
+/* --- command buffer (164..166, plus render/compute encoders 176/189) -- */
+WINEMETAL_API void MTL4CommandBuffer_beginCommandBuffer(obj_handle_t cmdbuf, obj_handle_t allocator);
+WINEMETAL_API void MTL4CommandBuffer_endCommandBuffer(obj_handle_t cmdbuf);
+WINEMETAL_API void MTL4CommandBuffer_useResidencySet(obj_handle_t cmdbuf, obj_handle_t residency_set);
+
+/* --- command queue (167..171) ---------------------------------------- */
+WINEMETAL_API void MTL4CommandQueue_commit(obj_handle_t queue, const obj_handle_t *cmdbufs, uint64_t count);
+WINEMETAL_API void MTL4CommandQueue_waitForDrawable(obj_handle_t queue, obj_handle_t drawable);
+WINEMETAL_API void MTL4CommandQueue_signalDrawable(obj_handle_t queue, obj_handle_t drawable);
+WINEMETAL_API void MTL4CommandQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+WINEMETAL_API void MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+
+/* --- argument table (172..175) --------------------------------------- */
+WINEMETAL_API void MTL4ArgumentTable_setAddress(obj_handle_t table, uint64_t gpu_address, uint64_t index);
+WINEMETAL_API void MTL4ArgumentTable_setAddressWithStride(
+    obj_handle_t table, uint64_t gpu_address, uint64_t stride, uint64_t index
+);
+WINEMETAL_API void MTL4ArgumentTable_setTexture(obj_handle_t table, uint64_t gpu_resource_id, uint64_t index);
+WINEMETAL_API void MTL4ArgumentTable_setSamplerState(obj_handle_t table, uint64_t gpu_resource_id, uint64_t index);
+
+/* --- render command encoder (176..188) ------------------------------- */
+WINEMETAL_API obj_handle_t MTL4CommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassInfo *info);
+WINEMETAL_API void MTL4RenderCommandEncoder_setArgumentTable(obj_handle_t encoder, obj_handle_t table, uint64_t stages);
+WINEMETAL_API void MTL4RenderCommandEncoder_setRenderPipelineState(obj_handle_t encoder, obj_handle_t pso);
+WINEMETAL_API void MTL4RenderCommandEncoder_setViewport(obj_handle_t encoder, struct WMTViewport viewport);
+WINEMETAL_API void MTL4RenderCommandEncoder_setScissorRect(obj_handle_t encoder, struct WMTScissorRect rect);
+WINEMETAL_API void MTL4RenderCommandEncoder_setDepthStencilState(obj_handle_t encoder, obj_handle_t dss);
+WINEMETAL_API void MTL4RenderCommandEncoder_setCullMode(obj_handle_t encoder, enum WMTCullMode mode);
+WINEMETAL_API void MTL4RenderCommandEncoder_setFrontFacingWinding(obj_handle_t encoder, enum WMTWinding winding);
+WINEMETAL_API void MTL4RenderCommandEncoder_setDepthBias(
+    obj_handle_t encoder, float bias, float slope_scale, float clamp
+);
+WINEMETAL_API void MTL4RenderCommandEncoder_setBlendColor(
+    obj_handle_t encoder, float red, float green, float blue, float alpha
+);
+WINEMETAL_API void MTL4RenderCommandEncoder_setStencilReferenceValue(obj_handle_t encoder, uint32_t reference);
+WINEMETAL_API void MTL4RenderCommandEncoder_drawPrimitives(
+    obj_handle_t encoder, enum WMTPrimitiveType primitive, uint64_t vertex_start, uint64_t vertex_count,
+    uint64_t instance_count, uint64_t base_instance
+);
+WINEMETAL_API void MTL4RenderCommandEncoder_drawIndexedPrimitives(
+    obj_handle_t encoder, enum WMTPrimitiveType primitive, uint64_t index_count, enum WMTIndexType index_type,
+    uint64_t index_buffer_gpu_address, uint64_t index_buffer_length, uint64_t instance_count, int64_t base_vertex,
+    uint64_t base_instance
+);
+
+/* --- compute command encoder (189..195) ------------------------------ */
+WINEMETAL_API obj_handle_t MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf);
+WINEMETAL_API void MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
+    obj_handle_t encoder, obj_handle_t src, uint64_t src_offset, obj_handle_t dst, uint64_t dst_offset, uint64_t size
+);
+WINEMETAL_API void MTL4ComputeCommandEncoder_copyFromBufferToTexture(
+    obj_handle_t encoder, obj_handle_t src_buffer, uint64_t src_offset, uint64_t src_bytes_per_row,
+    uint64_t src_bytes_per_image, struct WMTSize src_size, obj_handle_t dst_texture, uint64_t dst_slice,
+    uint64_t dst_level, struct WMTOrigin dst_origin
+);
+WINEMETAL_API void MTL4ComputeCommandEncoder_copyFromTextureToTexture(
+    obj_handle_t encoder, obj_handle_t src, uint64_t src_slice, uint64_t src_level, struct WMTOrigin src_origin,
+    struct WMTSize src_size, obj_handle_t dst, uint64_t dst_slice, uint64_t dst_level, struct WMTOrigin dst_origin
+);
+WINEMETAL_API void MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
+    obj_handle_t encoder, obj_handle_t src_texture, uint64_t src_slice, uint64_t src_level, struct WMTOrigin src_origin,
+    struct WMTSize src_size, obj_handle_t dst_buffer, uint64_t dst_offset, uint64_t dst_bytes_per_row,
+    uint64_t dst_bytes_per_image
+);
+WINEMETAL_API void MTL4ComputeCommandEncoder_fillBuffer(
+    obj_handle_t encoder, obj_handle_t buffer, uint64_t offset, uint64_t length, uint32_t value
+);
+WINEMETAL_API void MTL4ComputeCommandEncoder_generateMipmaps(obj_handle_t encoder, obj_handle_t texture);
+
+/* --- compiler + render pipeline (196) -------------------------------- *
+ * Function stages carried as (library handle + entry-point C string). Blend
+ * + color formats reuse WMTColorAttachmentBlendInfo; vertex descriptor reuses
+ * the code-153 WMTRenderPipelineVertexInfo. NO depth/stencil format (MTL4
+ * omits it from the pipeline descriptor). */
+struct WMTMtl4RenderPipelineInfo {
+  struct WMTColorAttachmentBlendInfo colors[8];
+  struct WMTRenderPipelineVertexInfo vertex;
+  obj_handle_t vertex_library;
+  obj_handle_t fragment_library;
+  struct WMTConstMemoryPointer vertex_entry_name;   /* NUL-terminated C string */
+  struct WMTConstMemoryPointer fragment_entry_name; /* NUL-terminated C string */
+  uint32_t raster_sample_count;
+  uint32_t input_primitive_topology; /* enum WMTPrimitiveTopologyClass */
+  uint8_t alpha_to_coverage_enabled;
+  uint8_t rasterization_enabled;
+  uint8_t padding[6];
+};
+
+WINEMETAL_API obj_handle_t MTL4Compiler_newRenderPipelineState(
+    obj_handle_t compiler, const struct WMTMtl4RenderPipelineInfo *info, obj_handle_t *err_out
+);
+
+/* --- residency set (197..200) ---------------------------------------- */
+WINEMETAL_API void MTLResidencySet_addAllocation(obj_handle_t residency_set, obj_handle_t resource);
+WINEMETAL_API void MTLResidencySet_commit(obj_handle_t residency_set);
+WINEMETAL_API void MTLResidencySet_requestResidency(obj_handle_t residency_set);
+WINEMETAL_API void MTLResidencySet_removeAllAllocations(obj_handle_t residency_set);
+
 #endif

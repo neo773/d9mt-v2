@@ -21,3 +21,77 @@ Local changes:
          No new unix-call slot: these ride the existing encodeCommands chain.
          D3D9 binds 16 flat sampler slots + vertex textures; DXMT's D3D11 model
          binds via argument buffers, so upstream's wmtcmd lacked these.
+      #3 d9mtair AIR-compile thunks (unix calls 154..156): D9MTAirVersion/
+         Compile/Free, backed by the airlib compile core.
+      #4 FULL METAL 4 SURFACE (unix calls 157..200). DXMT's winemetal4 exposes
+         only counter/timestamp heaps; the Metal-4-only backend (docs/
+         SOURCE_OF_TRUTH.md §2) needs the whole MTL4 command path. Additive,
+         appended after 156, never renumbering. All WMT* params are 8-byte/
+         arch-invariant, so each 64-bit unix thunk is wow64 byte-compatible and
+         both dispatch tables point at the same functions (no thunk32 twins).
+         New WMT structs: WMTArgTableInfo, WMTResidencySetInfo,
+         WMTMtl4RenderPipelineInfo (reuses WMTColorAttachmentBlendInfo +
+         the #1 WMTRenderPipelineVertexInfo; NO depth/stencil format per MTL4).
+         Dispatch map:
+           157 MTLDevice_newMTL4CommandQueue      (-newMTL4CommandQueue)
+           158 MTLDevice_newCommandAllocator      (-newCommandAllocator)
+           159 MTLDevice_newMTL4CommandBuffer     (-newCommandBuffer)
+           160 MTLDevice_newArgumentTable         (-newArgumentTableWithDescriptor:)
+           161 MTLDevice_newMTL4Compiler          (-newCompilerWithDescriptor:)
+           162 MTLDevice_newResidencySet          (-newResidencySetWithDescriptor:)
+           163 MTL4CommandAllocator_reset
+           164 MTL4CommandBuffer_beginCommandBuffer (-beginCommandBufferWithAllocator:)
+           165 MTL4CommandBuffer_endCommandBuffer
+           166 MTL4CommandBuffer_useResidencySet
+           167 MTL4CommandQueue_commit            (-commit:count:)
+           168 MTL4CommandQueue_waitForDrawable
+           169 MTL4CommandQueue_signalDrawable
+           170 MTL4CommandQueue_signalEvent       (events moved to queue in MTL4)
+           171 MTL4CommandQueue_waitForEvent
+           172 MTL4ArgumentTable_setAddress       (MTLGPUAddress)
+           173 MTL4ArgumentTable_setAddressWithStride (-setAddress:attributeStride:atIndex:)
+           174 MTL4ArgumentTable_setTexture       (MTLResourceID)
+           175 MTL4ArgumentTable_setSamplerState  (MTLResourceID)
+           176 MTL4CommandBuffer_renderCommandEncoder (reuses WMTRenderPassInfo -> MTL4RenderPassDescriptor)
+           177 MTL4RenderCommandEncoder_setArgumentTable (-setArgumentTable:atStages: MTLRenderStages)
+           178 MTL4RenderCommandEncoder_setRenderPipelineState
+           179 MTL4RenderCommandEncoder_setViewport
+           180 MTL4RenderCommandEncoder_setScissorRect
+           181 MTL4RenderCommandEncoder_setDepthStencilState
+           182 MTL4RenderCommandEncoder_setCullMode
+           183 MTL4RenderCommandEncoder_setFrontFacingWinding
+           184 MTL4RenderCommandEncoder_setDepthBias (-setDepthBias:slopeScale:clamp:)
+           185 MTL4RenderCommandEncoder_setBlendColor (-setBlendColorRed:green:blue:alpha:)
+           186 MTL4RenderCommandEncoder_setStencilReferenceValue
+           187 MTL4RenderCommandEncoder_drawPrimitives
+           188 MTL4RenderCommandEncoder_drawIndexedPrimitives (indexBuffer is MTLGPUAddress)
+           189 MTL4CommandBuffer_computeCommandEncoder (ALL blits in MTL4)
+           190 MTL4ComputeCommandEncoder_copyFromBufferToBuffer
+           191 MTL4ComputeCommandEncoder_copyFromBufferToTexture
+           192 MTL4ComputeCommandEncoder_copyFromTextureToTexture
+           193 MTL4ComputeCommandEncoder_copyFromTextureToBuffer
+           194 MTL4ComputeCommandEncoder_fillBuffer (-fillBuffer:range:value:)
+           195 MTL4ComputeCommandEncoder_generateMipmaps
+           196 MTL4Compiler_newRenderPipelineState (MTL4RenderPipelineDescriptor
+               + MTL4LibraryFunctionDescriptor{name,library})
+           197 MTLResidencySet_addAllocation
+           198 MTLResidencySet_commit
+           199 MTLResidencySet_requestResidency
+           200 MTLResidencySet_removeAllAllocations
+         SDK corrections vs the original sketch (verified against MacOSX.sdk
+         MTL4*.h, macOS 26):
+           - MTL4 encoder end reuses the existing MTLCommandEncoder_endEncoding
+             (code 33): MTL4CommandEncoder declares -endEncoding and ObjC
+             dispatches by selector, so no distinct MTL4 end entry was added.
+           - Device factory is -newCommandAllocator / -newCommandBuffer /
+             -newCompilerWithDescriptor: (not the sketch's bare names).
+           - Pipeline blend enable is the MTL4BlendState enum (not a BOOL) and
+             alpha-to-coverage is MTL4AlphaToCoverageState; functions are set
+             via MTL4LibraryFunctionDescriptor.vertexFunctionDescriptor /
+             fragmentFunctionDescriptor, and the compiler entry is
+             -newRenderPipelineStateWithDescriptor:compilerTaskOptions:error:.
+           - Queue commit is -commit:count: (no options variant needed).
+         Smoke: tests/bridge_smoke.cpp gains an MTL4 section — queue/allocator/
+         command buffer + argument table + residency set + MTL4Compiler PSO +
+         a real render pass encoding one draw, commit, and shared-event
+         completion wait.
