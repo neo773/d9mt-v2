@@ -56,11 +56,17 @@ The ONLY path from the PE `d3d9.dll` to Metal is the `winemetal` unixlib
   `WINEMETAL_API` entry, unix-side thunk, wow64 twin, appended dispatch
   indices — never renumber existing). Formatted so `diff` vs upstream DXMT
   stays a clean cherry-pickable patch. Upstream pinned in `v2/bridge/UPSTREAM`.
-- **BRIDGE GAP (current work): DXMT's winemetal4 exposes only counter/timestamp
-  heaps (7 MTL4 symbols). We must ADD the full MTL4 surface** (command queue/
-  allocator/buffer, argument table, render + compute encoders, compiler +
-  pipeline descriptors, residency sets, drawable present) as additive Obj-C on
-  the unix side. This is the enabler the Metal-4 backend depends on.
+- **BRIDGE MTL4 SURFACE: DONE (2026-07-11, commit b0f0c37).** 44 additive
+  entries (dispatch codes 157-200): command queue/allocator/buffer, argument
+  table, render + compute encoders, MTL4Compiler + pipeline, residency sets,
+  drawable present. The bridge smoke test drives a real MTL4 render pass — a
+  PSO compiled from OUR AIR vs/ps libs, one draw, commit, queue-signaled event
+  completion — GPU-confirmed. **The entire Metal 4 path works with our shaders.**
+  SDK notes: blend enable = `MTL4BlendState` enum (not BOOL), a2c =
+  `MTL4AlphaToCoverageState`; functions via `MTL4LibraryFunctionDescriptor`;
+  compiler = `newRenderPipelineStateWithDescriptor:compilerTaskOptions:error:`;
+  `endEncoding` (code 33) ends MTL4 encoders too; queue commit = `commit:count:`.
+  A VS writing `[[point_size]]` needs Unspecified topology (not Triangle).
 - AIR compilation also rides the bridge: `d9mtair` thunks (codes 154-156) call
   our AirBuilder+LLVM compile core on the unix side. Already working.
 - LGPL: the bridge stays its own dll/so; our MIT driver links it dynamically.
