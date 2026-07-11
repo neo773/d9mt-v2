@@ -3494,6 +3494,9 @@ namespace dxvk {
 
     m_state.vertexShader = shader;
 
+    // A new VS changes the PS-facing interpolant layout; force re-reconciliation.
+    m_boundPsLinkageHash = ~0ull;
+
     const bool usesProgrammableVS = UseProgrammableVS();
 
     if (usesProgrammableVS) {
@@ -3851,6 +3854,9 @@ namespace dxvk {
     const D3D9ShaderMasks oldShaderMasks = PSShaderMasks();
     m_state.pixelShader = shader;
     const D3D9ShaderMasks newShaderMasks = PSShaderMasks();
+
+    // Force PrepareDraw to re-reconcile PS interpolants against the VS.
+    m_boundPsLinkageHash = ~0ull;
 
     if (shader != nullptr) {
       BindShader<D3D9ShaderType::PixelShader>(newShader);
@@ -7380,6 +7386,10 @@ namespace dxvk {
         m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
     }
 
+    // Reconcile the PS interpolants against the current VS (doc 03 §2b). Runs
+    // after both stages' programmable state is known; cheap no-op when unchanged.
+    BindProgrammablePixelShaderLinkage();
+
     uint32_t nullOrUnusedMask = ~usedSamplerMask | ~usedTextureMask;
     uint32_t depthTextureMask = m_textureSlotTracking.depth;
     uint32_t drefClampMask = m_textureSlotTracking.drefClamp;
@@ -7505,6 +7515,43 @@ namespace dxvk {
       cShader = m_ffModules.GetShader<ShaderStage>()
     ](MtlContext* ctx) mutable {
       ctx->bindShader(Stage, std::move(cShader));
+    });
+  }
+
+
+  void D3D9DeviceEx::BindProgrammablePixelShaderLinkage() {
+    // VS<->PS interpolant reconciliation is only meaningful when BOTH stages are
+    // programmable (the FF ubershaders are authored with matching interpolants).
+    if (!UseProgrammablePS() || !UseProgrammableVS())
+      return;
+
+    const D3D9CommonShader* vs = GetCommonShader(m_state.vertexShader);
+    const D3D9CommonShader* ps = GetCommonShader(m_state.pixelShader);
+
+    if (vs == nullptr || ps == nullptr)
+      return;
+
+    // Cheap guard: rebind only when the pairing identity changes. The VS output
+    // IO hash captures the layout the PS must agree with; the raw pointers
+    // capture shader-object identity. (SetVertex/PixelShader also reset to ~0.)
+    uint64_t linkageHash = vs->GetOutputIoHash();
+    linkageHash = linkageHash * 1099511628211ull ^ uint64_t(uintptr_t(vs));
+    linkageHash = linkageHash * 1099511628211ull ^ uint64_t(uintptr_t(ps));
+
+    if (linkageHash == m_boundPsLinkageHash)
+      return;
+
+    m_boundPsLinkageHash = linkageHash;
+
+    // Compile (cached) + bind the pixel shader reconciled against this VS. This
+    // overrides the unpaired PS bound at SetPixelShader time; EmitCs ordering
+    // (later wins) makes it the function that reaches the render PSO at draw.
+    Rc<MtlShaderFunction> shader = ps->GetShaderForLinkage(vs);
+
+    EmitCs([
+      cShader = std::move(shader)
+    ] (MtlContext* ctx) mutable {
+      ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
     });
   }
 

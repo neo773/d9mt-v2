@@ -1056,6 +1056,12 @@ namespace dxvk {
     template <D3D9ShaderType ShaderStage>
     void BindFFUbershader();
 
+    // Draw-time VS<->PS interpolant reconciliation (doc 03 §2b). When both stages
+    // are programmable, (re)binds the pixel shader compiled to agree with the
+    // current vertex shader's output interpolant layout. Mirrors how upstream
+    // built DxvkShaderLinkage per stage at PSO-create time (doc 03 §1c).
+    void BindProgrammablePixelShaderLinkage();
+
     void BindInputLayout();
 
     void BindVertexBuffer(
@@ -1595,6 +1601,10 @@ namespace dxvk {
 
     D3D9FFShaderModuleSet           m_ffModules;
     D3D9SWVPEmulator                m_swvpEmulator;
+
+    // Identity of the (VS output IO, VS, PS) triple whose reconciled pixel shader
+    // is currently bound. Guards redundant draw-time rebinds; ~0 forces a rebind.
+    uint64_t                        m_boundPsLinkageHash = ~0ull;
 
     Com<D3D9StateBlock, false>      m_recorder;
 

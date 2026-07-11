@@ -18,26 +18,31 @@ namespace dxvk {
           D3D9ShaderAnalysis&&      Analysis,
     const D3D9ShaderCreateInfo&     ModuleInfo,
     const void*                     pShaderBytecode)
-  : m_analysis(std::move(Analysis)) {
+  : m_analysis(std::move(Analysis))
+  , m_device(pDevice)
+  , m_linkageCache(std::make_shared<D3D9ShaderLinkageCache>()) {
     const MtlShaderStage stage = ShaderKey.stage();
 
     m_name = str::format(stage == MtlShaderStage::Vertex ? "vs_" : "ps_", ShaderKey.hash());
     Logger::debug(str::format("Compiling shader ", m_name));
 
-    // Phase A: build the air-backed backend (SM3 -> legalized IR, cached).
-    Rc<ID3D9MetalShaderBackend> backend = createD3D9MetalShader(
+    // Phase A: build the air-backed backend (SM3 -> legalized IR, cached). Kept
+    // alive as m_backend so Phase-B linkage variants can be produced on demand at
+    // draw/PSO time (GetShaderForLinkage).
+    m_backend = createD3D9MetalShader(
       m_name, stage, ModuleInfo.shaderOptions, m_analysis, pShaderBytecode);
 
-    if (backend == nullptr) {
+    if (m_backend == nullptr) {
       Logger::err(str::format("D3D9 shader: Phase-A build failed for ", m_name));
       return;
     }
 
-    // Phase B: compile a metallib for the default (unpaired) linkage and wrap
-    // it into a bindable Metal shader function. VS<->PS linkage-specialized
-    // variants are produced through backend->getMetallib(cookie, spec) when the
-    // PSO layer carries the paired IoMap (doc 03 §2b/§2d).
-    std::vector<uint8_t> metallib = backend->getMetallib(0u, 0u);
+    // Phase B: compile a metallib for the default (unpaired) linkage and wrap it
+    // into a bindable Metal shader function. This is the VS/FF shader and the
+    // fallback PS; VS<->PS interpolant-reconciled PS variants are produced lazily
+    // through GetShaderForLinkage() once the paired VS is known (doc 03 §2b/§2d).
+    std::vector<uint8_t> metallib = m_backend->getMetallib(
+      ID3D9MetalShaderBackend::PairedStageIo { }, 0u);
 
     if (metallib.empty()) {
       Logger::err(str::format("D3D9 shader: Phase-B metallib empty for ", m_name));
@@ -49,6 +54,51 @@ namespace dxvk {
 
     if (m_shader == nullptr)
       Logger::err(str::format("D3D9 shader: newLibrary failed for ", m_name));
+  }
+
+
+  Rc<MtlShaderFunction> D3D9CommonShader::GetShaderForLinkage(
+    const D3D9CommonShader* pPrevStage) const {
+    // Only the fragment stage is rewritten for VS<->PS interpolant reconciliation,
+    // and only when a paired previous stage with a live backend is available.
+    // Everything else (VS, FF, missing backend) uses the unpaired default.
+    if (m_backend == nullptr
+     || m_backend->stage() != MtlShaderStage::Fragment
+     || pPrevStage == nullptr
+     || pPrevStage->m_backend == nullptr)
+      return m_shader;
+
+    const uint64_t prevIoHash = pPrevStage->m_backend->outputIoHash();
+
+    std::lock_guard lock(m_linkageCache->mutex);
+
+    auto it = m_linkageCache->functions.find(prevIoHash);
+    if (it != m_linkageCache->functions.end())
+      return it->second;
+
+    ID3D9MetalShaderBackend::PairedStageIo paired = { };
+    paired.prevStageIr     = &pPrevStage->m_backend->serializedIr();
+    paired.prevStageIoHash = prevIoHash;
+    paired.matchSemantics  = true;
+
+    // The backend memoizes the compiled metallib on (prevIoHash, spec); here we
+    // additionally memoize the metallib->MtlShaderFunction wrap per prev layout.
+    std::vector<uint8_t> metallib = m_backend->getMetallib(paired, 0u);
+
+    Rc<MtlShaderFunction> fn = m_shader;  // fall back to the unpaired shader
+
+    if (!metallib.empty()) {
+      auto compiled = m_device->GetDXVKDevice()->createShaderFunction(
+        m_backend->stage(), metallib.data(), metallib.size());
+
+      if (compiled != nullptr)
+        fn = compiled;
+      else
+        Logger::err(str::format("D3D9 shader: linkage newLibrary failed for ", m_name));
+    }
+
+    m_linkageCache->functions.emplace(prevIoHash, fn);
+    return fn;
   }
 
 

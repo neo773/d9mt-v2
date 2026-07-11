@@ -24,7 +24,10 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 // The AIR compile thunks are exported by the winemetal bridge (bridge/
 // d9mtair_thunks.c, codes 154..156). They resolve through the winemetal import
@@ -1158,11 +1161,34 @@ namespace dxvk {
         uint32_t(m_analysis.GetRenderTargetMask()) };
     }
 
-    std::vector<uint8_t> getMetallib(uint64_t linkageCookie, uint64_t specStateHash) override {
+    const std::vector<uint8_t>& serializedIr() const override {
+      return m_ir;
+    }
+
+    uint64_t outputIoHash() const override {
+      return m_outputIoHash;
+    }
+
+    std::vector<uint8_t> getMetallib(const PairedStageIo& paired, uint64_t specStateHash) override {
       using namespace dxbc_spv;
 
       if (m_ir.empty())
         return { };
+
+      // Phase-B metallib cache key = (pairedStageIoHash, specStateHash); the
+      // bytecodeHash is implicit in this object's identity (doc 03 §2d). Shared
+      // across all common-shader copies via the Rc-shared backend, so a PS/VS
+      // pair compiles its reconciled metallib exactly once.
+      uint64_t cacheKey = util::hash_combine(
+        std::hash<uint64_t>()(paired.prevStageIoHash),
+        std::hash<uint64_t>()(specStateHash));
+
+      {
+        std::lock_guard lock(m_metallibMutex);
+        auto it = m_metallibCache.find(cacheKey);
+        if (it != m_metallibCache.end())
+          return it->second;
+      }
 
       // Phase B — restore the cached legalized IR (doc 03 §1b step 1).
       ir::Builder builder;
@@ -1173,21 +1199,47 @@ namespace dxvk {
         return { };
       }
 
-      // Link-time I/O fixups (doc 03 §1b step 2 / §2b). The fixups that do NOT
-      // depend on the paired stage run here: pixel-shader flat interpolation.
-      // resolveMismatchedIo / resolveSemanticIo (the VS<->PS reconciliation)
-      // require the *other* stage's IoMap, which the neutral cookie interface
-      // does not carry — that pairing is deferred to when the interface passes
-      // the paired IR (see report). AirBuilder name-matches varyings meanwhile.
+      // Link-time I/O fixups (doc 03 §1b step 2 / §2b), mirroring the LowerIoPass
+      // block of upstream DxvkIrShader::getCode (dxvk_shader_ir.cpp:2027-2077).
       ir::LowerIoPass ioPass(builder);
 
+      // VS<->PS interpolant reconciliation — the "hardest problem" / historical
+      // blackscreen class. Only the fragment stage is rewritten, and only when a
+      // paired VS IR is supplied and the stages are I/O-incompatible. This drops
+      // interpolants the PS reads but the VS never writes (-> constant zero) and
+      // ignores VS outputs the PS does not consume. Upstream order: semantic IO
+      // remap first, then the mismatch fixup (dxvk_shader_ir.cpp:2059-2062).
+      if (m_stage == MtlShaderStage::Fragment
+       && paired.prevStageIr != nullptr && !paired.prevStageIr->empty()) {
+        ir::Builder prevBuilder;
+        ir::Deserializer prevDeser(paired.prevStageIr->data(), paired.prevStageIr->size());
+
+        if (prevDeser.deserialize(prevBuilder)) {
+          // D3D9 has no GS/tess in this path: the stage feeding the PS is the VS.
+          auto prevStage = ir::ShaderStage::eVertex;
+          ir::IoMap prevOut = ir::IoMap::forOutputs(prevBuilder, 0u);
+          ir::IoMap thisIn  = ir::IoMap::forInputs(builder);
+
+          if (!ir::IoMap::checkCompatibility(prevStage, prevOut,
+                ir::ShaderStage::ePixel, thisIn, paired.matchSemantics)) {
+            if (paired.matchSemantics)
+              ioPass.resolveSemanticIo(prevOut);
+
+            ioPass.resolveMismatchedIo(prevStage, prevOut);
+          }
+        } else {
+          Logger::warn(str::format("D3D9 AIR: paired VS IR deserialize failed for ", m_name,
+            " — compiling PS without interpolant reconciliation"));
+        }
+      }
+
+      // Pixel-shader flat interpolation (does not depend on the paired stage).
       if (m_stage == MtlShaderStage::Fragment) {
         uint32_t flatMask = m_analysis.GetFlatShadingMask();
         if (flatMask)
           ioPass.enableFlatInterpolation(flatMask);
       }
 
-      (void)linkageCookie;
       (void)specStateHash;
 
       // Re-serialize the (possibly) fixed-up IR for the compile boundary.
@@ -1232,6 +1284,11 @@ namespace dxvk {
       { d9mt_air_free_params f = { params.out_metallib }; D9MTAirFree(&f); }
       if (params.out_reflection) { d9mt_air_free_params f = { params.out_reflection }; D9MTAirFree(&f); }
 
+      {
+        std::lock_guard lock(m_metallibMutex);
+        m_metallibCache.emplace(cacheKey, metallib);
+      }
+
       return metallib;
     }
 
@@ -1244,7 +1301,37 @@ namespace dxvk {
     MtlShaderStage       m_stage;
     D3D9ShaderAnalysis   m_analysis;
     std::string          m_name;
-    std::vector<uint8_t> m_ir;   // serialized legalized IR (Phase A)
+    std::vector<uint8_t> m_ir;             // serialized legalized IR (Phase A)
+    uint64_t             m_outputIoHash = 0u;  // hash of the output interpolant IoMap
+
+    // Phase-B metallib cache, keyed on (prevStageIoHash, specStateHash).
+    std::mutex                                        m_metallibMutex;
+    std::unordered_map<uint64_t, std::vector<uint8_t>> m_metallibCache;
+
+    // Stable hash of a shader's output IoMap (location type + index/built-in +
+    // component mask + semantic name/index). Two VS whose PS-facing interpolant
+    // signature is identical hash equal, so a PS reconciled against one is reused
+    // for the other.
+    static uint64_t hashOutputIoMap(const dxbc_spv::ir::Builder& builder) {
+      using namespace dxbc_spv;
+
+      ir::IoMap outputs = ir::IoMap::forOutputs(builder, 0u);
+
+      size_t h = 0u;
+      for (const auto& loc : outputs) {
+        h = util::hash_combine(h, size_t(loc.getType()));
+        h = util::hash_combine(h, size_t(loc.getType() == ir::IoEntryType::eBuiltIn
+          ? uint32_t(loc.getBuiltIn()) : loc.getLocationIndex()));
+        h = util::hash_combine(h, size_t(loc.getComponentMask()));
+
+        auto sem = outputs.getSemanticForEntry(loc);
+        for (char c : sem.name)
+          h = util::hash_combine(h, size_t(uint8_t(c)));
+        h = util::hash_combine(h, size_t(sem.index));
+      }
+
+      return uint64_t(h);
+    }
 
     void runPhaseA(const D3D9ShaderOptions& options, const void* bytecode) {
       using namespace dxbc_spv;
@@ -1277,6 +1364,10 @@ namespace dxvk {
       // revisit if codegen parity requires it (host check + runtime ladder).
       ir::CompileOptions compileOptions = { };
       ir::legalizeIr(builder, compileOptions);
+
+      // Record the output interpolant signature hash for the Phase-B linkage key
+      // (this VS's outputs are what a paired PS reconciles against, doc 03 §2b/§2d).
+      m_outputIoHash = hashOutputIoMap(builder);
 
       // Serialize + cache the legalized IR (doc 03 §1b step 5).
       ir::Serializer ser(builder);

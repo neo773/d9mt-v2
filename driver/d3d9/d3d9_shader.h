@@ -5,6 +5,7 @@
 #include <utility>
 #include <array>
 #include <string>
+#include <memory>
 #include <unordered_map>
 
 #include "d3d9_include.h"
@@ -51,9 +52,14 @@ namespace dxvk {
    *
    * One object per unique (SM3 bytecode + options). getMetallib() is the Phase-B
    * equivalent of DxvkIrShader::getCode — returns a metallib for a concrete
-   * (spec-state, linkage) pair instead of SPIR-V (doc 03 §1b step 5, §5). The
-   * linkage/spec parameters are passed as opaque cookies so no dxbc_spv type
-   * crosses this boundary.
+   * (spec-state, linkage) pair instead of SPIR-V (doc 03 §1b step 5, §5).
+   *
+   * Cross-stage linkage travels as the paired stage's *serialized IR* (opaque
+   * bytes) plus a precomputed IO hash, NOT a bare cookie: the FS side needs the
+   * VS's real output IoMap to run the VS<->PS interpolant reconciliation
+   * (resolveSemanticIo / resolveMismatchedIo, doc 03 §2b — the historical
+   * blackscreen / PSO-reject class). Deserialization happens inside the concrete
+   * backend, so no dxbc_spv type crosses this boundary.
    */
   class ID3D9MetalShaderBackend : public RcObject {
 
@@ -67,12 +73,38 @@ namespace dxvk {
     // Sampler + RT masks (D3D9CommonShader::GetShaderMask analogue).
     virtual D3D9MetalShaderMasks masks() const = 0;
 
-    // Phase-B: metallib for a given linkage/spec cookie pair. PHASE-D: returns {}.
-    //   linkageCookie — hash of prevStage + prevStageOutputs IoMap + flat/swizzle/
-    //                   dual-src/sample (reuse DxvkShaderLinkage::hash, doc 03 §2d).
+    // Opaque serialized Phase-A legalized IR of THIS stage. The paired stage's
+    // backend consumes it (via PairedStageIo::prevStageIr) to rebuild this
+    // stage's output IoMap for reconciliation. Empty if Phase-A failed. The
+    // bytes are dxbc_spv-serialized IR but are treated as opaque here.
+    virtual const std::vector<uint8_t>& serializedIr() const = 0;
+
+    // Stable 64-bit hash of this stage's OUTPUT interpolant signature (the
+    // location+semantic IoMap of the shader outputs). Forms the pairedStageIoHash
+    // component of the Phase-B metallib cache key, so a PS only recompiles when
+    // the VS it pairs with actually changes its output layout. 0 if no outputs.
+    virtual uint64_t outputIoHash() const = 0;
+
+    // Cross-stage linkage descriptor for Phase-B (mirrors DxvkShaderLinkage's
+    // prevStage / prevStageOutputs, doc 03 §1c). Neutral: carries the paired
+    // (previous) stage's serialized IR + its outputIoHash + D3D9 semantic match.
+    // A default-constructed value (prevStageIr == nullptr) requests the unpaired
+    // default compile — flat-interp fixups only, no VS<->PS reconciliation.
+    struct PairedStageIo {
+      const std::vector<uint8_t>* prevStageIr    = nullptr; // paired prev-stage IR, or null
+      uint64_t                    prevStageIoHash = 0u;     // == prev stage outputIoHash()
+      bool                        matchSemantics  = true;   // D3D9 uses semantic-based IO
+    };
+
+    // Phase-B: metallib for a given (paired-stage linkage, spec-state) pair.
+    // For a fragment shader with a non-null paired VS IR, runs resolveSemanticIo
+    // + resolveMismatchedIo (per upstream DxvkIrShader::getCode) before the AIR
+    // thunk when the stages are I/O-incompatible. Result is cached inside the
+    // backend on (prevStageIoHash, specStateHash) — the shared bytecodeHash is
+    // implicit in the object identity.
     //   specStateHash — hash of the referenced D3D9SpecData bytes.
-    virtual std::vector<uint8_t> getMetallib(uint64_t linkageCookie,
-                                             uint64_t specStateHash) = 0;
+    virtual std::vector<uint8_t> getMetallib(const PairedStageIo& paired,
+                                             uint64_t             specStateHash) = 0;
   };
 
   /**
@@ -172,6 +204,16 @@ namespace dxvk {
     Sha1Hash       m_sha   = { };
   };
 
+  // Shared per-common-shader cache of link-time-reconciled Metal shader
+  // functions, keyed on the paired (previous) stage's outputIoHash. Held via a
+  // shared_ptr so all value-copies of a D3D9CommonShader (module set, shader
+  // objects) share one cache + mutex — the expensive metallib compile itself is
+  // cached in the shared backend, this only memoizes the metallib->function wrap.
+  struct D3D9ShaderLinkageCache {
+    dxvk::mutex                                      mutex;
+    std::unordered_map<uint64_t, Rc<MtlShaderFunction>> functions;
+  };
+
   /**
    * \brief Common shader object
    *
@@ -191,8 +233,22 @@ namespace dxvk {
       const D3D9ShaderCreateInfo&     ModuleInfo,
       const void*                     pShaderBytecode);
 
+    // Unpaired default shader function (flat-interp fixups only). Used for the VS,
+    // for the FF path, and as a fallback when no paired stage is available.
     Rc<MtlShaderFunction> GetShader() const {
       return m_shader;
+    }
+
+    // Link-time reconciled shader function for a concrete previous stage (doc 03
+    // §2b). For a fragment shader this compiles + caches the VS<->PS interpolant-
+    // reconciled metallib for pPrevStage's output layout; for any other case it
+    // returns the unpaired GetShader(). Threaded at draw/PSO time (PrepareDraw).
+    Rc<MtlShaderFunction> GetShaderForLinkage(const D3D9CommonShader* pPrevStage) const;
+
+    // Output interpolant IO hash (VS side); 0 if no backend / no outputs. Used by
+    // the draw-time linkage guard to detect when the paired layout changes.
+    uint64_t GetOutputIoHash() const {
+      return m_backend != nullptr ? m_backend->outputIoHash() : 0u;
     }
 
     std::string GetName() const {
@@ -216,9 +272,16 @@ namespace dxvk {
 
   private:
 
-    D3D9ShaderAnalysis    m_analysis;
-    Rc<MtlShaderFunction> m_shader;
-    std::string           m_name;
+    D3D9ShaderAnalysis          m_analysis;
+    Rc<MtlShaderFunction>       m_shader;
+    std::string                 m_name;
+
+    // Kept alive so Phase-B linkage variants can be compiled on demand at
+    // draw/PSO time. The backend owns the (prevIoHash, spec)->metallib cache; it
+    // is shared across all value-copies of this common shader (Rc semantics).
+    Rc<ID3D9MetalShaderBackend> m_backend;
+    D3D9DeviceEx*               m_device = nullptr;
+    std::shared_ptr<D3D9ShaderLinkageCache> m_linkageCache;
 
   };
 
