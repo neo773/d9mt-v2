@@ -135,6 +135,30 @@ always writes point_size). TWO REMAINING RENDER BUGS:
    C:/d9mt-test/rt_dump.bin; a host script reads it + checks pixels. This is
    the reliable autonomous verifier for the whole test ladder AND GTA.
 
+## 4c. THE LAST BUG (2026-07-11): missing Metal 4 barriers
+
+Verified live for code_shader: MVP is identity at the correct AIR slot (11),
+tint white (14), vertex stream bound (stream 0, stride 16, valid gpuAddress,
+2 attrs) — everything correct — yet 0 covered fragments (rt_dump = pure clear
+color). ROOT CAUSE: **Metal 4 resources are UNTRACKED and the backend emits
+ZERO barriers.** The DEFAULT-pool vertex buffer is Private; its data is
+uploaded at Unlock via FlushBuffer -> ctx->copyBuffer (an MTL4 compute-encoder
+copyFromBufferToBuffer). The later draw (render encoder) reads that VB WITHOUT
+a barrier, so the GPU does not guarantee the compute write is visible -> the
+VS reads stale/empty vertices -> degenerate (zero-area) triangle. Same class
+affects RT->texture sampling, the present backbuffer->drawable copy, etc.
+
+FIX: add cross-encoder Metal 4 barriers. The bridge has only within-encoder
+memory barriers (WMTCompute/RenderCommandMemoryBarrier); ADD an
+MTL4CommandBuffer-level barrier (barrierAfterStages:beforeQueueStages:
+visibilityOptions:, per the translating-to-metal4-api / managing-metal4-
+synchronization skills) as an additive bridge entry, and place it in the
+backend: after buffer/texture upload copies before the consuming draw; after
+a render pass that writes an RT before it is sampled; before the present copy.
+Simplest-correct first (coarse queue barrier after each compute copy so
+subsequent render sees writes), optimize later. Verify with the readback:
+code_shader must show a non-clear-color triangle (RGB interpolated) at center.
+
 ## 5. Build & run
 
 - Shader diff suite: `bash scripts/run-air-diff.sh` (46 cases, must stay green).
