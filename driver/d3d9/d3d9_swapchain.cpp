@@ -604,10 +604,18 @@ namespace dxvk {
         // The backend presenter blits the current back buffer (cSrcView) into the
         // acquired drawable; here we wire the acquire/release drawable semaphores
         // to the submit (synchronizeWsi, contract 3e), commit, and present.
-        (void)cSrcView;
+        // Copy the app's rendered back buffer into the acquired drawable
+        // before presenting (D3D9 Present = backbuffer -> front/drawable).
+        if (cSrcView != nullptr && cSrcView->image != nullptr && cDrawable.texture != nullptr) {
+          MtlSize extent = cSrcView->image->extent;
+          ctx->copyTexture(
+            cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
+            cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+        }
         ctx->synchronizeWsi(cDrawable.sync);
         ctx->flushCommandList(nullptr, nullptr);
         cPresenter->present(cDrawable);
+        Logger::debug("D3D9: frame presented");
 
         // Frame-latency signalling (contract 3e — deadlock-class). The real signal
         // is posted from the presenter's drawable-present completion handler; we

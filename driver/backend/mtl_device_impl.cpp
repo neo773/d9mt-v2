@@ -134,7 +134,9 @@ namespace dxvk::backend {
     texInfo.width = info.extent.width;
     texInfo.height = info.extent.height;
     texInfo.depth = info.extent.depth;
-    texInfo.array_length = info.cube ? info.arrayLayers : (info.arrayLayers > 1u ? info.arrayLayers : 0u);
+    /* Metal requires arrayLength >= 1 even for non-array textures; cube uses
+     * the declared face/array count. */
+    texInfo.array_length = info.arrayLayers > 0u ? info.arrayLayers : 1u;
     texInfo.type = wmtTextureType(info);
     texInfo.mipmap_level_count = info.mipLevels;
     texInfo.sample_count = info.sampleCount;

@@ -1,3 +1,4 @@
+#include <cstdio>
 /* d9mtair.so: unix side. Deserializes dxbc-spirv IR, runs AirBuilder
  * (LLVM 15, statically linked, x86_64 Mach-O), returns metallib bytes.
  *
@@ -56,6 +57,8 @@ int compileImpl(d9mt_air_compile_params* p) {
   try {
     metallib = airBuilder.buildMetallib();
   } catch (const std::exception& e) {
+    FILE* f = fopen("/tmp/d9mtair_err.log", "a");
+    if (f) { fprintf(f, "AirBuilder rejected: %s\n", e.what()); fclose(f); }
     p->ret_status = D9MT_AIR_UNSUPPORTED;
     return 0;
   }

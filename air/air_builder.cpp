@@ -1069,6 +1069,9 @@ struct AirBuilderImpl {
       case ir::OpCode::eIShl: return emitIBin(op, Instruction::Shl);
       case ir::OpCode::eUShr: return emitIBin(op, Instruction::LShr);
       case ir::OpCode::eSShr: return emitIBin(op, Instruction::AShr);
+      case ir::OpCode::eUBitExtract: return emitBitExtract(op, false);
+      case ir::OpCode::eSBitExtract: return emitBitExtract(op, true);
+      case ir::OpCode::eIBitInsert:  return emitBitInsert(op);
       case ir::OpCode::eINeg:
         setValue(op, b->CreateNeg(getValue(operandDef(op, 0u))));
         return;
@@ -1136,6 +1139,47 @@ struct AirBuilderImpl {
   void emitIBin(const ir::Op& op, Instruction::BinaryOps kind) {
     setValue(op, b->CreateBinOp(kind,
       getValue(operandDef(op, 0u)), getValue(operandDef(op, 1u))));
+  }
+
+  /* OpBitFieldU/SExtract: extract `count` bits at `offset`, zero/sign filled.
+   * Double-shift form (folds to a shift+and for constant fields, e.g. the
+   * 8-bit D3DCOLOR lanes the legacy-input lowering emits). */
+  void emitBitExtract(const ir::Op& op, bool sign) {
+    Value* base   = getValue(operandDef(op, 0u));
+    Value* offset = getValue(operandDef(op, 1u));
+    Value* count  = getValue(operandDef(op, 2u));
+    Type*  ty     = base->getType();
+    Value* width  = ConstantInt::get(ty, ty->getIntegerBitWidth());
+    Value* zero   = ConstantInt::get(ty, 0u);
+
+    Value* left  = b->CreateSub(width, b->CreateAdd(offset, count));
+    Value* shl   = b->CreateShl(base, left);
+    Value* right = b->CreateSub(width, count);
+    Value* res   = sign ? b->CreateAShr(shl, right) : b->CreateLShr(shl, right);
+    /* count == 0 => 0 (shift-by-width is UB in LLVM) */
+    res = b->CreateSelect(b->CreateICmpEQ(count, zero), zero, res);
+    setValue(op, res);
+  }
+
+  /* OpBitFieldInsert: replace bits [offset, offset+count) of base with the
+   * low `count` bits of insert. */
+  void emitBitInsert(const ir::Op& op) {
+    Value* base   = getValue(operandDef(op, 0u));
+    Value* insert = getValue(operandDef(op, 1u));
+    Value* offset = getValue(operandDef(op, 2u));
+    Value* count  = getValue(operandDef(op, 3u));
+    Type*  ty     = base->getType();
+    Value* one    = ConstantInt::get(ty, 1u);
+
+    Value* countMask = b->CreateSub(b->CreateShl(one, count), one);   // (1<<count)-1
+    Value* mask      = b->CreateShl(countMask, offset);
+    Value* keep      = b->CreateAnd(base, b->CreateNot(mask));
+    Value* ins       = b->CreateAnd(b->CreateShl(insert, offset), mask);
+    Value* res       = b->CreateOr(keep, ins);
+    /* count == 0 => base unchanged */
+    res = b->CreateSelect(
+      b->CreateICmpEQ(count, ConstantInt::get(ty, 0u)), base, res);
+    setValue(op, res);
   }
 
   void emitFCmp(const ir::Op& op, CmpInst::Predicate pred) {
