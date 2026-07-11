@@ -91,6 +91,10 @@ namespace dxvk {
       return MtlBufferSlice(m_buffer, m_offset + offset, length);
     }
 
+    // CPU pointer at (slice origin + offset) (was DxvkBufferSlice::mapPtr).
+    // Defined after MtlBuffer.
+    void* mapPtr(MtlDeviceSize offset) const;
+
   private:
 
     Rc<MtlBuffer> m_buffer = nullptr;
@@ -218,6 +222,10 @@ namespace dxvk {
     friend class MtlDevice;
   };
 
+  inline void* MtlBufferSlice::mapPtr(MtlDeviceSize offset) const {
+    return m_buffer ? m_buffer->mapPtr(m_offset + offset) : nullptr;
+  }
+
   // Image metadata the frontend reads back through image->info() (was
   // DxvkImageCreateInfo, the subset d3d9/ touches). Populated by
   // MtlDevice::createImage; PHASE-E: backend fills every field from the real
@@ -291,6 +299,10 @@ namespace dxvk {
     MtlStagingBuffer() = default;   // value member of D3D9DeviceEx (was DxvkStagingBuffer)
     MtlStagingBuffer(Rc<MtlBuffer> buffer, MtlDeviceSize size)
     : m_buffer(std::move(buffer)), m_size(size) { }
+
+    // Device-driven ctor (was DxvkStagingBuffer(device, size)); allocates the
+    // backing shared buffer from the device. Defined in mtl_device.h.
+    MtlStagingBuffer(const Rc<MtlDevice>& device, MtlDeviceSize size);
 
     MtlBufferSlice alloc(MtlDeviceSize size, MtlDeviceSize align = 256u) {
       MtlDeviceSize offset = (m_offset + align - 1u) & ~(align - 1u);

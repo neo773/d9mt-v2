@@ -66,15 +66,18 @@ namespace dxvk {
     D3D9FFShaderModuleSet() = default;
 
     template<D3D9ShaderType Stage>
-    Rc<ID3D9MetalShaderBackend> GetShader() {
-      // PHASE-D: return the precompiled FF uber-shader for this stage.
+    Rc<MtlShaderFunction> GetShader() {
+      // PHASE-D: return the precompiled FF uber-shader for this stage. Typed as the
+      // seam's MtlShaderFunction so it feeds MtlContext::bindShader directly (matches
+      // D3D9CommonShader::GetShader()); the neutral ID3D9MetalShaderBackend factory
+      // will produce these once the FF metallib is authored.
       return Stage == D3D9ShaderType::VertexShader ? m_vs : m_fs;
     }
 
   private:
 
-    Rc<ID3D9MetalShaderBackend> m_vs;
-    Rc<ID3D9MetalShaderBackend> m_fs;
+    Rc<MtlShaderFunction> m_vs;
+    Rc<MtlShaderFunction> m_fs;
 
   };
 

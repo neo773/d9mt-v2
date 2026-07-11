@@ -646,3 +646,75 @@ dependency order (unchanged from C-7 items 2–5, now with the mechanical layer 
 graph (format_helpers stub, stateblock, vertex_declaration, monitor) DONE + fatal + Vk-free.
 device.cpp mechanical layer done (banked). d3d9.dll does **NOT** yet LINK — the
 device.cpp semantic body + swapchain + interface/main remain (the standing multi-session port).
+
+## Phase C-9 — d3d9_device.cpp SEMANTIC PORT COMPLETE (fatal CORE) (2026-07-11, solo)
+
+Resumed from the banked mechanical-layer. **d3d9_device.cpp (9171 lines) now compiles
+FATAL-clean** (`-fsyntax-only` exit 0) and is **promoted to CORE**. From-scratch
+`bash scripts/build-driver.sh` is **GREEN: 59 CORE TUs**, libdriver_core.a ~24.9 MB,
+**Vulkan gate PASS** (all remaining Vk/vulkan hits in device.cpp are comments). 66 EmitCs
+sites preserved; 24 `// PHASE-E` markers logged in-file.
+
+### Error-class fix counts (the ~440 semantic errors, by class)
+- **VK_* / Vk* mechanical remainder** (~120): index/aspect/resolve/sample constants →
+  Mtl enums; VkOffset3D→MtlOrigin, VkImageResolve→MtlResolveRegion, VkImageSubresource*→
+  MtlSubresource*, VkDraw*IndirectCommand→MtlDraw*Args, VkImageBlit→local MtlBlitRegion.
+- **Field-name deltas** (~70): `.aspectMask→.aspects`, `.arrayLayer/.baseArrayLayer→.baseLayer`,
+  `->blockSize.{w,h}→blockWidth/Height` (+ `util::formatBlockSize`), `.mipIndex→.baseMip`,
+  `.layerIndex→.baseLayer`, `.minDepthBounds→.minDepth`, `.allocatedTotal/.allocatedSinceLastReset→
+  .allocated`, `->mapPtr()→->mapPtr`, `.depthBias{Constant,Slope,Clamp}→.{constantFactor,slopeFactor,clamp}`.
+- **DXVK setter-API state structs** (~40): BindBlend/DepthStencil/Rasterizer/Multisample/Sampler
+  rebuilt — enriched the seam Mtl* structs with the fluent `set*`/getter methods so the
+  frontend stayed a token-swap (mtl_types.h).
+- **Signature-changed ctx-> calls**: setInputLayout→setVertexLayout (DxvkVertexInput split into
+  MtlVertexAttr+MtlVertexLayout arrays), setInputAssemblyState→setPrimitiveTopology,
+  setSpecConstants→setFunctionConstants(MtlPipeline::Graphics), copyImage→copyTexture,
+  transformImage (2 layout args dropped), blitTextureView corners (MtlOffset3D[2]).
+- **Barrier/feedback-loop path**: EmitFeedbackLoopBarriers + EnsureImageCompatibility rewritten
+  onto `emitGraphicsBarrier(MtlStageMask,MtlBarrierScope,…)` + the RT feedback mask;
+  m_hazardLayout / VkImageLayout / VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_* deleted.
+- **Dropped-member deletions**: m_dxvkShaderOptions/DxvkShaderCompileFlag (GetShaderOptions),
+  m_depthBiasRepresentation + VK_EXT_depth_bias_control block, m_hazardLayout, D3D9ShaderCreateInfo.
+  irCreateInfo, the ID3D9VkInteropDevice / IDirect3DDevice9On12 QI cases (m_d3d9Interop/m_d3d9On12).
+- **DxvkShaderHash→D3D9ShaderModuleKey**: rebuilt from `Sha1Hash::compute(chunks)` + MtlShaderStage.
+- **PHASE-E whole-body neuters** (no Metal analogue): ProcessVertices SWVP geometry-shader
+  stream-out (Metal has no GS/transform-feedback → compute-prepass rewrite), the BC block-
+  reinterpret clear + planar-YUV conversion branch (dead: conversion formats Invalid),
+  EnsureSamplerLimit (no Vulkan sampler-pool cap), 9On12 submit-status handshake, D3DKMT
+  shared-resource kmtLocal handles, device features()/properties()/adapter()/perfHints()/
+  getSamplerStats()/waitForSubmission() probes.
+
+### Seam enrichments this session (driver/mtl — mine per coordination rule)
+- **mtl_resource.h**: MtlTexture gains `MtlImageInfo m_info` + `info()`/`mipLevelExtent()`/
+  `formatInfo()`/`createView()` (+ `m_device`); MtlBufferSlice gains `subSlice()`/`mapPtr()`;
+  MtlResource gains `isInUse()`; MtlImageViewKey gains `viewType`/`packedSwizzle`/`packSwizzle()`;
+  new MtlTexelBufferViewKey.
+- **mtl_types.h**: MtlColor4→VkClearColorValue-shaped union (`float32`/`uint32`/`r,g,b,a`);
+  MtlExtent3D/MtlSize interop ctors + `==`/`!=`; MtlOrigin/MtlExtent2D `==`; MtlFormatInfo gains
+  `planes[]`+MtlFormatFlagMultiPlane; the Mtl{Rasterizer,Multisample,Stencil,DepthStencil,Blend}State
+  fluent setter/getter API + MtlRasterizerState.{flatShading,sampleCount} + MtlDepthStencilState.depthTest.
+- **mtl_device.h**: MtlInstance gains `config()`/`setConfig()`; MtlTexture::createView +
+  MtlStagingBuffer(device,size) out-of-line defs.
+- **mtl_context.h**: `using MtlSignal = sync::Signal` (so Rc<sync::Fence> fences feed ctx->signal);
+  MtlLatencyTracker::needsAutoMarkers().
+- **NEW util/util_image_math.h**: dxvk::util:: block/mip geometry helpers (computeBlockCount/Offset/
+  Extent, computeMipLevelExtent/Offset, snapExtent3D, formatBlockSize, packImageData) + PHASE-E
+  encodeClearBlockValue. ZERO Vulkan.
+- **d3d9_fixed_function.h**: D3D9FFShaderModuleSet::GetShader/m_vs/m_fs retyped
+  ID3D9MetalShaderBackend→MtlShaderFunction (align with the bindShader seam + D3D9CommonShader).
+
+### PHASE-C9-CHECKPOINT — remaining to LINK
+Build GREEN at 59 CORE TUs, gate PASS. build-driver.sh CORE list adds device.cpp unconditionally +
+`[ -f ]`-guards swapchain/interface/main so it stays green until they land. d3d9.dll link frontier
+(objdump of the attempt): **20 unexported def entries + 39 undefined refs**, all now concentrated in:
+1. **d3d9_swapchain.cpp** — REWRITE onto MtlPresenter (header d3d9_swapchain.h fully ported; ~1500-line
+   body remains — a device.cpp-scale port). Resolves all D3D9SwapChainEx::* refs.
+2. **d3d9_interface.cpp** — D3D9InterfaceEx (ValidatePresentationParameters{,Ex}, adapter enum, device
+   create) + the D3D9Options ctor consumer. Medium.
+3. **d3d9_main.cpp** — the 20 d3d9.def exports (Direct3DCreate9{,Ex}, D3D9on12, D3DPERF_*, DebugSet*,
+   DXVK_*RegisterAnnotation, PSGP*); instantiates D3D9InterfaceEx — do LAST.
+4. **Seam-stub gaps** (checkpoint list, minimal+logged): D3D9GlobalAnnotationList::s_instance,
+   logQueryInterfaceError/operator<<(GUID) (com_guid.cpp firewall), MemoryFilePool::* (util_unmap.cpp),
+   D3D9State<> ctor/dtor + D3D9ShaderModuleSet::GetShaderModule + DxvkD3D8Bridge (their .cpp into CORE).
+   `_imp__MTLDevice_*` winemetal imports come from driver/backend (concurrent agent) — link against
+   the mtl_*_stub seam only if absent.

@@ -5,6 +5,7 @@
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
+#include "../util/config/config.h"
 
 // ---------------------------------------------------------------------------
 // mtl_device.h — the resource-factory surface of the backend.
@@ -159,6 +160,15 @@ namespace dxvk {
     return m_device ? m_device->createImageView(Rc<MtlTexture>(this), key) : nullptr;
   }
 
+  inline MtlStagingBuffer::MtlStagingBuffer(const Rc<MtlDevice>& device, MtlDeviceSize size) {
+    MtlBufferCreateInfo info = { };
+    info.size      = size;
+    info.usage     = MtlUsage::Staging;
+    info.cpuAccess = MtlCpuAccess::Write;
+    m_buffer = device ? device->createBuffer(info) : nullptr;
+    m_size   = size;
+  }
+
   /**
    * \brief Adapter (was DxvkAdapter): one per MTLDevice.
    *
@@ -187,6 +197,14 @@ namespace dxvk {
     virtual uint32_t adapterCount() const;
 
     virtual Rc<MtlAdapter> enumAdapters(uint32_t index);
+
+    /* Parsed dxvk.conf / d3d9.conf (was DxvkInstance::config). The interface
+     * populates it at creation; the device reads it for D3D9Options. */
+    const Config& config() const { return m_config; }
+    void setConfig(const Config& config) { m_config = config; }
+
+  protected:
+    Config m_config;
   };
 
 }

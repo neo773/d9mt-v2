@@ -101,6 +101,12 @@ CORE+=("$DRV"/d3d9/d3d9_constant_buffer.cpp)
 CORE+=("$DRV"/d3d9/d3d9_adapter.cpp "$DRV"/d3d9/d3d9_multithread.cpp \
        "$DRV"/d3d9/d3d9_stateblock.cpp "$DRV"/d3d9/d3d9_vertex_declaration.cpp \
        "$DRV"/d3d9/d3d9_monitor.cpp)
+# Phase C-9 STAGE-2: the device linchpin (semantic port onto the Mtl seam) + the
+# swapchain (MtlPresenter) + interface/main (the 20 d3d9.def COM exports).
+CORE+=("$DRV"/d3d9/d3d9_device.cpp)
+[ -f "$DRV"/d3d9/d3d9_swapchain.cpp ] && CORE+=("$DRV"/d3d9/d3d9_swapchain.cpp)
+[ -f "$DRV"/d3d9/d3d9_interface.cpp ] && CORE+=("$DRV"/d3d9/d3d9_interface.cpp)
+[ -f "$DRV"/d3d9/d3d9_main.cpp ] && CORE+=("$DRV"/d3d9/d3d9_main.cpp)
 # Phase C-5 STAGE-1 probe: header-only TU proving the ported device-graph headers
 #   (common_buffer/common_texture/resource/subresource/surface/volume/buffer/query)
 #   form a closed, Vulkan-free compile unit on the Mtl seam. Grows as device.h /

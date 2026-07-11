@@ -270,6 +270,11 @@ namespace dxvk {
     MtlSize() = default;
     MtlSize(uint32_t w, uint32_t h, uint32_t d) : width(w), height(h), depth(d) { }
     MtlSize(const MtlExtent3D& e);   // defined after MtlExtent3D
+
+    bool operator == (const MtlSize& o) const {
+      return width == o.width && height == o.height && depth == o.depth;
+    }
+    bool operator != (const MtlSize& o) const { return !(*this == o); }
   };
 
   struct MtlOffset3D { // signed 3D point for blit corners

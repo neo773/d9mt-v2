@@ -8,6 +8,7 @@
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
+#include "../util/sync/sync_signal.h"   // sync::Signal / sync::Fence (CPU-visible signal)
 
 // ---------------------------------------------------------------------------
 // mtl_context.h — the frontend<->backend seam.
@@ -79,7 +80,10 @@ namespace dxvk {
     virtual MtlGpuEventStatus test();
   };
 
-  class MtlSignal        : public RcObject { };   // CPU-visible MTLSharedEvent
+  // CPU-visible signal the GPU bumps on completion (was DxvkSignal = sync::Signal).
+  // Aliased to the util CPU signal so the frontend's Rc<sync::Fence> staging /
+  // submission fences pass straight into ctx->signal().
+  using MtlSignal = sync::Signal;
   class MtlLatencyTracker: public RcObject {      // Reflex-style markers (thin)
   public:
     // Whether the frontend should emit per-draw latency markers. PHASE-E: Reflex.
