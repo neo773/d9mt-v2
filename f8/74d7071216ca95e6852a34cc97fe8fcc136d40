@@ -1,0 +1,63 @@
+driver/backend/mtl_device_impl.cpp
+  s_099954a5f894ee::t_a72aec979109cd 85-88
+driver/backend/mtl_context_impl.cpp
+  s_099954a5f894ee::t_8223546dbcbbff 5,10-13,33-57,69-87,95-98,109-120,135-140,164-165,176-178,180,184-188,252,267,283,286,290-300,456-462,469-470,472-475,477-491,510-511,516-518
+driver/backend/mtl_submission.h
+  s_099954a5f894ee::t_8769527bd5ad56 37-41
+bridge/unix/winemetal_unix.c
+  s_099954a5f894ee::t_27be21a07ce8b0 6087-6094
+  s_099954a5f894ee::t_79b15306c94c7c 6537
+  s_099954a5f894ee::t_da93731e792c4e 6538
+  s_099954a5f894ee::t_83d8ffa9cc2813 6095-6103
+  s_099954a5f894ee::t_5d44f4178c1b95 6316
+  s_099954a5f894ee::t_d19cc8903cf4da 6317
+driver/backend/mtl_device_impl.h
+  s_099954a5f894ee::t_b8b5c63d60c947 107-109
+  s_099954a5f894ee::t_eed230cd541fa5 122-124
+  s_099954a5f894ee::t_4cc6240493603a 25-31
+driver/backend/mtl_context_impl.h
+  s_099954a5f894ee::t_bbbd856c1d9689 208-215
+  s_099954a5f894ee::t_778f586109f000 307-309,311-316,318,320
+  s_099954a5f894ee::t_3830f6c6535b15 249,256,259-268
+  s_099954a5f894ee::t_db146c9e39e10b 24-34,37-41,43-49
+  s_099954a5f894ee::t_5e0d31402b12f8 59-62,64-68
+  s_099954a5f894ee::t_a809caac182705 269
+bridge/winemetal_thunks.c
+  s_099954a5f894ee::t_b2db8427f9175d 1788-1797
+  s_099954a5f894ee::t_c57019e2119255 1780-1787
+bridge/winemetal.h
+  s_099954a5f894ee::t_6e2a089a65f664 2289-2294
+  s_099954a5f894ee::t_898ea2860e0077 2282-2288
+driver/backend/mtl_pso_cache.cpp
+  s_099954a5f894ee::t_e36e69381e1d66 32-33,36,49
+  s_099954a5f894ee::t_b993228ec5e28d 61-73,89,116
+  s_099954a5f894ee::t_5ac7491bdfa210 2-7
+bridge/winemetal_thunks.h
+  s_099954a5f894ee::t_5376151ed7d772 493-498
+driver/backend/mtl_pso_cache.h
+  s_099954a5f894ee::t_97fc01eb8df527 91,94-95,98-99
+  s_099954a5f894ee::t_3e77723e6c9a73 7,14-16
+  s_099954a5f894ee::t_a2ff64eb0e928f 109,120-121
+driver/backend/mtl_submission.cpp
+  s_099954a5f894ee::t_4bac04eba89192 11,13
+driver/backend/mtl_context_impl2.cpp
+  s_099954a5f894ee::t_aaad36c0963220 9-13,83,89-91,141-142,144,148,155,160-161,164-165,172,174-175,180-181,184-185,188,194-195,198,204,207-209,216,224-225,228-235,254-259,265-266,269-271,273-278,288-289,291-302,305,307,311,320-326,340-350,360-369,379-388,396-409,418-422,458-459,461,493-495,511-513,524-526
+driver/backend/mtl_presenter_impl.h
+  s_099954a5f894ee::t_819e250c303973 6-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f874d7071216ca95e6852a34cc97fe8fcc136d40",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
