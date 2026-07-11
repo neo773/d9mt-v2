@@ -162,9 +162,12 @@ namespace dxvk::backend {
 
   void MtlContextImpl::synchronizeWsi(MtlPresenterSync sync) {
     /* Contract 3e + METAL 4 present handshake (decision 5): waitForDrawable
-     * BEFORE commit, signalDrawable + drawable present AFTER commit. */
-    if (m_presenter == nullptr) {
-      Logger::warn("MtlContextImpl: synchronizeWsi without presenter");
+     * BEFORE commit, signalDrawable + drawable present AFTER commit. The
+     * swapchain acquires the drawable, records the backbuffer blit into it,
+     * then hands it here via sync.drawable — this is the ONLY place the
+     * drawable is actually presented to the CAMetalLayer. */
+    if (sync.drawable == MtlNullHandle) {
+      Logger::warn("MtlContextImpl: synchronizeWsi without drawable");
       return;
     }
 
@@ -172,23 +175,14 @@ namespace dxvk::backend {
       closePass();
     ensureCommandBuffer();
 
-    MtlAcquiredDrawable image = m_presenter->acquireNextImage(sync.frameId);
-
     /* GPU-side wait: the drawable's backing texture must be released by the
      * display before this cmdbuf writes it. Enqueued before commit. */
-    if (image.valid && image.drawable)
-      MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), image.drawable);
+    MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
 
     submit(false);
 
-    if (image.valid && image.drawable) {
-      MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), image.drawable);
-      MetalDrawable_present(image.drawable);
-    }
-
-    if (image.valid)
-      m_presenter->present(image);
-    m_presenter->signalFrameLatency(sync.frameId);
+    MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
+    MetalDrawable_present(sync.drawable);
   }
 
   // --- render pass (decision 1) ---------------------------------------------

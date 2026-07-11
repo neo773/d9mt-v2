@@ -701,10 +701,30 @@ namespace dxvk {
         // Copy the app's rendered back buffer into the acquired drawable
         // before presenting (D3D9 Present = backbuffer -> front/drawable).
         if (cSrcView != nullptr && cSrcView->image != nullptr && cDrawable.texture != nullptr) {
-          MtlSize extent = cSrcView->image->extent;
-          ctx->copyTexture(
-            cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
-            cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+          /* Clamp to min(backbuffer, drawable): the CAMetalLayer drawable can
+           * be smaller than the app backbuffer, and an over-sized copy is an
+           * out-of-bounds fault that hangs the GPU. */
+          const MtlSize src = cSrcView->image->extent;
+          const MtlSize dst = cDrawable.texture->extent;
+          MtlSize extent = {
+            std::min(src.width,  dst.width  ? dst.width  : src.width),
+            std::min(src.height, dst.height ? dst.height : src.height),
+            1u };
+          /* A zero-sized copy is a Metal API violation (NSException — kills the
+           * process); it also means the extents above are broken — log it. */
+          if (extent.width == 0u || extent.height == 0u) {
+            static bool warned = false;
+            if (!warned) {
+              warned = true;
+              Logger::warn(str::format("D3D9SwapChainEx: present copy extent is zero"
+                " (src=", src.width, "x", src.height,
+                " dst=", dst.width, "x", dst.height, ") — skipping copy"));
+            }
+          } else {
+            ctx->copyTexture(
+              cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
+              cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+          }
         }
         ctx->synchronizeWsi(cDrawable.sync);
         ctx->flushCommandList(nullptr, nullptr);

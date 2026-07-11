@@ -3661,6 +3661,9 @@ _MetalDrawable_texture(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   id<MTLTexture> texture = [(id<CAMetalDrawable>)params->handle texture];
   params->ret = (obj_handle_t)texture;
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] drawable_texture drawable=%p -> tex=%p\n",
+            (void *)params->handle, (void *)texture);
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && texture) {
     struct WMTTextureInfo info;
@@ -3688,10 +3691,30 @@ _MetalDrawable_texture(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* D9MT_WSILOG=1: trace the unix-side present path to stderr (counts + handles)
+ * so we can tell whether PE-side calls actually arrive here. */
+static int d9mt_wsilog_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *v = getenv("D9MT_WSILOG");
+    cached = (v && v[0] == '1') ? 1 : 0;
+  }
+  return cached;
+}
+#define D9MT_WSILOG(fmt, ...) do { \
+    if (d9mt_wsilog_enabled()) \
+      fprintf(stderr, "D9MT-WSI[unix] " fmt "\n", ##__VA_ARGS__); \
+  } while (0)
+
 static NTSTATUS
 _MetalLayer_nextDrawable(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(CAMetalLayer *)params->handle nextDrawable];
+  static _Atomic unsigned n_next;
+  unsigned k = n_next++;
+  if (k < 16 || (k % 100) == 0)
+    D9MT_WSILOG("nextDrawable #%u layer=%p -> %p", k,
+                (void *)params->handle, (void *)params->ret);
   return STATUS_SUCCESS;
 }
 
@@ -5670,6 +5693,12 @@ _MTL4CommandQueue_commit(void *obj) {
   NSUInteger count = (NSUInteger)params->count;
   /* obj_handle_t is a uint64 id-bitpattern; MTL4 commit wants a contiguous
    * id<MTL4CommandBuffer>[] — reinterpret the handle array in place. */
+  if (getenv("D9MT_WSILOG")) {
+    static _Atomic unsigned n_commit;
+    unsigned k = n_commit++;
+    if (k < 24 || (k % 100) == 0)
+      fprintf(stderr, "D9MT-WSI[unix] queue_commit #%u count=%lu\n", k, (unsigned long)count);
+  }
   [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
   return STATUS_SUCCESS;
 }
@@ -5677,6 +5706,10 @@ _MTL4CommandQueue_commit(void *obj) {
 static NTSTATUS
 _MTL4CommandQueue_waitForDrawable(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
+  static _Atomic unsigned n_wait;
+  unsigned k = n_wait++;
+  if (k < 16 || (k % 100) == 0)
+    D9MT_WSILOG("waitForDrawable #%u drawable=%p", k, (void *)params->arg);
   [(id<MTL4CommandQueue>)params->handle waitForDrawable:(id<MTLDrawable>)params->arg];
   return STATUS_SUCCESS;
 }
@@ -5684,6 +5717,10 @@ _MTL4CommandQueue_waitForDrawable(void *obj) {
 static NTSTATUS
 _MTL4CommandQueue_signalDrawable(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
+  static _Atomic unsigned n_sig;
+  unsigned k = n_sig++;
+  if (k < 16 || (k % 100) == 0)
+    D9MT_WSILOG("signalDrawable #%u drawable=%p", k, (void *)params->arg);
   [(id<MTL4CommandQueue>)params->handle signalDrawable:(id<MTLDrawable>)params->arg];
   return STATUS_SUCCESS;
 }
@@ -5940,6 +5977,10 @@ _MTL4ComputeCommandEncoder_copyFromTextureToTexture(void *obj) {
   MTLOrigin src_origin = { (NSUInteger)params->src_origin.x, (NSUInteger)params->src_origin.y, (NSUInteger)params->src_origin.z };
   MTLSize src_size = { (NSUInteger)params->src_size.width, (NSUInteger)params->src_size.height, (NSUInteger)params->src_size.depth };
   MTLOrigin dst_origin = { (NSUInteger)params->dst_origin.x, (NSUInteger)params->dst_origin.y, (NSUInteger)params->dst_origin.z };
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] copyTexTex enc=%p src=%p dst=%p %lux%lu ENTER\n",
+            (void *)params->encoder, (void *)params->src, (void *)params->dst,
+            (unsigned long)src_size.width, (unsigned long)src_size.height);
   [(id<MTL4ComputeCommandEncoder>)params->encoder copyFromTexture:(id<MTLTexture>)params->src
                                                      sourceSlice:(NSUInteger)params->src_slice
                                                      sourceLevel:(NSUInteger)params->src_level
@@ -5949,6 +5990,8 @@ _MTL4ComputeCommandEncoder_copyFromTextureToTexture(void *obj) {
                                                 destinationSlice:(NSUInteger)params->dst_slice
                                                 destinationLevel:(NSUInteger)params->dst_level
                                                destinationOrigin:dst_origin];
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] copyTexTex EXIT\n");
   return STATUS_SUCCESS;
 }
 
@@ -6088,6 +6131,10 @@ _MTLResidencySet_removeAllAllocations(void *obj) {
 static NTSTATUS
 _MetalDrawable_present(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+  static _Atomic unsigned n_pres;
+  unsigned k = n_pres++;
+  if (k < 16 || (k % 100) == 0)
+    D9MT_WSILOG("present #%u drawable=%p", k, (void *)params->handle);
   [(id<MTLDrawable>)params->handle present];
   return STATUS_SUCCESS;
 }

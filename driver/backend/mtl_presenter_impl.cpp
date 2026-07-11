@@ -51,13 +51,23 @@ namespace dxvk::backend {
         return image;   // occluded / no drawable this frame
 
       image.drawable = drawable;
+      image.sync.drawable = drawable;
 
       /* wrap the drawable's texture so the swapchain can render into it. The
        * drawable owns the texture; we hold a borrowed handle only. */
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
-      tex->texture.tex = MetalDrawable_texture(drawable);
+      obj_handle_t drawableTex = MetalDrawable_texture(drawable);
+      tex->texture.tex = drawableTex;
       tex->format      = m_desc.imageFormat;
-      tex->extent      = { m_desc.imageExtent.width, m_desc.imageExtent.height, 1u };
+      /* The CAMetalLayer sizes its drawables to the window, which under
+       * CrossOver can differ from the requested imageExtent. Record the ACTUAL
+       * drawable dimensions so the present copy clamps to them — copying the
+       * full backbuffer into a smaller drawable is an out-of-bounds copy that
+       * faults the GPU. */
+      uint32_t dw = uint32_t(MTLTexture_width(drawableTex));
+      uint32_t dh = uint32_t(MTLTexture_height(drawableTex));
+      tex->extent      = { dw ? dw : m_desc.imageExtent.width,
+                           dh ? dh : m_desc.imageExtent.height, 1u };
       image.texture    = tex;
       image.valid      = true;
       return image;
@@ -99,7 +109,11 @@ namespace dxvk::backend {
       props.drawable_height      = double(m_desc.imageExtent.height);
       props.opaque               = true;
       props.display_sync_enabled = m_desc.vsync;
-      props.framebuffer_only     = true;
+      /* The present path copies the app backbuffer INTO the drawable via a
+       * compute encoder (MTL4 has no blit encoder). A framebufferOnly drawable
+       * cannot be a copy destination — Metal rejects the copy. Must be NO so
+       * the drawable is copyable. */
+      props.framebuffer_only     = false;
       props.pixel_format         = wmtFormat(m_desc.imageFormat);
       MetalLayer_setProps(m_layer, &props);
     }

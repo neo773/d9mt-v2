@@ -498,6 +498,7 @@ namespace dxvk {
   struct MtlPresenterSync {
     MtlObjectHandle acquire = MtlNullHandle;   // drawable wait
     MtlObjectHandle release = MtlNullHandle;   // drawable signal
+    MtlObjectHandle drawable = MtlNullHandle;  // acquired CAMetalDrawable to present
     uint64_t        frameId = 0;
   };
 

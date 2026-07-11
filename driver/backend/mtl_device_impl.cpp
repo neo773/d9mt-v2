@@ -158,6 +158,7 @@ namespace dxvk::backend {
     texture->texture.tex = MtlObjectHandle(handle);
     texture->texture.generation = 0u;
     texture->format = info.format;
+    texture->extent = info.extent;
     texture->gpuResourceId = texInfo.gpu_resource_id;
     texture->info = info;
     return texture;
