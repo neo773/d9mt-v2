@@ -1,0 +1,37 @@
+driver/backend/mtl_context_impl.cpp
+  s_02998b4ed19c89::t_fae9842194eb99 165-170,180,184-185
+bridge/unix/winemetal_unix.c
+  s_02998b4ed19c89::t_63d0fb4d005592 5980-5983
+  s_02998b4ed19c89::t_a2626fff01e8d8 5993-5994
+  s_02998b4ed19c89::t_0d9a535746e584 6134-6137
+  s_02998b4ed19c89::t_2d5f4a9739db9d 3664-3666
+  s_02998b4ed19c89::t_93af92172a9588 5709-5712,5720-5723
+  s_02998b4ed19c89::t_c2d3583ed9f01c 5696-5701
+  s_02998b4ed19c89::t_332d0f051072f9 3694-3708,3713-3717
+driver/backend/mtl_presenter_impl.cpp
+  s_02998b4ed19c89::t_a33e4bd95c0684 54,59-60,62-70
+  s_02998b4ed19c89::t_d32ed41bbeb5b2 112-116
+driver/mtl/mtl_types.h
+  s_02998b4ed19c89::t_eb8c56c8b34d0b 501
+driver/backend/mtl_device_impl.cpp
+  s_02998b4ed19c89::t_d48505abe9f48a 161
+driver/d3d9/d3d9_swapchain.cpp
+  s_02998b4ed19c89::t_886843048b50ca 713-727
+  s_02998b4ed19c89::t_db7fb29ccfdb4b 704-712
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d2954a6d750b013d911b71e6ac271e50c7add389",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
