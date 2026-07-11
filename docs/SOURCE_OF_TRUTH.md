@@ -97,6 +97,44 @@ The ONLY path from the PE `d3d9.dll` to Metal is the `winemetal` unixlib
 programmable-shader; FF is conformance-tail only, do last), the test-exe
 ladder, GTA IV bring-up.
 
+## 4b. LIVE STATE (2026-07-11): Metal 4 backend RUNS; two render bugs
+
+`code_shader.exe` runs the full Metal 4 pipeline with no crash: device →
+context → swapchain → CAMetalLayer window → VS+PS AIR compile → MTL4Compiler
+PSO → MTL4 draw → present. Fixed on-device: d9mtair returns metallib into
+caller-provided PE buffers (32-bit PE can't read unix pointers); AirBuilder
+eU8/eI8 scalar types (D3DCOLOR unpack); PSO topology Unspecified (D3D9 VS
+always writes point_size). TWO REMAINING RENDER BUGS:
+
+1. **CBV slot-mapping (correctness — blocks the triangle).** The backend
+   binds constant buffers to Metal argument-table slot = the frontend's raw
+   `CbvIndex` (d3d9_shader.h: VSClipPlanes=0, VSFixedFunction=1, …,
+   VSStaticConstants=3=the cF/MVP float constants, PSShared=5). But the AIR
+   shader reads them at DIFFERENT Metal buffer indices (air_builder slot
+   assignment: eLegacyConstFloat/cF → buffer(0), other legacy builtins →
+   1,2,…, DclCbv → (haveBuiltins?8:0)+regIndex; vertex streams →
+   kVertexBufferBaseIndex=3+; push → 20). So cF (MVP) is bound at slot 3 but
+   the VS reads buffer(0) → wrong/zero MVP → no visible triangle; worse, a CBV
+   at slot 3 COLLIDES with vertex stream 0 (buffer 3). FIX: the backend must
+   bind each D3D9 constant buffer to the Metal slot the AIR shader actually
+   declares — use the d9mtair REFLECTION blob (buffer bindings carry index+
+   name; currently requested but unread in d3d9_shader_compiler getMetallib)
+   to build a per-shader CbvIndex→AIR-slot table, and thread it to
+   MtlContext binding. Guard currently skips CBVs with invalid storage
+   (mtl_context_impl2 flushResources) — that's a band-aid; the mapping is the
+   real fix. A fragment CBV (st=1 slot=0) was also binding a stale/garbage
+   buffer (size=29, storage=0x6) — likely a lifetime issue on a PS constant
+   buffer never Alloc'd; the reflection-driven binding (only bind CBVs the
+   shader declares) should also resolve it.
+
+2. **Pixel verification tooling.** screencapture + osascript window bounds is
+   unreliable (wine window on another Space / minimized / bounds query empty).
+   NEED a driver-side backbuffer readback: gated by a trigger file, after the
+   app's draws copy the backbuffer MtlTexture → a Read-storage buffer (MTL4
+   compute-encoder copyTextureToBuffer), flush+wait, write raw BGRA to
+   C:/d9mt-test/rt_dump.bin; a host script reads it + checks pixels. This is
+   the reliable autonomous verifier for the whole test ladder AND GTA.
+
 ## 5. Build & run
 
 - Shader diff suite: `bash scripts/run-air-diff.sh` (46 cases, must stay green).
