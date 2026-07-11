@@ -1,0 +1,66 @@
+scripts/dump-verify.sh
+  s_099954a5f894ee::t_7d9f75ee90165b 1-101
+air/air_builder.h
+  s_099954a5f894ee::t_d4eb31b0451a21 80-81
+driver/mtl/mtl_context.h
+  s_099954a5f894ee::t_15ce0a843fb871 54-59
+  s_099954a5f894ee::t_8abd8c5a7dd312 4
+driver/d3d9/d3d9_swapchain.cpp
+  s_099954a5f894ee::t_955c74fc1fef35 43
+  s_099954a5f894ee::t_3f10b1e3e345c0 19-20,23,26-34,38-42,44-48,58,60-68,71,73-79,87-105
+  s_099954a5f894ee::t_796228b09dcc54 35-37
+  s_099954a5f894ee::t_2440f0452171c2 21-22
+  s_099954a5f894ee::t_2e774754e0d006 69-70,72
+  s_099954a5f894ee::t_3f7cba59d95682 690-691
+  s_099954a5f894ee::t_4d4c084689fedc 52-53,56-57,59
+  s_099954a5f894ee::t_7a5efd851b99c2 696
+  s_099954a5f894ee::t_7a1d1bd7fc9b74 686-687,694-695,697
+  s_099954a5f894ee::t_9f363b8654792a 49-51,54-55
+  s_099954a5f894ee::t_67f8939d72f415 80-86
+  s_099954a5f894ee::t_8dfc4cd3666d17 106
+driver/d3d9/d3d9_shader.cpp
+  s_099954a5f894ee::t_f1c93bbd868b35 15-24
+  s_099954a5f894ee::t_381aba201d52cd 54,56,68-69
+  s_099954a5f894ee::t_c1a3cb41115e96 99-100,108-109,111,113
+air/air_builder.cpp
+  s_099954a5f894ee::t_f48892092635b3 2183-2184
+driver/d3d9/d3d9_shader_compiler.cpp
+  s_099954a5f894ee::t_9118fd12e8eb45 1217-1221
+  s_099954a5f894ee::t_236ac912edac5e 1199-1200
+  s_099954a5f894ee::t_80157841de5fa7 703-712
+  s_099954a5f894ee::t_354cea9e20abc2 1374
+  s_099954a5f894ee::t_246195485fcb48 669-686,1380
+  s_099954a5f894ee::t_2e71c011576c57 1342-1346,1370-1372,1375-1376
+  s_099954a5f894ee::t_f87810c08eaa74 1324-1326,1329-1332,1335-1337,1341,1347-1369,1373,1377-1379
+  s_099954a5f894ee::t_0a7e603a9c2cad 1394-1402
+  s_099954a5f894ee::t_f0857683b9fc6d 1381
+driver/d3d9/d3d9_shader.h
+  s_099954a5f894ee::t_2ed9135f07b349 124-125,127-128
+  s_099954a5f894ee::t_fc908cf1f04d85 166-168
+  s_099954a5f894ee::t_e0fbced64bc6c4 51-67
+  s_099954a5f894ee::t_6c51023d0e06ee 50
+airlib/d9mtair.h
+  s_099954a5f894ee::t_0ae6c59dbe65fd 101-107,110
+  s_099954a5f894ee::t_3cdbacaa0f7abd 111
+driver/backend/mtl_context_impl2.cpp
+  s_099954a5f894ee::t_1a86101e6400bc 191-192
+  s_099954a5f894ee::t_4e46f82310be94 175-184,189-190,193-195,199-201,210-211
+airlib/unix.cpp
+  s_099954a5f894ee::t_2eaeac1ba9e5d5 70-71,76,82-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dafaac95b5c845d8cf7388eb35acb1400c2caf65",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
