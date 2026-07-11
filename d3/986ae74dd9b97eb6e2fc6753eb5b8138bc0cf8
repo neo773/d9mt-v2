@@ -1,0 +1,20 @@
+driver/d3d9/d3d9_device.cpp
+  s_02998b4ed19c89::t_4491f00d7c427a 7032-7037
+  s_02998b4ed19c89::t_9b6df83922abeb 6784-6788,6790-6793
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d3986ae74dd9b97eb6e2fc6753eb5b8138bc0cf8",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
