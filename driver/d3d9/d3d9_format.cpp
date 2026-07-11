@@ -375,7 +375,10 @@ namespace dxvk {
       case D3D9Format::INST: return {}; // Driver hack, handled elsewhere
 
       case D3D9Format::DF24: return {
-        MtlFormat::Depth24Unorm_Stencil8,
+        // Apple Silicon has no D24_Unorm_S8 (pixelFormat 255 asserts in
+        // MTLTextureDescriptor validation and kills the process — GTA IV's
+        // deferred pass hits this); use 32F like D24S8 above.
+        MtlFormat::Depth32Float,
         MtlFormat::Invalid,
         MtlAspectDepth,
         { MtlSwizzle::Red,  MtlSwizzle::Zero,
@@ -405,7 +408,8 @@ namespace dxvk {
       case D3D9Format::SSAA: return {}; // Driver hack, handled elsewhere
 
       case D3D9Format::INTZ: return {
-        MtlFormat::Depth24Unorm_Stencil8,
+        // Apple Silicon has no D24_Unorm_S8 — see DF24/D24S8.
+        MtlFormat::Depth32Float_Stencil8,
         MtlFormat::Invalid,
         MtlAspectDepth | MtlAspectStencil,
         { MtlSwizzle::Red, MtlSwizzle::Red,

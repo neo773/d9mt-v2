@@ -1,6 +1,7 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -69,15 +70,29 @@ namespace dxvk::backend {
   void MtlContextImpl::beginRecording() {
     m_dirty = DirtyEverything;
 
-    /* Rotate to a >= ring-depth-old allocator and reset it (GPU-idle). */
+    /* Rotate to a >= ring-depth-old allocator and reset it. MTL4CommandAllocator
+     * contract: every command buffer whose memory came from this allocator must
+     * have COMPLETED before reset — with >ring-depth frames in flight (shader
+     * compile stalls) an ungated reset recycles command memory the GPU is still
+     * reading (command-stream corruption). Wait for the slot's last serial. */
     uint32_t slot = m_frameIndex % uint32_t(m_allocators.size());
     m_frameIndex++;
-    if (!m_allocators[slot])
+    if (!m_allocators[slot]) {
       m_allocators[slot] = WmtAllocator::adopt(
         MTLDevice_newCommandAllocator(m_device->wmtDevice()));
-    else
+    } else {
+      if (m_device->submissions().completedSerial() < m_allocatorSerial[slot]) {
+        /* BISECT: log-only while diagnosing GTA boot death — gate suspected */
+        static std::atomic<uint32_t> n{0};
+        if (n.fetch_add(1u) < 8u)
+          Logger::warn(str::format("allocator slot ", slot, " reset while serial ",
+            m_allocatorSerial[slot], " > completed ",
+            m_device->submissions().completedSerial()));
+      }
       MTL4CommandAllocator_reset(m_allocators[slot].handle());
+    }
     m_allocator = m_allocators[slot].handle();
+    m_allocatorSlot = slot;
 
     /* Rebuild the residency set only once the epoch that last used it has
      * retired — never evict an allocation an in-flight cmdbuf still reads. */
@@ -85,6 +100,13 @@ namespace dxvk::backend {
       MTLResidencySet_removeAllAllocations(m_residencySet.handle());
       MTLResidencySet_commit(m_residencySet.handle());
       m_residentSet.clear();
+      /* Context-lifetime allocations must survive the rebuild: the
+       * visibility buffer is written by EVERY pass (occlusion counters) but
+       * ensureVisBuffer only adds it once — losing it here is a GPU write
+       * fault ("BIF0 page fault") the first time a game uses occlusion
+       * queries after an epoch rotation. */
+      if (m_visBuffer)
+        makeResident(m_visBuffer.handle());
     }
 
     ensureCommandBuffer();
@@ -101,25 +123,50 @@ namespace dxvk::backend {
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
-  /* D9MT_GPUCAPTURE=N (with MTL_CAPTURE_ENABLED=1): wrap the first N queue
-   * commits in a programmatic MTLCaptureManager GPU trace, written to
-   * Z:\tmp\d9mt.gputrace. Diagnostic only — wine processes don't register
-   * with gputoolsserviced, so the gpucapture CLI can't attach to them. */
-  static int s_gpuCaptureRemaining = -2;   /* -2 = env unread, -1 = disabled */
+  /* D9MT_GPUCAPTURE (with MTL_CAPTURE_ENABLED=1): programmatic
+   * MTLCaptureManager GPU trace to /tmp/d9mt.gputrace. Diagnostic only —
+   * wine processes don't register with gputoolsserviced, so the gpucapture
+   * CLI can't attach to them. Two modes:
+   *   D9MT_GPUCAPTURE=N        capture the first N queue commits
+   *   D9MT_GPUCAPTURE=trigger  armed: touching C:\d9mt-test\GPUCAP starts a
+   *                            capture of the next 3 commits (repeatable) —
+   *                            lets us grab a mid-game frame on demand. */
+  static int  s_gpuCaptureRemaining = -2;  /* -2 env unread, -1 off, 0 armed */
+  static bool s_gpuCaptureTrigger   = false;
+  static int  s_gpuCaptureCommits   = 3;
+
+  static void gpuCaptureStart(obj_handle_t device, int commits) {
+    obj_handle_t mgr = MTLCaptureManager_sharedCaptureManager();
+    WMTCaptureInfo ci = {};
+    ci.capture_object = device;
+    ci.destination = WMTCaptureDestinationGPUTraceDocument;
+    ci.output_url.set("/tmp/d9mt.gputrace");
+    bool ok = MTLCaptureManager_startCapture(mgr, &ci);
+    s_gpuCaptureRemaining = commits;
+    Logger::info(str::format("D9MT-GPUCAPTURE start ok=", ok,
+      " commits=", commits, " -> /tmp/d9mt.gputrace"));
+  }
 
   static void gpuCaptureBeforeCommit(obj_handle_t device) {
     if (s_gpuCaptureRemaining == -2) {
       const char* v = std::getenv("D9MT_GPUCAPTURE");
-      s_gpuCaptureRemaining = (v && *v) ? std::atoi(v) : -1;
-      if (s_gpuCaptureRemaining > 0) {
-        obj_handle_t mgr = MTLCaptureManager_sharedCaptureManager();
-        WMTCaptureInfo ci = {};
-        ci.capture_object = device;
-        ci.destination = WMTCaptureDestinationGPUTraceDocument;
-        ci.output_url.set("/tmp/d9mt.gputrace");
-        bool ok = MTLCaptureManager_startCapture(mgr, &ci);
-        Logger::info(str::format("D9MT-GPUCAPTURE start ok=", ok,
-          " commits=", s_gpuCaptureRemaining, " -> /tmp/d9mt.gputrace"));
+      if (v && std::strcmp(v, "trigger") == 0) {
+        s_gpuCaptureTrigger = true;
+        s_gpuCaptureRemaining = 0;
+        Logger::info("D9MT-GPUCAPTURE armed (touch C:\\d9mt-test\\GPUCAP)");
+      } else {
+        s_gpuCaptureRemaining = (v && *v) ? std::atoi(v) : -1;
+        if (s_gpuCaptureRemaining > 0)
+          gpuCaptureStart(device, s_gpuCaptureRemaining);
+      }
+      return;
+    }
+    if (s_gpuCaptureTrigger && s_gpuCaptureRemaining == 0) {
+      std::FILE* f = std::fopen("C:\\d9mt-test\\GPUCAP", "rb");
+      if (f) {
+        std::fclose(f);
+        std::remove("C:\\d9mt-test\\GPUCAP");
+        gpuCaptureStart(device, s_gpuCaptureCommits);
       }
     }
   }
@@ -152,6 +199,9 @@ namespace dxvk::backend {
     /* MTL4: the completion signal is a queue-timeline op AFTER commit. */
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_residencyEpochSerial = serial;
+    /* Every submission recorded from the current allocator slot pins that
+     * slot until this serial retires (see beginRecording reset gate). */
+    m_allocatorSerial[m_allocatorSlot] = serial;
 
     m_device->uploadRing().onSubmit(serial);
 
@@ -217,6 +267,10 @@ namespace dxvk::backend {
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
     MetalDrawable_present(sync.drawable);
+    /* Balance the retain taken in the bridge's nextDrawable — after present
+     * nothing touches the drawable again; without this the CAMetalLayer's
+     * drawable pool starves (maximumDrawableCount ~3) and nextDrawable stalls. */
+    NSObject_release(sync.drawable);
   }
 
   // --- render pass (decision 1) ---------------------------------------------
@@ -520,6 +574,10 @@ namespace dxvk::backend {
     const Rc<MtlBuffer>& ib = m_indexBuffer.buffer();
     if (ib == nullptr)
       return;
+    /* The index buffer is read by GPU address (no argument-table slot) — it
+     * still must be in the residency set or the fetch faults / reads zeros
+     * once the epoch rebuild drops it (decision 4). */
+    makeResident(ib->handle.buf);
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;

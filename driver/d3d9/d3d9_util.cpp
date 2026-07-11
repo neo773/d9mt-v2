@@ -70,7 +70,7 @@ namespace dxvk {
   MtlFormat GetPackedDepthStencilFormat(D3D9Format Format) {
     switch (Format) {
     case D3D9Format::D15S1:
-      return MtlFormat::Depth24Unorm_Stencil8; // This should never happen!
+      return MtlFormat::Depth32Float_Stencil8; // This should never happen!
 
     case D3D9Format::D16:
     case D3D9Format::D16_LOCKABLE:
@@ -79,14 +79,16 @@ namespace dxvk {
 
     case D3D9Format::D24X8:
     case D3D9Format::DF24:
-      // Was VK_FORMAT_X8_D24_UNORM_PACK32 (no packed X8D24 in the Metal subset).
-      return MtlFormat::Depth24Unorm_Stencil8;
+      // D24-class images are created as Depth32Float on Apple Silicon
+      // (Depth24Unorm_Stencil8 = Intel-only, asserts on texture creation) —
+      // the packed readback layout must match the ACTUAL image format.
+      return MtlFormat::Depth32Float;
 
     case D3D9Format::D24X4S4:
     case D3D9Format::D24FS8:
     case D3D9Format::D24S8:
     case D3D9Format::INTZ:
-      return MtlFormat::Depth24Unorm_Stencil8;
+      return MtlFormat::Depth32Float_Stencil8;
 
     case D3D9Format::D32:
     case D3D9Format::D32_LOCKABLE:

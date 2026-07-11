@@ -261,7 +261,9 @@ namespace dxvk::backend {
     /* 3-deep MTL4CommandAllocator ring: rotate per frame, reset the slot we
      * are about to reuse (>= imageCount frames old, so GPU-idle). */
     std::array<WmtAllocator, 3> m_allocators;
+    std::array<uint64_t, 3>     m_allocatorSerial = { };  // last serial submitted per slot
     uint32_t     m_frameIndex   = 0u;
+    uint32_t     m_allocatorSlot = 0u; // ring slot of m_allocator
     obj_handle_t m_allocator    = 0u;  // current frame's allocator (borrowed)
 
     /* ONE residency set per context; per-stage argument tables (decision 3). */

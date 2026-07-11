@@ -323,7 +323,7 @@ namespace dxvk::backend {
      * image carries no owned allocation. */
     if (view->image != nullptr) {
       auto* base = static_cast<MtlTextureImpl*>(view->image.ptr());
-      makeResident(base->owned.handle());
+      makeResident(base->owned.handle() ? base->owned.handle() : base->texture.tex);
     }
     makeResident(tv->owned.handle());
   }
@@ -391,8 +391,11 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(s->owned.handle());
-    makeResident(d->owned.handle());
+    /* Drawable-backed textures carry only a borrowed handle (owned unset) —
+     * they still MUST be resident for the GPU write (CAMetalLayer drawables
+     * are not implicitly resident on an MTL4 queue). */
+    makeResident(s->owned.handle() ? s->owned.handle() : s->texture.tex);
+    makeResident(d->owned.handle() ? d->owned.handle() : d->texture.tex);
     WMTOrigin srcOrigin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   srcSize   = { extent.width, extent.height, extent.depth };
     WMTOrigin dstOrigin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
@@ -514,6 +517,19 @@ namespace dxvk::backend {
     auto* t = static_cast<MtlTextureImpl*>(image.ptr());
     if (!t)
       return;
+
+    /* initImage clears via a load=Clear render pass — that requires the
+     * texture to be a valid attachment. Sampled-only textures (no
+     * RenderTarget usage) and compressed formats (BC1-3 are never
+     * color-renderable) cannot be attachments; a pass built on them is an
+     * invalid descriptor that FAULTS the GPU and poisons the queue (every
+     * subsequent upload/draw silently drops → black textures). Such textures
+     * get their defined content from uploads — skip the clear. */
+    const bool renderable = (uint32_t(t->info.usage)
+      & (uint32_t(MtlUsage::RenderTarget) | uint32_t(MtlUsage::DepthStencil))) != 0u;
+    if (!renderable)
+      return;
+
     if (m_pass.active)
       closePass();
     ensureCommandBuffer();

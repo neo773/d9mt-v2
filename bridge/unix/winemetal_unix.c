@@ -3709,7 +3709,10 @@ static int d9mt_wsilog_enabled(void) {
 static NTSTATUS
 _MetalLayer_nextDrawable(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(CAMetalLayer *)params->handle nextDrawable];
+  /* nextDrawable returns an AUTORELEASED drawable; the handle crosses the
+   * PE boundary and is presented later from another thread — retain here,
+   * the driver releases it right after MetalDrawable_present. */
+  params->ret = (obj_handle_t)[[(CAMetalLayer *)params->handle nextDrawable] retain];
   static _Atomic unsigned n_next;
   unsigned k = n_next++;
   if (k < 16 || (k % 100) == 0)
@@ -5629,6 +5632,9 @@ _MTLDevice_newArgumentTable(void *obj) {
   desc.supportAttributeStrides = info->support_attribute_strides ? YES : NO;
   NSError *err = NULL;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->device newArgumentTableWithDescriptor:desc error:&err];
+  if (!params->ret)
+    fprintf(stderr, "winemetal: newArgumentTable FAILED: %s\n",
+            err ? err.localizedDescription.UTF8String : "(no error)");
   [desc release];
   return STATUS_SUCCESS;
 }
@@ -5639,6 +5645,9 @@ _MTLDevice_newMTL4Compiler(void *obj) {
   MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor alloc] init];
   NSError *err = NULL;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCompilerWithDescriptor:desc error:&err];
+  if (!params->ret)
+    fprintf(stderr, "winemetal: newMTL4Compiler FAILED: %s\n",
+            err ? err.localizedDescription.UTF8String : "(no error)");
   [desc release];
   return STATUS_SUCCESS;
 }
@@ -5651,6 +5660,9 @@ _MTLDevice_newResidencySet(void *obj) {
   desc.initialCapacity = info->initial_capacity;
   NSError *err = NULL;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->device newResidencySetWithDescriptor:desc error:&err];
+  if (!params->ret)
+    fprintf(stderr, "winemetal: newResidencySet FAILED: %s\n",
+            err ? err.localizedDescription.UTF8String : "(no error)");
   [desc release];
   return STATUS_SUCCESS;
 }
