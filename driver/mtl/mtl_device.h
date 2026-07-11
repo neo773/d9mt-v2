@@ -204,7 +204,8 @@ namespace dxvk {
   /** \brief Instance (was DxvkInstance): adapter enumeration root. */
   class MtlInstance : public RcObject {
   public:
-    virtual ~MtlInstance() { }
+    MtlInstance();
+    virtual ~MtlInstance();
 
     virtual uint32_t adapterCount() const;
 

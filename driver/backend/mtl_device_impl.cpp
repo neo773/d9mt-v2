@@ -1,8 +1,11 @@
 #include "mtl_device_impl.h"
 
+#include <windows.h>
+
 #include "mtl_context_impl.h"
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
+#include "../util/util_string.h"
 
 namespace dxvk::backend {
 
@@ -96,7 +99,11 @@ namespace dxvk::backend {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = info.size;
     bufferInfo.options = storageOptions(info.cpuAccess);
-    bufferInfo.memory.set(nullptr);
+    /* 32-bit PE rule: CPU-visible backing allocated in OUR space */
+    bufferInfo.memory.set(info.cpuAccess != MtlCpuAccess::None
+      ? VirtualAlloc(nullptr, SIZE_T(info.size),
+          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+      : nullptr);
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
 
@@ -236,7 +243,10 @@ namespace dxvk::backend {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = impl->size;
     bufferInfo.options = storageOptions(impl->info.cpuAccess);
-    bufferInfo.memory.set(nullptr);
+    bufferInfo.memory.set(impl->info.cpuAccess != MtlCpuAccess::None
+      ? VirtualAlloc(nullptr, SIZE_T(impl->size),
+          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+      : nullptr);
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
 

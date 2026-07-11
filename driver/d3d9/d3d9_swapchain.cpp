@@ -641,7 +641,6 @@ namespace dxvk {
   Rc<MtlPresenter> D3D9SwapChainEx::CreatePresenter(HWND Window, Rc<sync::Signal> Signal) {
     // PHASE-C10: the frame-latency signal is wired via the D3D9WindowContext fence
     // and bumped in PresentImage; the factory takes only device + desc.
-    (void)Window;
     (void)Signal;
 
     MtlPresenterDesc desc = { };
@@ -649,6 +648,7 @@ namespace dxvk {
     desc.imageFormat = GetSurfaceFormat();
     desc.imageCount  = m_presentParams.BackBufferCount + 1u;
     desc.vsync       = true;
+    desc.hwnd        = reinterpret_cast<intptr_t>(Window);
 
     return createMtlPresenter(m_device, desc);
   }

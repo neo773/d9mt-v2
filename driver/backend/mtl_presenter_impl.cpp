@@ -110,4 +110,12 @@ namespace dxvk::backend {
     return new MtlPresenterImpl(device, hwnd, desc);
   }
 
+
+}
+
+namespace dxvk {
+  Rc<MtlPresenter> backendCreatePresenter(
+    const Rc<MtlDevice>& device, intptr_t hwnd, const MtlPresenterDesc& desc) {
+    return backend::createMtlPresenterImpl(device, hwnd, desc);
+  }
 }

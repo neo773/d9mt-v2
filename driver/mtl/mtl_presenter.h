@@ -45,6 +45,7 @@ namespace dxvk {
     MtlFormat   imageFormat  = MtlFormat::BGRA8Unorm;
     uint32_t    imageCount   = 3u;          // triple-buffer default
     bool        vsync        = true;        // displaySyncEnabled
+    intptr_t    hwnd         = 0;           // D3D9 focus window (CAMetalLayer host)
   };
 
   /**

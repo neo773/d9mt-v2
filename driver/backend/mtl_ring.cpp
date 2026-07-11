@@ -1,5 +1,7 @@
 #include "mtl_ring.h"
 
+#include <windows.h>
+
 #include <cstring>
 
 namespace dxvk::backend {
@@ -68,8 +70,11 @@ void UploadRing::onComplete(uint64_t completedSerial) {
 }
 
 UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
-  WMTMemoryPointer cpuPtr;
-  cpuPtr.set(nullptr);
+  /* 32-bit PE rule: CPU-visible memory must live in OUR address space —
+   * allocate here, unix wraps it via newBufferWithBytesNoCopy (v1 pattern;
+   * unix-allocated host pointers are unreachable from a 32-bit process). */
+  void* host = VirtualAlloc(nullptr, SIZE_T(minSize),
+    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
   WMTBufferInfo info = {};
   info.length = minSize;
@@ -77,7 +82,7 @@ UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
       WMTResourceStorageModeShared
     | WMTResourceCPUCacheModeWriteCombined
     | WMTResourceHazardTrackingModeUntracked);
-  info.memory = cpuPtr;
+  info.memory.set(host);
 
   obj_handle_t handle = MTLDevice_newBuffer(m_device, &info);
 

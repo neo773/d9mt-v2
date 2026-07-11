@@ -60,6 +60,14 @@ namespace dxvk {
   };
 
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc) {
+    if (desc.hwnd) {
+      extern Rc<MtlPresenter> backendCreatePresenter(
+        const Rc<MtlDevice>&, intptr_t, const MtlPresenterDesc&);
+      Rc<MtlPresenter> real = backendCreatePresenter(device, desc.hwnd, desc);
+      if (real != nullptr)
+        return real;
+      Logger::err("createMtlPresenter: backend presenter failed, using stub");
+    }
     return new MtlPresenterStub(device, desc);
   }
 

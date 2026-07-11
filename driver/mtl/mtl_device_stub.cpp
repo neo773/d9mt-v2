@@ -1,6 +1,8 @@
 #include <cstring>
 
 #include "mtl_device.h"
+
+#include "../wsi/wsi_platform.h"
 #include "mtl_context.h"
 
 #include "../util/log/log.h"
@@ -147,6 +149,14 @@ namespace dxvk {
       return new MtlDevice();
     }
     return device;
+  }
+
+  MtlInstance::MtlInstance() {
+    wsi::init();   // upstream DxvkInstance ctor parity (dxvk_instance.cpp:30)
+  }
+
+  MtlInstance::~MtlInstance() {
+    wsi::quit();
   }
 
   uint32_t MtlInstance::adapterCount() const {
