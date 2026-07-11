@@ -1492,25 +1492,50 @@ struct AirBuilderImpl {
     return fn;
   }
 
-  /* Scalarized sm3 pipeline only produces f32 here; mangle stays .f32 */
+  /* The air.fast_* intrinsics are scalar (.f32). The sm3 pipeline is mostly
+   * scalarized, but some shaders (e.g. GTA) reach here with a vector operand;
+   * decompose it into per-component scalar calls and reassemble. */
+  Value* callScalarMath(const std::string& base, Type* scalarTy,
+                        std::initializer_list<Value*> args) {
+    CallInst* call = b->CreateCall(
+      getAirMathFn(base + ".f32", scalarTy,
+        std::vector<Type*>(args.size(), scalarTy)),
+      std::vector<Value*>(args));
+    call->setFastMathFlags(FastMathFlags::getFast());
+    return call;
+  }
+
   void emitAirMathUnary(const ir::Op& op, const std::string& base) {
     Type* type = mapType(op.getType(), false);
-    if (type->isVectorTy())
-      unsupported("vector transcendental (expected scalarized IR)");
-    CallInst* call = b->CreateCall(
-      getAirMathFn(base + ".f32", type, { type }),
-      { getValue(operandDef(op, 0u)) });
-    call->setFastMathFlags(FastMathFlags::getFast());
-    setValue(op, call);
+    Value* a = getValue(operandDef(op, 0u));
+    if (auto* vec = dyn_cast<FixedVectorType>(type)) {
+      Type* sc = vec->getElementType();
+      Value* res = UndefValue::get(vec);
+      for (unsigned i = 0u; i < vec->getNumElements(); i++)
+        res = b->CreateInsertElement(res,
+          callScalarMath(base, sc, { b->CreateExtractElement(a, i) }), i);
+      setValue(op, res);
+      return;
+    }
+    setValue(op, callScalarMath(base, type, { a }));
   }
 
   void emitAirMathBinary(const ir::Op& op, const std::string& base) {
     Type* type = mapType(op.getType(), false);
-    if (type->isVectorTy())
-      unsupported("vector transcendental (expected scalarized IR)");
+    Value* a = getValue(operandDef(op, 0u));
+    Value* c = getValue(operandDef(op, 1u));
+    if (auto* vec = dyn_cast<FixedVectorType>(type)) {
+      Type* sc = vec->getElementType();
+      Value* res = UndefValue::get(vec);
+      for (unsigned i = 0u; i < vec->getNumElements(); i++)
+        res = b->CreateInsertElement(res,
+          callScalarMath(base, sc,
+            { b->CreateExtractElement(a, i), b->CreateExtractElement(c, i) }), i);
+      setValue(op, res);
+      return;
+    }
     CallInst* call = b->CreateCall(
-      getAirMathFn(base + ".f32", type, { type, type }),
-      { getValue(operandDef(op, 0u)), getValue(operandDef(op, 1u)) });
+      getAirMathFn(base + ".f32", type, { type, type }), { a, c });
     call->setFastMathFlags(FastMathFlags::getFast());
     setValue(op, call);
   }
