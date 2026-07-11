@@ -59,6 +59,7 @@
  */
 
 #include <array>
+#include <unordered_map>
 #include <vector>
 
 #include "../mtl/mtl_context.h"
@@ -69,6 +70,31 @@
 #include "mtl_pso_cache.h"
 
 namespace dxvk::backend {
+
+  /* Backend query object. Occlusion answers come from a visibility-result
+   * buffer slot the context assigns at beginQuery; timestamp/event answers
+   * come from the submission serial the query was recorded under (decision 7).
+   * The frontend holds it as Rc<MtlQuery>; MtlDeviceImpl::createGpuQuery makes
+   * the subclass so beginQuery can downcast. */
+  class MtlBackendQuery : public MtlQuery {
+  public:
+    obj_handle_t visBuffer   = 0u;    /* shared visibility buffer (borrowed) */
+    void*        visCpu      = nullptr;
+    uint64_t     slotOffset  = 0u;    /* byte offset of this query's counter */
+    uint64_t     serial      = 0u;    /* submission the query completes under */
+    SubmissionTracker* tracker = nullptr;
+
+    MtlGpuQueryStatus getData(MtlQueryData& out) override;
+  };
+
+  /* Backend GPU event / D3DQUERYTYPE_EVENT — serial compare (decision 7). */
+  class MtlBackendEvent : public MtlEvent {
+  public:
+    uint64_t     serial  = 0u;
+    SubmissionTracker* tracker = nullptr;
+
+    MtlGpuEventStatus test() override;
+  };
 
   enum ContextDirtyBit : uint32_t {
     DirtyPso           = 1u << 0,
@@ -92,9 +118,96 @@ namespace dxvk::backend {
     explicit MtlContextImpl(Rc<MtlDeviceImpl> device);
     ~MtlContextImpl();
 
-    /* ... MtlContext surface overrides (all ~55) ... */
+    // --- MtlContext surface overrides --------------------------------------
+    void beginRecording() override;
+    void endFrame() override;
+    void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
+    void synchronizeWsi(MtlPresenterSync sync) override;
+
+    void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
+    void setVertexLayout(uint32_t nAttr, const MtlVertexAttr* attrs,
+                         uint32_t nLayout, const MtlVertexLayout* layouts) override;
+    void setPrimitiveTopology(MtlPrimitiveTopology topology) override;
+    void setViewports(uint32_t n, const MtlViewport* viewports) override;
+    void setRasterizerState(const MtlRasterizerState& rs) override;
+    void setMultisampleState(const MtlMultisampleState& ms) override;
+    void setDepthStencilState(const MtlDepthStencilState& ds) override;
+    void setBlendMode(uint32_t rt, const MtlBlendMode& blend) override;
+    void setBlendColor(MtlColor4 color) override;
+    void setStencilReference(uint32_t reference) override;
+    void setDepthBias(MtlDepthBias bias) override;
+    void setDepthBounds(MtlDepthBounds bounds) override;
+
+    void bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) override;
+    void bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) override;
+    void bindUniformBuffer(MtlStageMask stages, uint32_t slot, MtlBufferSlice&& slice) override;
+    void bindUniformBufferRange(MtlStageMask stages, uint32_t slot,
+                                MtlDeviceSize offset, MtlDeviceSize length) override;
+    void bindTexture(MtlStageMask stages, uint32_t slot, Rc<MtlTextureView>&& view) override;
+    void bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) override;
+    void pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) override;
+
+    void bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) override;
+    void clearRenderTarget(const Rc<MtlTextureView>& view, MtlAspectMask clear,
+                           MtlClearValue value, MtlAspectMask discard) override;
+
+    void draw(uint32_t count, const MtlDrawArgs* args) override;
+    void drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) override;
+
+    // --- part 2: transfers / init / queries / lifetime ---------------------
+    void copyTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff,
+                     const Rc<MtlTexture>& src, MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) override;
+    void copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
+                    const Rc<MtlBuffer>& src, MtlDeviceSize srcOff, MtlDeviceSize bytes) override;
+    void copyTextureToBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize off, MtlDeviceSize rowAlign,
+                             MtlDeviceSize sliceAlign, MtlFormat format, const Rc<MtlTexture>& src,
+                             MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) override;
+    void copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
+                             const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
+                             MtlDeviceSize sliceAlign, MtlFormat format) override;
+    void blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],
+                         const Rc<MtlTextureView>& src, const MtlOffset3D srcBox[2],
+                         MtlSamplerFilter filter) override;
+    void generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter) override;
+
+    void initBuffer(const Rc<MtlBuffer>& buffer) override;
+    void initImage(const Rc<MtlTexture>& image) override;
+    void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) override;
+    void uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
+                      const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size) override;
+    bool ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage) override;
+
+    void beginQuery(const Rc<MtlQuery>& query) override;
+    void endQuery(const Rc<MtlQuery>& query) override;
+    void writeTimestamp(const Rc<MtlQuery>& query) override;
+
+    void signal(const Rc<MtlSignal>& signal, uint64_t value) override;
+    void signalGpuEvent(const Rc<MtlEvent>& event) override;
+
+    void track(Rc<MtlResource>&& resource) override;
+
+    void beginDebugLabel(const char* label) override;
+    void endDebugLabel() override;
+    void insertDebugLabel(const char* label) override;
+
+    /* Backend-only wiring (not part of the seam): the swapchain REWRITE hands
+     * the context its presenter so synchronizeWsi can drive scan-out. */
+    void setPresenter(Rc<MtlPresenter> presenter) { m_presenter = std::move(presenter); }
 
   private:
+
+    /* Argument-table slot map (verified against v2/air air_render_test.mm +
+     * airconv manifest, decision 3). The AIR shaders read D3D9 constant
+     * buffers at Metal buffer indices 0..2 (cF / clip|alphaTest / point|misc)
+     * and pull vertex stage-in from index 3+. So vertex streams bind at
+     * kVertexBufferBaseIndex + streamIndex, never colliding with the CBV
+     * slots. Textures use the fragment texture table; samplers/vertex-texture
+     * fetch need the argument-buffer TLAB path this per-slot ABI lacks
+     * (documented no-op below). */
+    static constexpr uint32_t kVertexBufferBaseIndex = 3u;
+    /* Provisional per-draw push-constant buffer index (top of the 0..30 Metal
+     * buffer table, clear of CBVs 0..2 and streams 3..18). */
+    static constexpr uint32_t kPushConstantIndex = 20u;
 
     // --- per-stage bound state (flat D3D9 slot model) ----------------------
     struct StageBindings {
@@ -166,16 +279,31 @@ namespace dxvk::backend {
 
     uint64_t m_currentSerial = 0;
 
+    // cached MTLFunction handles keyed by owning library (avoids per-draw
+    // newFunction churn; released on context teardown).
+    std::unordered_map<obj_handle_t, WmtFunction> m_fnCache;
+
+    // per-context visibility-result buffer for occlusion queries (decision 7).
+    WmtBuffer m_visBuffer;
+    void*     m_visCpu   = nullptr;
+    uint64_t  m_visSlot  = 0u;         // next free 8-byte counter slot
+
     // --- core internal flow -------------------------------------------------
     void ensureCommandBuffer();
     void materializePass();            // open encoder, fold clears into load actions
     void closePass();                  // flush chunk -> encodeCommands -> endEncoding
+    bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, memo lookup
     void flushVertexBuffers();
     void flushResources();             // textures/samplers/CBVs -> wmtcmd sets + ring snapshots
     void flushDynamicState();
     void submit(bool present);         // tracker.onSubmit, ring.onSubmit, retirements
     void makeResident(obj_handle_t handle);
+
+    obj_handle_t resolveFunction(const Rc<MtlShaderFunction>& fn);
+    uint32_t     currentDepthFormat() const;   // WMTPixelFormat of the pass depth view
+    void         ensureVisBuffer();
+    void         encodeBlit(const wmtcmd_base* head);   // close pass, run one blit chunk
 
   };
 

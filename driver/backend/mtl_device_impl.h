@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include "../mtl/mtl_device.h"
+#include "../mtl/mtl_context.h"   // MtlQuery / MtlEvent / MtlQueryType
 
 #include "wmt_handle.h"
 #include "mtl_ring.h"
@@ -87,12 +88,19 @@ namespace dxvk::backend {
 
     Rc<MtlAllocation> renameBuffer(MtlBuffer* buffer) override;
 
+    Rc<MtlQuery> createGpuQuery(MtlQueryType type) override;
+    Rc<MtlEvent> createGpuEvent() override;
+
     // --- backend-internal ----------------------------------------------------
     obj_handle_t wmtDevice() const { return m_device.handle(); }
     obj_handle_t wmtQueue()  const { return m_queue.handle(); }
 
     SubmissionTracker& submissions() { return *m_tracker; }
     UploadRing&        uploadRing()  { return *m_ring; }
+
+    /* Cached MTLDepthStencilState keyed by the folded depth-stencil state
+     * (setDepthStencilState is not a PSO key; the DSSO is bound dynamically). */
+    obj_handle_t getDepthStencilState(const MtlDepthStencilState& ds);
 
     bool valid() const { return bool(m_device); }
 
@@ -106,6 +114,9 @@ namespace dxvk::backend {
 
     std::mutex m_samplerMutex;
     std::unordered_map<size_t, Rc<MtlSamplerState>> m_samplerCache;
+
+    std::mutex m_dssoMutex;
+    std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
 
     uint64_t m_lastSubmittedSerial = 0u;
 

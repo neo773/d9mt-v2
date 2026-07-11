@@ -1,5 +1,8 @@
 #include "mtl_context_impl.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include "../util/log/log.h"
 
 /*
@@ -83,8 +86,10 @@ namespace dxvk::backend {
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
     submit(false);
     ensureCommandBuffer();
-    if (status)
-      *status = MtlSubmitStatus::Success;
+    if (status) {
+      status->submissionId = m_currentSerial;
+      status->completed    = false;
+    }
   }
 
   void MtlContextImpl::endFrame() {
@@ -105,9 +110,20 @@ namespace dxvk::backend {
     if (m_pass.active)
       closePass();
     ensureCommandBuffer();
-    m_presenter->present(m_cmdbuf.handle());
+
+    /* Acquire the drawable and schedule its present on THIS command buffer
+     * (presentDrawable must be recorded before commit). The presenter's
+     * present()/signalFrameLatency() then wire the release token + advance
+     * the frame-latency signal (contract 3e). */
+    MtlAcquiredDrawable image = m_presenter->acquireNextImage(sync.frameId);
+    if (image.valid && image.drawable)
+      MTLCommandBuffer_presentDrawable(m_cmdbuf.handle(), image.drawable);
+
     submit(false);
-    m_presenter->signalFrameLatency();
+
+    if (image.valid)
+      m_presenter->present(image);
+    m_presenter->signalFrameLatency(sync.frameId);
   }
 
   // --- render pass (decision 1) ---------------------------------------------
@@ -166,7 +182,15 @@ namespace dxvk::backend {
 
     ensureCommandBuffer();
 
+    /* residency is per-encoder in Metal — start each pass with a clean dedup
+     * set so every shader-read resource re-emits its useResource here. */
+    m_residentSet.clear();
+
     WMTRenderPassInfo info = {};
+    /* Occlusion queries write into a per-context visibility buffer bound at
+     * pass creation (decision 7); attach it to every pass so beginQuery only
+     * has to flip the visibility mode. */
+    info.visibility_buffer = m_visBuffer.handle();
     for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
       const auto& view = m_pass.targets.color[i];
       if (view == nullptr)
@@ -178,7 +202,7 @@ namespace dxvk::backend {
       info.colors[i].store_action = WMTStoreActionStore;
       if (m_pass.clearColor[i]) {
         const auto& v = m_pass.clearValues[i];
-        info.colors[i].clear_color = { v.color[0], v.color[1], v.color[2], v.color[3] };
+        info.colors[i].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
       }
       makeResident(impl->owned.handle());
     }
@@ -380,10 +404,10 @@ namespace dxvk::backend {
     for (uint32_t i = 0; i < count; i++) {
       auto* cmd = m_chunk.append<wmtcmd_render_draw_indexed>(WMTRenderCommandDrawIndexed);
       cmd->primitive_type = wmtPrimitive(m_topology);
-      cmd->index_type = m_indexType == MtlIndexType::U16 ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
+      cmd->index_type = m_indexType == MtlIndexType::Uint16 ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
       cmd->index_buffer = ib->handle.buf;
       cmd->index_buffer_offset = m_indexBuffer.offset()
-        + uint64_t(args[i].firstIndex) * (m_indexType == MtlIndexType::U16 ? 2u : 4u);
+        + uint64_t(args[i].firstIndex) * (m_indexType == MtlIndexType::Uint16 ? 2u : 4u);
       cmd->index_count = args[i].indexCount;
       cmd->instance_count = args[i].instanceCount ? args[i].instanceCount : 1u;
       cmd->base_vertex = args[i].vertexOffset;
@@ -406,6 +430,9 @@ namespace dxvk::backend {
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();
     m_pass.encodedDraws++;
+    /* all folded state is now encoded into the chunk; the next draw only
+     * re-flushes what changes (snapshot slices already captured). */
+    m_dirty = 0u;
     return true;
   }
 

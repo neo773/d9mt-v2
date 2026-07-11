@@ -1,5 +1,6 @@
 #include "mtl_device_impl.h"
 
+#include "mtl_context_impl.h"
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
 
@@ -254,9 +255,54 @@ namespace dxvk::backend {
   }
 
   Rc<MtlContext> MtlDeviceImpl::createContext() {
-    // PHASE: MtlContextImpl lands next; stub context until then
-    Logger::warn("MtlDeviceImpl::createContext: context impl pending");
-    return nullptr;
+    return new MtlContextImpl(Rc<MtlDeviceImpl>(this));
+  }
+
+  Rc<MtlQuery> MtlDeviceImpl::createGpuQuery(MtlQueryType type) {
+    Rc<MtlBackendQuery> q = new MtlBackendQuery();
+    q->type = type;
+    return q;
+  }
+
+  Rc<MtlEvent> MtlDeviceImpl::createGpuEvent() {
+    return new MtlBackendEvent();
+  }
+
+  obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {
+    size_t hash;
+    { const uint8_t* p = reinterpret_cast<const uint8_t*>(&ds);
+      uint64_t h = 0xcbf29ce484222325ull;
+      for (size_t i = 0u; i < sizeof(ds); i++)
+        h = (h ^ p[i]) * 0x100000001b3ull;
+      hash = size_t(h ^ (h >> 32));
+    }
+
+    { std::lock_guard<std::mutex> lock(m_dssoMutex);
+      auto entry = m_dssoCache.find(hash);
+      if (entry != m_dssoCache.end())
+        return entry->second.handle();
+    }
+
+    WMTDepthStencilInfo info = {};
+    info.depth_compare_function = WMTCompareFunction(ds.depthCompareOp);
+    info.depth_write_enabled    = ds.depthWrite;
+
+    auto fillStencil = [&](WMTStencilInfo& s, const MtlStencilState& m) {
+      s.enabled                  = ds.stencilEnable;
+      s.depth_stencil_pass_op    = WMTStencilOperation(m.passOp);
+      s.stencil_fail_op          = WMTStencilOperation(m.failOp);
+      s.depth_fail_op            = WMTStencilOperation(m.depthFailOp);
+      s.stencil_compare_function = WMTCompareFunction(m.compareOp);
+      s.write_mask               = uint8_t(m.writeMask);
+      s.read_mask                = uint8_t(m.readMask);
+    };
+    fillStencil(info.front_stencil, ds.front);
+    fillStencil(info.back_stencil,  ds.back);
+
+    obj_handle_t handle = MTLDevice_newDepthStencilState(m_device.handle(), &info);
+
+    std::lock_guard<std::mutex> lock(m_dssoMutex);
+    return m_dssoCache.emplace(hash, WmtDepthStencil::adopt(handle)).first->second.handle();
   }
 
   uint64_t MtlDeviceImpl::getCompletedSerial() {

@@ -80,7 +80,11 @@ namespace dxvk {
   };
 
   class MtlSignal        : public RcObject { };   // CPU-visible MTLSharedEvent
-  class MtlLatencyTracker: public RcObject { };   // Reflex-style markers (thin)
+  class MtlLatencyTracker: public RcObject {      // Reflex-style markers (thin)
+  public:
+    // Whether the frontend should emit per-draw latency markers. PHASE-E: Reflex.
+    bool needsAutoMarkers() const { return false; }
+  };
 
   // --- render-target binding set (was DxvkRenderTargets) -------------------
   struct MtlRenderTargets {

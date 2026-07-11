@@ -258,10 +258,18 @@ namespace dxvk {
   // --- geometry PODs (replace VkExtent*/VkOffset*/VkImageSubresource*) ------
   struct MtlOrigin {   // was VkOffset3D
     int32_t x = 0, y = 0, z = 0;
+    bool operator == (const MtlOrigin& o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator != (const MtlOrigin& o) const { return !(*this == o); }
   };
+
+  struct MtlExtent3D;   // fwd (defined below); MtlSize <-> MtlExtent3D interop
 
   struct MtlSize {     // was VkExtent3D
     uint32_t width = 0, height = 0, depth = 0;
+
+    MtlSize() = default;
+    MtlSize(uint32_t w, uint32_t h, uint32_t d) : width(w), height(h), depth(d) { }
+    MtlSize(const MtlExtent3D& e);   // defined after MtlExtent3D
   };
 
   struct MtlOffset3D { // signed 3D point for blit corners
@@ -270,6 +278,8 @@ namespace dxvk {
 
   struct MtlExtent2D {
     uint32_t width = 0, height = 0;
+    bool operator == (const MtlExtent2D& o) const { return width == o.width && height == o.height; }
+    bool operator != (const MtlExtent2D& o) const { return !(*this == o); }
   };
 
   struct MtlOffset2D { // was VkOffset2D
@@ -308,10 +318,20 @@ namespace dxvk {
   };
 
   struct MtlRasterizerState {
-    MtlCullMode         cullMode  = MtlCullMode::None;
-    MtlTriangleFillMode fillMode  = MtlTriangleFillMode::Fill;
-    MtlWinding          frontFace = MtlWinding::Clockwise;
-    bool                depthClip = true;   // MTLDepthClipMode::Clip vs Clamp
+    MtlCullMode         cullMode    = MtlCullMode::None;
+    MtlTriangleFillMode fillMode    = MtlTriangleFillMode::Fill;
+    MtlWinding          frontFace   = MtlWinding::Clockwise;
+    bool                depthClip   = true;   // MTLDepthClipMode::Clip vs Clamp
+    bool                flatShading = false;
+    uint32_t            sampleCount = 0;       // 0 = follow attachment sample count
+
+    // DXVK-style fluent setters (frontend builds state with these; was DxvkRasterizerState).
+    void setCullMode(MtlCullMode m)         { cullMode = m; }
+    void setPolygonMode(MtlTriangleFillMode m) { fillMode = m; }
+    void setFrontFace(MtlWinding w)         { frontFace = w; }
+    void setDepthClip(bool e)               { depthClip = e; }
+    void setFlatShading(bool e)             { flatShading = e; }
+    void setSampleCount(uint32_t n)         { sampleCount = n; }
   };
 
   struct MtlMultisampleState {
@@ -319,6 +339,10 @@ namespace dxvk {
     uint32_t sampleMask       = 0xFFFFFFFFu;
     bool     alphaToCoverage  = false;
     bool     alphaToOne       = false;
+
+    void setSampleCount(uint32_t n)     { sampleCount = n; }
+    void setSampleMask(uint32_t m)      { sampleMask = m; }
+    void setAlphaToCoverage(bool e)     { alphaToCoverage = e; }
   };
 
   struct MtlStencilState {
@@ -328,14 +352,31 @@ namespace dxvk {
     MtlCompareFunction  compareOp   = MtlCompareFunction::Always;
     uint32_t            readMask    = 0xFFu;
     uint32_t            writeMask   = 0xFFu;
+
+    // was DxvkStencilOp
+    void setFailOp(MtlStencilOperation o)      { failOp = o; }
+    void setPassOp(MtlStencilOperation o)      { passOp = o; }
+    void setDepthFailOp(MtlStencilOperation o) { depthFailOp = o; }
+    void setCompareOp(MtlCompareFunction o)    { compareOp = o; }
+    void setCompareMask(uint32_t m)            { readMask = m; }
+    void setWriteMask(uint32_t m)              { writeMask = m; }
   };
 
   struct MtlDepthStencilState {   // -> cached MTLDepthStencilState (NOT a PSO key)
     MtlCompareFunction depthCompareOp = MtlCompareFunction::Always;
+    bool               depthTest      = false;
     bool               depthWrite     = false;
     bool               stencilEnable  = false;
     MtlStencilState    front = { };
     MtlStencilState    back  = { };
+
+    void setDepthTest(bool e)                { depthTest = e; }
+    void setDepthWrite(bool e)               { depthWrite = e; }
+    void setStencilTest(bool e)              { stencilEnable = e; }
+    void setDepthCompareOp(MtlCompareFunction o) { depthCompareOp = o; }
+    void setStencilOpFront(const MtlStencilState& s) { front = s; }
+    void setStencilOpBack(const MtlStencilState& s)  { back = s; }
+    void normalize() { }   // PHASE-E: fold redundant stencil state (was DXVK normalize)
   };
 
   // Per-color-attachment blend descriptor (folds into the render PSO key).
@@ -348,10 +389,30 @@ namespace dxvk {
     MtlBlendFactor    alphaDst      = MtlBlendFactor::Zero;
     MtlBlendOperation alphaOp       = MtlBlendOperation::Add;
     uint32_t          writeMask     = 0xFu;   // RGBA bits
+
+    // was DxvkBlendMode fluent API
+    void setBlendEnable(bool e)          { enable = e; }
+    void setWriteMask(uint32_t m)        { writeMask = m & 0xFu; }
+    void setColorOp(MtlBlendFactor s, MtlBlendFactor d, MtlBlendOperation o) { colorSrc = s; colorDst = d; colorOp = o; }
+    void setAlphaOp(MtlBlendFactor s, MtlBlendFactor d, MtlBlendOperation o) { alphaSrc = s; alphaDst = d; alphaOp = o; }
+    MtlBlendFactor    colorSrcFactor() const { return colorSrc; }
+    MtlBlendFactor    colorDstFactor() const { return colorDst; }
+    MtlBlendOperation colorBlendOp()   const { return colorOp; }
+    MtlBlendFactor    alphaSrcFactor() const { return alphaSrc; }
+    MtlBlendFactor    alphaDstFactor() const { return alphaDst; }
+    MtlBlendOperation alphaBlendOp()   const { return alphaOp; }
+    void normalize() { }   // PHASE-E: canonicalize disabled-blend factors
   };
 
-  struct MtlColor4 {   // blend constant / clear color
-    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+  struct MtlColor4 {   // blend constant / clear color (was VkClearColorValue-shaped)
+    union {
+      struct { float r, g, b, a; };
+      float    float32[4];
+      uint32_t uint32[4];
+      int32_t  int32[4];
+    };
+    MtlColor4() : r(0.0f), g(0.0f), b(0.0f), a(0.0f) { }
+    MtlColor4(float R, float G, float B, float A) : r(R), g(G), b(B), a(A) { }
   };
 
   struct MtlDepthBias {   // setDepthBias:slopeScale:clamp:
@@ -490,7 +551,19 @@ namespace dxvk {
     uint32_t width  = 0u;
     uint32_t height = 0u;
     uint32_t depth  = 1u;
+
+    MtlExtent3D() = default;
+    MtlExtent3D(uint32_t w, uint32_t h, uint32_t d) : width(w), height(h), depth(d) { }
+    MtlExtent3D(const MtlSize& s) : width(s.width), height(s.height), depth(s.depth) { }
+
+    bool operator == (const MtlExtent3D& o) const {
+      return width == o.width && height == o.height && depth == o.depth;
+    }
+    bool operator != (const MtlExtent3D& o) const { return !(*this == o); }
   };
+
+  inline MtlSize::MtlSize(const MtlExtent3D& e)
+  : width(e.width), height(e.height), depth(e.depth) { }
 
   enum class MtlSamplerMipMode : uint32_t {  // MTLSamplerMipFilter
     None    = 0u,
@@ -508,10 +581,19 @@ namespace dxvk {
   // --- format metadata (was DxvkFormatInfo) ----------------------------------
   enum MtlFormatFlag : uint32_t {
     MtlFormatFlagNone       = 0u,
-    MtlFormatFlagCompressed = 1u << 0,   // BC block formats
+    MtlFormatFlagCompressed = 1u << 0,   // BC block formats (was BlockCompressed)
     MtlFormatFlagDepth      = 1u << 1,
     MtlFormatFlagStencil    = 1u << 2,
     MtlFormatFlagPacked     = 1u << 3,
+    MtlFormatFlagMultiPlane = 1u << 4,   // planar YUV (dead: all such formats Invalid)
+  };
+
+  // Per-plane sub-format info (was DxvkFormatInfo::planes). Only touched by the
+  // dead planar-YUV conversion branch; PHASE-E: real plane table.
+  struct MtlFormatPlane {
+    uint32_t elementSize = 0u;
+    uint32_t blockWidth  = 1u;
+    uint32_t blockHeight = 1u;
   };
 
   struct MtlFormatInfo {
@@ -520,6 +602,7 @@ namespace dxvk {
     uint32_t blockHeight = 1u;
     uint32_t flags       = MtlFormatFlagNone;
     MtlAspectMask aspects = MtlAspectColor;
+    MtlFormatPlane planes[1] = { };   // PHASE-E: planar formats
   };
 
   // Defined in mtl_format.cpp; never returns nullptr (Invalid yields zeros).

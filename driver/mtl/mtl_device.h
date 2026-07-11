@@ -155,6 +155,10 @@ namespace dxvk {
     return m_device ? m_device->renameBuffer(this) : nullptr;
   }
 
+  inline Rc<MtlTextureView> MtlTexture::createView(const MtlImageViewKey& key) {
+    return m_device ? m_device->createImageView(Rc<MtlTexture>(this), key) : nullptr;
+  }
+
   /**
    * \brief Adapter (was DxvkAdapter): one per MTLDevice.
    *

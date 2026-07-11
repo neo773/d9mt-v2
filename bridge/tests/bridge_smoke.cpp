@@ -148,6 +148,138 @@ int main(int argc, char** argv) {
   }
   printf("vertex-descriptor PSO: ok\n");
 
+  /* --- render-pass encode of the appended sampler/texture commands -------- *
+   * Drives WMTRenderCommandSetFragmentSamplerState / SetVertexTexture /
+   * SetVertexSamplerState (the per-slot sampler + VTF binds the upstream
+   * wmtcmd ABI lacks) through a real MTLRenderCommandEncoder: bind a sampler
+   * and a texture on both the fragment and vertex stages via a wmtcmd chunk
+   * chain, end the pass, commit, and require the command buffer to complete
+   * without error. No draw is issued (binds are independent of draw), so the
+   * trivial pass reuses the vertex-descriptor PSO created above. */
+  {
+    /* queue + a 1x1 render-target texture (also shader-readable so it can
+     * double as the bound vertex/fragment texture) */
+    struct unixcall_generic_obj_uint64_obj_ret queueCall = {};
+    queueCall.handle = dev0.ret;
+    queueCall.arg = 1; /* maxCommandBufferCount */
+    funcs[9](&queueCall);
+    if (!queueCall.ret) { fprintf(stderr, "FAIL: newCommandQueue\n"); return 1; }
+
+    WMTTextureInfo texInfo = {};
+    texInfo.pixel_format = WMTPixelFormatBGRA8Unorm;
+    texInfo.width = 4;
+    texInfo.height = 4;
+    texInfo.depth = 1;
+    texInfo.array_length = 1;
+    texInfo.type = WMTTextureType2D;
+    texInfo.mipmap_level_count = 1;
+    texInfo.sample_count = 1;
+    texInfo.usage = (enum WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead);
+    texInfo.options = WMTResourceStorageModePrivate;
+
+    struct unixcall_mtldevice_newtexture texCall = {};
+    texCall.device = dev0.ret;
+    texCall.info.set(&texInfo);
+    funcs[21](&texCall);
+    if (!texCall.ret) { fprintf(stderr, "FAIL: newTexture\n"); return 1; }
+
+    WMTSamplerInfo sampInfo = {};
+    sampInfo.min_filter = WMTSamplerMinMagFilterLinear;
+    sampInfo.mag_filter = WMTSamplerMinMagFilterLinear;
+    sampInfo.mip_filter = WMTSamplerMipFilterNotMipmapped;
+    sampInfo.r_address_mode = WMTSamplerAddressModeClampToEdge;
+    sampInfo.s_address_mode = WMTSamplerAddressModeClampToEdge;
+    sampInfo.t_address_mode = WMTSamplerAddressModeClampToEdge;
+    sampInfo.border_color = WMTSamplerBorderColorTransparentBlack;
+    sampInfo.compare_function = WMTCompareFunctionNever;
+    sampInfo.lod_min_clamp = 0.0f;
+    sampInfo.lod_max_clamp = 0.0f;
+    sampInfo.max_anisotroy = 1;
+    sampInfo.normalized_coords = true;
+
+    struct unixcall_mtldevice_newsamplerstate sampCall = {};
+    sampCall.device = dev0.ret;
+    sampCall.info.set(&sampInfo);
+    funcs[19](&sampCall);
+    if (!sampCall.ret) { fprintf(stderr, "FAIL: newSamplerState\n"); return 1; }
+
+    /* command buffer + render command encoder over a single clear-to-store
+     * BGRA8 attachment (matches the PSO's colors[0] format) */
+    struct unixcall_generic_obj_obj_ret cbCall = {};
+    cbCall.handle = queueCall.ret;
+    funcs[11](&cbCall);
+    if (!cbCall.ret) { fprintf(stderr, "FAIL: commandBuffer\n"); return 1; }
+
+    WMTRenderPassInfo pass = {};
+    pass.colors[0].texture = texCall.ret;
+    pass.colors[0].load_action = WMTLoadActionClear;
+    pass.colors[0].store_action = WMTStoreActionStore;
+    pass.colors[0].clear_color = { 0.0, 0.0, 0.0, 1.0 };
+    pass.default_raster_sample_count = 1;
+    pass.render_target_width = 4;
+    pass.render_target_height = 4;
+
+    struct unixcall_generic_obj_uint64_obj_ret encCall = {};
+    encCall.handle = cbCall.ret;
+    encCall.arg = uint64_t(uintptr_t(&pass));
+    funcs[32](&encCall);
+    if (!encCall.ret) { fprintf(stderr, "FAIL: renderCommandEncoder\n"); return 1; }
+
+    /* wmtcmd chunk chain: SetPSO -> SetFragmentSampler -> SetVertexTexture ->
+     * SetVertexSampler. Linked via each command's `next` pointer; encodeCommands
+     * walks the chain and replays each through the encoder. */
+    struct wmtcmd_render_setpso cPso = {};
+    cPso.type = WMTRenderCommandSetPSO;
+    cPso.pso = psoCall.ret_pso;
+
+    struct wmtcmd_render_setsamplerstate cFragSamp = {};
+    cFragSamp.type = WMTRenderCommandSetFragmentSamplerState;
+    cFragSamp.sampler = sampCall.ret;
+    cFragSamp.index = 0;
+
+    struct wmtcmd_render_settexture cVtxTex = {};
+    cVtxTex.type = WMTRenderCommandSetVertexTexture;
+    cVtxTex.texture = texCall.ret;
+    cVtxTex.index = 0;
+
+    struct wmtcmd_render_setsamplerstate cVtxSamp = {};
+    cVtxSamp.type = WMTRenderCommandSetVertexSamplerState;
+    cVtxSamp.sampler = sampCall.ret;
+    cVtxSamp.index = 0;
+
+    cPso.next.set(&cFragSamp);
+    cFragSamp.next.set(&cVtxTex);
+    cVtxTex.next.set(&cVtxSamp);
+    /* cVtxSamp.next left null-terminated */
+
+    struct unixcall_generic_obj_cmd_noret cmdCall = {};
+    cmdCall.encoder = encCall.ret;
+    cmdCall.cmd_head.set(&cPso);
+    funcs[38](&cmdCall);
+
+    struct unixcall_generic_obj_noret endCall = {};
+    endCall.handle = encCall.ret;
+    funcs[33](&endCall);
+
+    struct unixcall_generic_obj_noret commitCall = {};
+    commitCall.handle = cbCall.ret;
+    funcs[12](&commitCall);
+
+    struct unixcall_generic_obj_noret waitCall = {};
+    waitCall.handle = cbCall.ret;
+    funcs[13](&waitCall);
+
+    struct unixcall_generic_obj_uint64_ret statusCall = {};
+    statusCall.handle = cbCall.ret;
+    funcs[14](&statusCall);
+    if (statusCall.ret != WMTCommandBufferStatusCompleted) {
+      fprintf(stderr, "FAIL: render-pass command buffer status %llu (expected %d)\n",
+        (unsigned long long)statusCall.ret, (int)WMTCommandBufferStatusCompleted);
+      return 1;
+    }
+    printf("render-pass sampler/texture encode: ok (status completed)\n");
+  }
+
   /* --- AIR thunk parity --------------------------------------------------- */
   std::vector<uint8_t> irBlob = serializeSm3(sm3Bin);
 

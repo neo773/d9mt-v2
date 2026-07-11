@@ -1,0 +1,113 @@
+#include "mtl_presenter_impl.h"
+
+#include "mtl_device_impl.h"
+
+#include "../mtl/mtl_context.h"   // MtlDevice
+#include "../util/log/log.h"
+
+namespace dxvk::backend {
+
+  namespace {
+    WMTPixelFormat wmtFormat(MtlFormat f) { return WMTPixelFormat(uint32_t(f)); }
+  }
+
+  class MtlPresenterImpl : public MtlPresenter {
+
+  public:
+
+    MtlPresenterImpl(const Rc<MtlDevice>& device, intptr_t hwnd, const MtlPresenterDesc& desc)
+    : m_device(device), m_desc(desc) {
+      auto* impl = static_cast<MtlDeviceImpl*>(device.ptr());
+      m_wmtDevice = impl ? impl->wmtDevice() : 0u;
+
+      obj_handle_t layer = 0u;
+      m_view  = CreateMetalViewFromHWND(hwnd, m_wmtDevice, &layer);
+      m_layer = layer;
+      if (!m_layer)
+        Logger::err("MtlPresenterImpl: CreateMetalViewFromHWND returned no layer");
+      applyProps();
+    }
+
+    ~MtlPresenterImpl() {
+      if (m_view)
+        ReleaseMetalView(m_view);
+    }
+
+    void recreate(const MtlPresenterDesc& desc) override {
+      m_desc = desc;
+      applyProps();
+    }
+
+    MtlAcquiredDrawable acquireNextImage(uint64_t frameId) override {
+      MtlAcquiredDrawable image = {};
+      image.sync.frameId = frameId;
+      image.imageIndex   = uint32_t(frameId % (m_desc.imageCount ? m_desc.imageCount : 1u));
+
+      if (!m_layer)
+        return image;
+
+      obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
+      if (!drawable)
+        return image;   // occluded / no drawable this frame
+
+      image.drawable = drawable;
+
+      /* wrap the drawable's texture so the swapchain can render into it. The
+       * drawable owns the texture; we hold a borrowed handle only. */
+      Rc<MtlTextureImpl> tex = new MtlTextureImpl();
+      tex->texture.tex = MetalDrawable_texture(drawable);
+      tex->format      = m_desc.imageFormat;
+      tex->extent      = { m_desc.imageExtent.width, m_desc.imageExtent.height, 1u };
+      image.texture    = tex;
+      image.valid      = true;
+      return image;
+    }
+
+    void present(const MtlAcquiredDrawable& image) override {
+      /* presentDrawable is recorded on the context's command buffer in
+       * synchronizeWsi (must precede commit); here we only track the frame. */
+      m_lastPresented = image.sync.frameId;
+    }
+
+    void signalFrameLatency(uint64_t frameId) override {
+      /* Contract 3e: advance the frame-latency signal every frame or the
+       * frame limiter deadlocks. The swapchain's limiter waits on this
+       * monotonically-increasing counter. */
+      if (frameId > m_completedFrame)
+        m_completedFrame = frameId;
+    }
+
+    MtlExtent2D getImageExtent() const override { return m_desc.imageExtent; }
+
+  private:
+
+    Rc<MtlDevice>    m_device;
+    MtlPresenterDesc m_desc;
+    obj_handle_t     m_wmtDevice = 0u;
+    obj_handle_t     m_view      = 0u;
+    obj_handle_t     m_layer     = 0u;
+    uint64_t         m_lastPresented = 0u;
+    uint64_t         m_completedFrame = 0u;
+
+    void applyProps() {
+      if (!m_layer)
+        return;
+      WMTLayerProps props = {};
+      props.device               = m_wmtDevice;
+      props.contents_scale       = 1.0;
+      props.drawable_width       = double(m_desc.imageExtent.width);
+      props.drawable_height      = double(m_desc.imageExtent.height);
+      props.opaque               = true;
+      props.display_sync_enabled = m_desc.vsync;
+      props.framebuffer_only     = true;
+      props.pixel_format         = wmtFormat(m_desc.imageFormat);
+      MetalLayer_setProps(m_layer, &props);
+    }
+  };
+
+  Rc<MtlPresenter> createMtlPresenterImpl(
+    const Rc<MtlDevice>& device, intptr_t hwnd, const MtlPresenterDesc& desc) {
+    return new MtlPresenterImpl(device, hwnd, desc);
+  }
+
+}

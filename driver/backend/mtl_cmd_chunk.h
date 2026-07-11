@@ -18,7 +18,7 @@
 #include <cstring>
 #include <vector>
 
-#include "../../third_party/winemetal/winemetal.h"
+#include "../../bridge/winemetal.h"
 
 namespace dxvk::backend {
 

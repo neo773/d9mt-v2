@@ -85,6 +85,12 @@ namespace dxvk {
     MtlDeviceSize        length() const { return m_length; }
     bool                 defined() const { return m_buffer != nullptr; }
 
+    // Sub-view within this slice (was DxvkBufferSlice::subSlice). Offset is
+    // relative to this slice's origin.
+    MtlBufferSlice subSlice(MtlDeviceSize offset, MtlDeviceSize length) const {
+      return MtlBufferSlice(m_buffer, m_offset + offset, length);
+    }
+
   private:
 
     Rc<MtlBuffer> m_buffer = nullptr;
@@ -105,14 +111,32 @@ namespace dxvk {
     uint32_t           layerCount = 1;
     MtlTextureUsage    usage      = MtlTextureUsageShaderRead;
     MtlAspectMask      aspects    = MtlAspectColor;
+    // Dimensionality hint (was VkImageViewType); the backend can also derive it
+    // from layerCount + texture type. PHASE-E: fold into the real view descriptor.
+    MtlTextureViewType viewType   = MtlTextureViewType::e2D;
+    uint32_t           packedSwizzle = 0;   // some callers set a packed swizzle directly
+
+    static uint32_t packSwizzle(MtlSwizzleChannels s) {
+      return (uint32_t(s.r) << 0) | (uint32_t(s.g) << 8)
+           | (uint32_t(s.b) << 16) | (uint32_t(s.a) << 24);
+    }
 
     bool operator == (const MtlImageViewKey& o) const {
       return format == o.format && swizzle == o.swizzle
           && baseMip == o.baseMip && mipCount == o.mipCount
           && baseLayer == o.baseLayer && layerCount == o.layerCount
-          && usage == o.usage && aspects == o.aspects;
+          && usage == o.usage && aspects == o.aspects
+          && viewType == o.viewType && packedSwizzle == o.packedSwizzle;
     }
     bool operator != (const MtlImageViewKey& o) const { return !(*this == o); }
+  };
+
+  // Texel-buffer view cache key (was DxvkBufferViewKey). Minimal; the swvp-emu
+  // draw-count buffer is the only D3D9 user.
+  struct MtlTexelBufferViewKey {
+    MtlFormat     format = MtlFormat::Invalid;
+    MtlDeviceSize offset = 0;
+    MtlDeviceSize length = 0;
   };
 
   // --- Rc<>-managed resource objects ---------------------------------------
@@ -128,6 +152,12 @@ namespace dxvk {
     // device's completed serial (was DxvkPagedResource tracking).
     uint64_t trackingSerial() const { return m_trackingSerial; }
     void setTrackingSerial(uint64_t serial) { m_trackingSerial = serial; }
+
+    // Whether the GPU may still be using this resource (was DxvkPagedResource::
+    // isInUse). PHASE-E: compare trackingSerial against the device completed
+    // serial for the given access; the stub is conservative-safe as false
+    // (CPU never blocks) — the real submission tracker wires this in the backend.
+    bool isInUse(MtlCpuAccess = MtlCpuAccess::Read) const { return false; }
 
   private:
     uint64_t m_trackingSerial = 0u;
@@ -188,12 +218,48 @@ namespace dxvk {
     friend class MtlDevice;
   };
 
+  // Image metadata the frontend reads back through image->info() (was
+  // DxvkImageCreateInfo, the subset d3d9/ touches). Populated by
+  // MtlDevice::createImage; PHASE-E: backend fills every field from the real
+  // MTLTextureDescriptor.
+  struct MtlImageInfo {
+    MtlImageType       type          = MtlImageType::e2D;
+    MtlFormat          format        = MtlFormat::Invalid;
+    MtlExtent3D        extent        = { };
+    uint32_t           mipLevels     = 1u;
+    uint32_t           numLayers     = 1u;
+    uint32_t           sampleCount   = 1u;
+    MtlTextureUsage    usage         = MtlTextureUsageShaderRead;
+    MtlSwizzleChannels unpackSwizzle = { };
+  };
+
   class MtlTexture : public MtlResource {
   public:
     MtlTextureHandle texture        = { };   // primary
     MtlTextureHandle resolveTexture = { };   // MSAA resolve target (optional)
     MtlFormat        format         = MtlFormat::Invalid;
     MtlSize          extent         = { };
+    MtlImageInfo     m_info         = { };
+
+    const MtlImageInfo& info() const { return m_info; }
+
+    const MtlFormatInfo* formatInfo() const { return lookupFormatInfo(m_info.format); }
+
+    // Image-owned view creation (was DxvkImage::createView) — delegates to the
+    // device view pool. Defined inline in mtl_device.h once MtlDevice is complete.
+    Rc<MtlTextureView> createView(const MtlImageViewKey& key);
+
+    MtlDevice* m_device = nullptr;   // backend fills; for createView
+
+    // Extent of a given mip (was DxvkImage::mipLevelExtent). Halves per level,
+    // clamped to 1; 3D depth also shrinks.
+    MtlExtent3D mipLevelExtent(uint32_t mip) const {
+      MtlExtent3D e = m_info.extent;
+      e.width  = e.width  > (1u << mip) ? e.width  >> mip : 1u;
+      e.height = e.height > (1u << mip) ? e.height >> mip : 1u;
+      e.depth  = m_info.type == MtlImageType::e3D && e.depth > (1u << mip) ? e.depth >> mip : e.depth;
+      return e;
+    }
   };
 
   class MtlTextureView : public MtlResource {

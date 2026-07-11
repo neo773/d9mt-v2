@@ -54,6 +54,19 @@ CORE+=("$DRV"/wsi/wsi_platform.cpp "$DRV"/wsi/win32/wsi_monitor_win32.cpp \
 CORE+=("$DRV"/cs/dxvk_cs.cpp)
 CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
        "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp)
+# backend/ — the real winemetal-backed Metal 3 backend (MtlContextImpl +
+# device/ring/submission/pso-cache/presenter). These override the seam-base
+# stub methods; the stubs still supply the MtlContext/MtlDevice base vtable
+# bodies for the few methods the impl leaves to the base. mtl_pso_cache.cpp
+# includes v2/bridge/winemetal.h (superset of third_party's, shared
+# _WINEMETAL_H guard) for the vertex-descriptor pipeline entry (code 153,
+# MTLDevice_newRenderPipelineStateWithVertexDescriptor); that import symbol
+# lives in the bridge thunks and shows as an expected undefined in the
+# non-fatal d3d9.dll link until a bridge import lib is wired for shipping.
+CORE+=("$DRV"/backend/mtl_context_impl.cpp "$DRV"/backend/mtl_context_impl2.cpp \
+       "$DRV"/backend/mtl_pso_cache.cpp "$DRV"/backend/mtl_presenter_impl.cpp \
+       "$DRV"/backend/mtl_device_impl.cpp "$DRV"/backend/mtl_ring.cpp \
+       "$DRV"/backend/mtl_submission.cpp)
 # d3d9 — Phase-C ported ADAPT retypes + Phase-D neutral stubs that compile now.
 #   d3d9_util        : enum-decoder retype (Vk*->Mtl*), ADAPT.
 #   d3d9_names       : enum->string debug tables, KEEP (util_enum include fixed).

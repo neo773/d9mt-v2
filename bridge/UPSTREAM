@@ -7,5 +7,17 @@ Local changes:
   - airconv_thunks.{c,h} removed (call DXMT SM50* entry points we do not ship);
     replaced by d9mtair_thunks.{c,h} in the same dispatch style, backed by the
     v2/airlib compile core (AirBuilder + LLVM).
-  - winemetal.h / winemetal_thunks.{c,h} / unix/winemetal_unix.c: one additive
-    ABI entry — vertex-descriptor-capable render PSO creation (see UPSTREAM.diff).
+  - winemetal.h / winemetal_thunks.{c,h} / unix/winemetal_unix.c: additive
+    ABI entries, appended to keep existing values stable:
+      #1 vertex-descriptor-capable render PSO creation (unix call 153).
+      #2 per-slot sampler + vertex-texture render commands — the wmtcmd render
+         encoder gains WMTRenderCommandSetFragmentSamplerState,
+         WMTRenderCommandSetVertexTexture, WMTRenderCommandSetVertexSamplerState
+         (appended after SetArgumentBufferOffset in enum WMTRenderCommandType),
+         replayed as [setFragmentSamplerState:/setVertexTexture:/
+         setVertexSamplerState: atIndex:] in the render encodeCommands switch.
+         Reuses the existing wmtcmd_render_settexture shape plus a mirrored
+         wmtcmd_render_setsamplerstate (obj_handle_t sampler + uint8 index).
+         No new unix-call slot: these ride the existing encodeCommands chain.
+         D3D9 binds 16 flat sampler slots + vertex textures; DXMT's D3D11 model
+         binds via argument buffers, so upstream's wmtcmd lacked these.

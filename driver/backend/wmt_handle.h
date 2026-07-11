@@ -11,7 +11,10 @@
 #include <cstdint>
 #include <utility>
 
-#include "../../third_party/winemetal/winemetal.h"
+/* The BRIDGE header is the canonical ABI: upstream winemetal plus our
+ * additive entries (vertex-descriptor PSO, per-slot samplers, vertex
+ * textures). Same _WINEMETAL_H guard — supersedes third_party's copy. */
+#include "../../bridge/winemetal.h"
 
 namespace dxvk::backend {
 
