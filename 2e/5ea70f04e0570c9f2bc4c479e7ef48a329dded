@@ -1,0 +1,45 @@
+driver/dxvk/dxvk_allocator.cpp
+  s_099954a5f894ee::t_01d990f03d45a8 1-633
+driver/d3d9/d3d9_options.cpp
+  s_099954a5f894ee::t_858a720436fb06 92-93
+  s_099954a5f894ee::t_486123ca17ac92 32-36
+driver/d3d9/d3d9_com_guid.cpp
+  s_099954a5f894ee::t_cbe38929343f68 1-46
+driver/d3d9/d3d9_interface.cpp
+  s_099954a5f894ee::t_35efc8e1cc708c 1-539
+driver/d3d9/d3d9_shader.cpp
+  s_099954a5f894ee::t_735043e4627112 16-48
+driver/d3d9/d3d9_bridge.cpp
+  s_099954a5f894ee::t_b2d79ea2f2a1b5 1-129
+driver/d3d9/d3d9_main.cpp
+  s_099954a5f894ee::t_234e39a62d3683 1-122
+driver/d3d9/d3d9_swapchain.cpp
+  s_099954a5f894ee::t_46bc3bfb790633 17-18
+  s_099954a5f894ee::t_b1e9ae7a42b19f 1-16,19-1043
+scripts/build-driver.sh
+  s_099954a5f894ee::t_717cfdf79671ae 110-120,122
+  s_099954a5f894ee::t_be9eff97e1476e 267-268
+  s_099954a5f894ee::t_75b79f5cfcbc89 121
+  s_099954a5f894ee::t_8e5787dd99c50a 246-251,255-256
+  s_099954a5f894ee::t_3ee492074674af 55-57
+  s_099954a5f894ee::t_78b0e72a78d2b7 259-261,274-280
+  s_099954a5f894ee::t_a58e18f4a642f3 46
+driver/EXTRACTION-LOG.md
+  s_099954a5f894ee::t_9c9c1bf391bf30 721-761
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2e5ea70f04e0570c9f2bc4c479e7ef48a329dded",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
