@@ -1,0 +1,67 @@
+driver/d3d9/d3d9_texture.cpp
+  s_099954a5f894ee::t_619f7f0f46ab5d 1-35,37-132,134-223,225-299
+  s_099954a5f894ee::t_d084e32fae5c7c 36,133,224
+driver/d3d9/d3d9_query.cpp
+  s_099954a5f894ee::t_66a36571cb78cb 197,200,202-203,206
+  s_099954a5f894ee::t_edb7c583350606 271
+  s_099954a5f894ee::t_000e11c2afd1c7 252,256
+  s_099954a5f894ee::t_b645d18783eec2 1-12,14-23,25-27,29-32,34-178,180,182-183,185-196,198-199,201,204-205,207-251,253-255,257-270,272-325
+  s_099954a5f894ee::t_50c9bec9d7b684 13,24,28,33
+  s_099954a5f894ee::t_00f5c28107268d 179,181,184
+driver/d3d9/d3d9_volume.cpp
+  s_099954a5f894ee::t_619f7f0f46ab5d 1-71,73-150
+  s_099954a5f894ee::t_8784763040ea5c 72
+driver/mtl/mtl_device.h
+  s_099954a5f894ee::t_dd076810f0feff 142-143
+  s_099954a5f894ee::t_1aebf43f609805 139-141,144-147
+  s_099954a5f894ee::t_d534b9c8ca4287 31-33
+driver/d3d9/d3d9_swvp_emu.cpp
+  s_099954a5f894ee::t_9260f3c2ca22ba 1-65
+driver/d3d9/d3d9_buffer.cpp
+  s_099954a5f894ee::t_a9527c2dc0acbf 1-124
+driver/d3d9/d3d9_constant_buffer.cpp
+  s_099954a5f894ee::t_8b282da003050c 1-230
+driver/mtl/mtl_context.h
+  s_099954a5f894ee::t_14077d2be624e2 55-81
+driver/d3d9/d3d9_common_texture.cpp
+  s_099954a5f894ee::t_db91ed152ee964 1-637
+driver/d3d9/d3d9_annotation.cpp
+  s_099954a5f894ee::t_127d10f7421614 1-130,134-142,144-155,158-166
+  s_099954a5f894ee::t_54c2b7414df13e 131-133
+  s_099954a5f894ee::t_31726bc8f58773 143
+  s_099954a5f894ee::t_43e58c004c1260 156-157
+driver/d3d9/d3d9_surface.cpp
+  s_099954a5f894ee::t_619f7f0f46ab5d 1-91,93-265
+  s_099954a5f894ee::t_771aa61f3180b8 92
+driver/mtl/mtl_device_stub.cpp
+  s_099954a5f894ee::t_f5965065de3873 103-126
+driver/d3d9/d3d9_initializer.cpp
+  s_099954a5f894ee::t_721d49090e9a40 1-204
+driver/d3d9/d3d9_common_buffer.cpp
+  s_099954a5f894ee::t_8680bbdc39eef4 1-156
+driver/EXTRACTION-LOG.md
+  s_099954a5f894ee::t_a84f4936805fcf 484-547
+scripts/build-driver.sh
+  s_099954a5f894ee::t_b130b2fb243c5a 72
+  s_099954a5f894ee::t_ef9ffe22b511d9 73
+  s_099954a5f894ee::t_4e3c6886ce66b4 74-76
+  s_099954a5f894ee::t_fdd17c9d25323c 78
+  s_099954a5f894ee::t_cf8add8c2bdead 77
+  s_099954a5f894ee::t_580b21d46df4b5 79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "15c884427aafe36532996b8867bb7b0140578754",
+  "prompts": {},
+  "sessions": {
+    "s_099954a5f894ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58c3663d-6c63-4d3e-b326-fb15530aa604",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
