@@ -1,0 +1,25 @@
+driver/backend/mtl_device_impl.h
+  s_02998b4ed19c89::t_43848ac0d6deea 37-42
+driver/backend/mtl_device_impl.cpp
+  s_02998b4ed19c89::t_9f0986e8bafe38 101-109
+driver/d3d9/d3d9_device.cpp
+  s_02998b4ed19c89::t_56d565caebc65c 5534-5537
+driver/d3d9/d3d9_swapchain.cpp
+  s_02998b4ed19c89::t_d53928ba2d5445 750-761,763-765
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c3c8363e8ca2669cba15254b830572573170d13e",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
