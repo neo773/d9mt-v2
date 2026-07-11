@@ -68,6 +68,16 @@ namespace dxvk::backend {
       uint32_t dh = uint32_t(MTLTexture_height(drawableTex));
       tex->extent      = { dw ? dw : m_desc.imageExtent.width,
                            dh ? dh : m_desc.imageExtent.height, 1u };
+
+      /* Re-pin drawableSize when the layer drifted: applyProps sets it on the
+       * main thread asynchronously, and any later view layout resets it to
+       * bounds*contentsScale (window-sized). The present copy cannot scale, so
+       * a window-sized drawable shows the backbuffer in the top-left corner.
+       * Pinning back to the backbuffer size makes CA scale it to the window.
+       * Takes effect on a subsequent drawable — self-heals within a frame. */
+      if (dw && dh &&
+          (dw != m_desc.imageExtent.width || dh != m_desc.imageExtent.height))
+        applyProps();
       image.texture    = tex;
       image.valid      = true;
       return image;
