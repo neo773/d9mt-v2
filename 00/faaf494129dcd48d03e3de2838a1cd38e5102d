@@ -1,0 +1,29 @@
+test/code_updatetex.c
+  s_02998b4ed19c89::t_844adad4f32961 1-187
+driver/backend/mtl_device_impl.cpp
+  s_02998b4ed19c89::t_e96b2a442f7269 164-173
+  s_02998b4ed19c89::t_9181b0ee1c704d 182-196
+driver/backend/mtl_context_impl.cpp
+  s_02998b4ed19c89::t_ac7b7207a8edd1 40-41,43
+  s_02998b4ed19c89::t_c73dcd8417e87d 170,172
+driver/d3d9/d3d9_device.cpp
+  s_02998b4ed19c89::t_1227b566134c56 1060-1062
+  s_02998b4ed19c89::t_30cf2e720693bd 5069
+  s_02998b4ed19c89::t_21cc4687b10c77 5266-5271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "00faaf494129dcd48d03e3de2838a1cd38e5102d",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
