@@ -33,6 +33,10 @@ FLAGS=(-std=c++17 -O1 -g -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mf
 # populated DXVK-3.0-uptsream/subprojects/dxbc-spirv submodule.
 DXBC="$V2/third_party/dxbc-spirv"
 FLAGS+=(-I"$DXBC")
+# airlib/ holds the pure-C AIR compile ABI header (d9mtair.h) that the real
+# shader module (d3d9_shader_compiler.cpp) marshals into. Header-only include;
+# the D9MTAir* thunk symbols resolve through the winemetal import lib below.
+FLAGS+=(-I"$V2/airlib")
 
 # --- CORE source list (must compile) --------------------------------------
 # util: everything except TUs pulling not-yet-ported deps.
@@ -78,6 +82,7 @@ CORE+=("$DRV"/backend/mtl_context_impl.cpp "$DRV"/backend/mtl_context_impl2.cpp 
 #   d3d9_fixed_function : PHASE-D FF module-set stub (keys kept, lookup stubbed).
 CORE+=("$DRV"/d3d9/d3d9_util.cpp "$DRV"/d3d9/d3d9_names.cpp \
        "$DRV"/d3d9/d3d9_format.cpp "$DRV"/d3d9/d3d9_shader.cpp \
+       "$DRV"/d3d9/d3d9_shader_compiler.cpp \
        "$DRV"/d3d9/d3d9_fixed_function.cpp)
 # Phase C-3 additions (compile-verified):
 #   d3d9_constant_copy    : backend-neutral constant-layout/copy (0 Vk, util-only).
@@ -252,8 +257,20 @@ WMDEF="$V2/build/bridge/winemetal.def"
 WMIMP="$BUILD/libwinemetal32.a"
 D3D9DEF="$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def"
 if command -v i686-w64-mingw32-dlltool >/dev/null && [ -f "$WMDEF" ]; then
-  i686-w64-mingw32-dlltool -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
-    && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
+  # The real shader module (d3d9_shader_compiler.cpp) imports the d9mtair AIR
+  # compile thunks (D9MTAirCompile/Free/Version). The bridge-generated def
+  # already carries them; when we fall back to the older third_party def it does
+  # not, so union in the thunk names from bridge/d9mtair_thunks.h (same grep the
+  # bridge uses) before generating the import lib. Keeps the driver link FATAL
+  # green whether or not build-bridge.sh has been run.
+  COMBDEF="$BUILD/winemetal-driver.def"
+  cp "$WMDEF" "$COMBDEF"
+  if ! grep -q 'D9MTAirCompile' "$COMBDEF"; then
+    /usr/bin/grep -hoE '[A-Za-z_][A-Za-z0-9_]*\(' "$V2/bridge/d9mtair_thunks.h" \
+      | sed -E 's/\($//; s/^/  /' >> "$COMBDEF"
+  fi
+  i686-w64-mingw32-dlltool -d "$COMBDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+    && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/} + d9mtair thunks)"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
 # Phase C-10: the link is now FATAL. The full CORE graph (device/swapchain/

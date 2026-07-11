@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include "mtl_types.h"
 #include "mtl_resource.h"
 
@@ -31,6 +33,7 @@ namespace dxvk {
   class MtlContext;
   class MtlQuery;                       // defined in mtl_context.h
   class MtlEvent;
+  class MtlShaderFunction;              // defined in mtl_context.h
   enum class MtlQueryType : uint32_t;   // defined in mtl_context.h
 
   struct MtlBufferCreateInfo {
@@ -98,6 +101,15 @@ namespace dxvk {
     /* Cached: bounded by D3D9 state space; lookup in steady state. */
     virtual Rc<MtlSamplerState> createSampler(
             const MtlSamplerKey&        key);
+
+    // --- shader modules -----------------------------------------------------
+    /* Wrap AIR metallib bytes (from the SM3->AIR compiler, doc 03/04) into a
+     * bindable shader function via MTLDevice_newLibrary. Entry point is always
+     * "main" (the AIR emitter's convention). Returns nullptr on failure. */
+    virtual Rc<MtlShaderFunction> createShaderFunction(
+            MtlShaderStage              stage,
+            const void*                 metallib,
+            size_t                      size);
 
     // --- contexts / submission ---------------------------------------------
     virtual Rc<MtlContext> createContext();

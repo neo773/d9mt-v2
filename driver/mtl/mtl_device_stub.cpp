@@ -49,6 +49,12 @@ namespace dxvk {
     return nullptr;
   }
 
+  Rc<MtlShaderFunction> MtlDevice::createShaderFunction(
+    MtlShaderStage stage, const void* metallib, size_t size) {
+    Logger::warn("MtlDevice::createShaderFunction: stub");
+    return nullptr;
+  }
+
   Rc<MtlContext> MtlDevice::createContext() {
     Logger::warn("MtlDevice::createContext: stub");
     return nullptr;

@@ -76,6 +76,11 @@ namespace dxvk::backend {
     Rc<MtlSamplerState> createSampler(
             const MtlSamplerKey&        key) override;
 
+    Rc<MtlShaderFunction> createShaderFunction(
+            MtlShaderStage              stage,
+            const void*                 metallib,
+            size_t                      size) override;
+
     Rc<MtlContext> createContext() override;
 
     uint64_t getCompletedSerial() override;

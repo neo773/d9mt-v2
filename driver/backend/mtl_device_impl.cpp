@@ -254,6 +254,37 @@ namespace dxvk::backend {
     return storage;
   }
 
+  Rc<MtlShaderFunction> MtlDeviceImpl::createShaderFunction(
+    MtlShaderStage stage, const void* metallib, size_t size) {
+    if (!metallib || !size)
+      return nullptr;
+
+    // Wrap the AIR metallib bytes in a dispatch_data and hand them to
+    // -newLibraryWithData: (doc 04). The unix side copies out of the given
+    // native pointer, so the transient buffer only needs to outlive this call.
+    obj_handle_t data = DispatchData_alloc_init(uint64_t(uintptr_t(metallib)), uint64_t(size));
+    if (!data) {
+      Logger::err("MtlDeviceImpl::createShaderFunction: DispatchData_alloc_init failed");
+      return nullptr;
+    }
+
+    obj_handle_t err = 0u;
+    obj_handle_t library = MTLDevice_newLibrary(m_device.handle(), data, &err);
+    NSObject_release(data);
+
+    if (!library) {
+      Logger::err("MtlDeviceImpl::createShaderFunction: newLibraryWithData failed");
+      if (err)
+        NSObject_release(err);
+      return nullptr;
+    }
+
+    auto fn = new MtlShaderFunction();
+    fn->stage   = stage;
+    fn->library = MtlObjectHandle(library);
+    return fn;
+  }
+
   Rc<MtlContext> MtlDeviceImpl::createContext() {
     return new MtlContextImpl(Rc<MtlDeviceImpl>(this));
   }
