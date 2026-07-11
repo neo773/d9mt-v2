@@ -1,0 +1,31 @@
+driver/mtl/mtl_format.cpp
+  s_02998b4ed19c89::t_aa77e0a56a2eca 23,25,28-30,35-36,42-49,51-52
+driver/backend/mtl_context_impl.h
+  s_02998b4ed19c89::t_aa77e0a56a2eca 264,266
+bridge/unix/winemetal_unix.c
+  s_02998b4ed19c89::t_aa77e0a56a2eca 3712-3715,5635-5637,5648-5650,5663-5665
+driver/backend/mtl_context_impl.cpp
+  s_02998b4ed19c89::t_aa77e0a56a2eca 4,73-77,80,83-91,93,95,103-109,126-148,153-169,202-204,270-273,577-580
+driver/backend/mtl_context_impl2.cpp
+  s_02998b4ed19c89::t_aa77e0a56a2eca 326,394-398,520-532
+driver/d3d9/d3d9_format.cpp
+  s_02998b4ed19c89::t_aa77e0a56a2eca 378-381,411-412
+driver/d3d9/d3d9_util.cpp
+  s_02998b4ed19c89::t_aa77e0a56a2eca 73,82-85,91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ef960dc1fff3df0cb2551daa14330fdaf95ebdf3",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
