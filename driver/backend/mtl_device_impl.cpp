@@ -98,6 +98,15 @@ namespace dxvk::backend {
       m_tracker->waitFor(m_tracker->lastSubmittedSerial());
   }
 
+  MtlAllocationImpl::~MtlAllocationImpl() {
+    /* Release the Metal buffer BEFORE freeing its bytesNoCopy host memory. */
+    owned.reset();
+    if (mapPtr) {
+      VirtualFree(mapPtr, 0, MEM_RELEASE);
+      mapPtr = nullptr;
+    }
+  }
+
   Rc<MtlBuffer> MtlDeviceImpl::createBuffer(const MtlBufferCreateInfo& info) {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = info.size;

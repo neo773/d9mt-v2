@@ -34,6 +34,12 @@ namespace dxvk::backend {
   class MtlAllocationImpl : public MtlAllocation {
   public:
     WmtBuffer owned;
+
+    /* Frees the VirtualAlloc'd host backing (bytesNoCopy memory). Runs only
+     * after the retirement spine drops the last Rc, i.e. the GPU is done.
+     * Without this every buffer create/MAP_DISCARD rename leaked 32-bit
+     * address space until VirtualAlloc returned NULL (staging memcpy to 0). */
+    ~MtlAllocationImpl();
   };
 
   class MtlBufferImpl : public MtlBuffer {

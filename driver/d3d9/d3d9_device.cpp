@@ -5531,6 +5531,10 @@ namespace dxvk {
     D3D9Range& range = pResource->DirtyRange();
 
     D3D9BufferSlice slice = AllocStagingBuffer(range.max - range.min);
+    if (unlikely(slice.mapPtr == nullptr || srcSlice->mapPtr == nullptr)) {
+      Logger::err("D3D9DeviceEx::FlushBuffer: staging allocation failed (address space?)");
+      return D3DERR_OUTOFVIDEOMEMORY;
+    }
     void* srcData = reinterpret_cast<uint8_t*>(srcSlice->mapPtr) + range.min;
     memcpy(slice.mapPtr, srcData, range.max - range.min);
 

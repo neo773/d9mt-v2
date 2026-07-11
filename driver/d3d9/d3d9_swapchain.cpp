@@ -747,14 +747,22 @@ namespace dxvk {
 
     // Rotate swap chain buffers so that the back buffer at index 0 becomes the
     // front buffer.
-    uint32_t rotatingBufferCount = m_backBuffers.size();
-    if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
-      // The front buffer only exists for GetFrontBufferData.
-      rotatingBufferCount -= 1;
-    }
+    //
+    // WINDOWED = blit model: real drivers present windowed swap chains by
+    // copying, so the backbuffer's content survives Present regardless of
+    // swap effect, and games depend on it (GTA IV composes its loading art
+    // incrementally, a few pretransformed tiles per frame — rotation showed
+    // one lone tile per present). Skip rotation and keep buffer 0 stable.
+    if (!m_presentParams.Windowed) {
+      uint32_t rotatingBufferCount = m_backBuffers.size();
+      if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
+        // The front buffer only exists for GetFrontBufferData.
+        rotatingBufferCount -= 1;
+      }
 
-    for (uint32_t i = 1; i < rotatingBufferCount; i++)
-      m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
+      for (uint32_t i = 1; i < rotatingBufferCount; i++)
+        m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
+    }
 
     m_parent->m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
   }
