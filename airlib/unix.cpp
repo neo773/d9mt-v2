@@ -102,26 +102,50 @@ int compileImpl(d9mt_air_compile_params* p) {
   size_t reflectionSize = sizeof(header)
     + entries.size() * sizeof(d9mt_air_reflection_entry);
 
+  auto writeReflection = [&](void* dst) {
+    std::memcpy(dst, &header, sizeof(header));
+    if (!entries.empty())
+      std::memcpy(static_cast<uint8_t*>(dst) + sizeof(header),
+        entries.data(), entries.size() * sizeof(d9mt_air_reflection_entry));
+  };
+
+  p->out_size = metallib.size();
+  p->out_reflection_size = reflectionSize;
+
+  /* 32-bit PE mode: copy into the caller's own buffers (a unix-allocated
+   * pointer would be unreachable from the 32-bit PE process). Unix can
+   * write PE memory via the wine mapping. */
+  if (p->pe_metallib_buffer || p->pe_reflection_buffer) {
+    if (metallib.size() > p->pe_metallib_capacity
+     || reflectionSize > p->pe_reflection_capacity) {
+      p->ret_status = D9MT_AIR_BUFFER_TOO_SMALL;
+      return 0;
+    }
+    std::memcpy(reinterpret_cast<void*>(uintptr_t(p->pe_metallib_buffer)),
+      metallib.data(), metallib.size());
+    writeReflection(reinterpret_cast<void*>(uintptr_t(p->pe_reflection_buffer)));
+    p->out_metallib = 0u;
+    p->out_reflection = 0u;
+    p->ret_status = D9MT_AIR_OK;
+    return 0;
+  }
+
+  /* host / loopback mode: unix-allocated, freed via FUNC_FREE */
   void* metallibOut = std::malloc(metallib.size());
   void* reflectionOut = std::malloc(reflectionSize);
 
   if (!metallibOut || !reflectionOut) {
     std::free(metallibOut);
     std::free(reflectionOut);
+    p->ret_status = D9MT_AIR_INTERNAL;
     return 0;
   }
 
   std::memcpy(metallibOut, metallib.data(), metallib.size());
-  std::memcpy(reflectionOut, &header, sizeof(header));
-  if (!entries.empty()) {
-    std::memcpy(static_cast<uint8_t*>(reflectionOut) + sizeof(header),
-      entries.data(), entries.size() * sizeof(d9mt_air_reflection_entry));
-  }
+  writeReflection(reflectionOut);
 
   p->out_metallib = uint64_t(uintptr_t(metallibOut));
-  p->out_size = metallib.size();
   p->out_reflection = uint64_t(uintptr_t(reflectionOut));
-  p->out_reflection_size = reflectionSize;
   p->ret_status = D9MT_AIR_OK;
   return 0;
 }

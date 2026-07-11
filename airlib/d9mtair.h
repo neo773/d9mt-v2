@@ -30,6 +30,7 @@ enum d9mt_air_status {
   D9MT_AIR_BAD_IR = 1,          /* deserialization failed */
   D9MT_AIR_UNSUPPORTED = 2,     /* AirBuilder rejected an op */
   D9MT_AIR_INTERNAL = 3,
+  D9MT_AIR_BUFFER_TOO_SMALL = 4, /* caller pe_*_buffer too small for result */
 };
 
 /* compile flags */
@@ -53,6 +54,18 @@ struct d9mt_air_compile_params {
   uint64_t out_reflection_size; /* out                                     */
   uint32_t ret_status;     /* out: d9mt_air_status                         */
   uint32_t reserved;
+  /* CALLER-PROVIDED output buffers (32-bit PE mode): unix-allocated
+   * pointers are unreachable from a 32-bit PE process, so the PE side
+   * passes its OWN buffers here and the unix side memcpy's the result
+   * into them (unix can write PE memory via the wine mapping). When
+   * these are non-zero, out_metallib/out_reflection are left 0 (no
+   * unix allocation, no FUNC_FREE needed). out_size / out_reflection_size
+   * report the real sizes; ret_status = D9MT_AIR_BUFFER_TOO_SMALL if a
+   * buffer is undersized. Host/loopback callers leave these 0. */
+  uint64_t pe_metallib_buffer;   /* in: PE ptr for metallib bytes           */
+  uint64_t pe_metallib_capacity; /* in                                      */
+  uint64_t pe_reflection_buffer; /* in: PE ptr for reflection blob          */
+  uint64_t pe_reflection_capacity; /* in                                    */
 };
 
 struct d9mt_air_free_params {

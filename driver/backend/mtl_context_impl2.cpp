@@ -1,4 +1,5 @@
 #include "mtl_context_impl.h"
+#include "../util/util_string.h"
 
 #include <algorithm>
 #include <cstring>
@@ -180,6 +181,17 @@ namespace dxvk::backend {
         const Rc<MtlBuffer>& buf = cbv.slice.buffer();
         if (buf == nullptr)
           continue;
+        /* Guard against a constant buffer with no valid backing storage: a
+         * bound CBV whose MtlBuffer has null/garbage storage would fault on
+         * gpuAddress and GPU-fault if bound. (Root cause: a stage-N constant
+         * buffer bound before its ring storage was allocated — surfaced by
+         * this warning; the frontend should not bind an unbacked CBV.) */
+        if (buf->storage() == nullptr
+         || uintptr_t(buf->storage().ptr()) < 0x10000u) {
+          logOnce("MtlContextImpl: skipped CBV with no backing storage "
+                  "(slot-mapping/lifetime bug — see SOURCE_OF_TRUTH)");
+          continue;
+        }
         makeResident(buf->handle.buf);
         MTL4ArgumentTable_setAddress(
           table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset), slot);

@@ -1261,6 +1261,13 @@ namespace dxvk {
 
       std::string entry = "main";
 
+      // 32-bit PE mode: provide OUR OWN output buffers. A unix-allocated
+      // pointer (out_metallib) is unreachable from this 32-bit process;
+      // the unix side memcpy's the result into these PE buffers instead.
+      // Metallibs for D3D9 shaders are small; 512 KB is generous.
+      std::vector<uint8_t> metallib(512u * 1024u);
+      std::vector<uint8_t> reflection(64u * 1024u);
+
       d9mt_air_compile_params params = { };
       params.ir_data     = uint64_t(uintptr_t(irBuf.data()));
       params.ir_size     = irBuf.size();
@@ -1268,21 +1275,20 @@ namespace dxvk {
       params.flags       = D9MT_AIR_FLAG_FOLD_SPEC;
       params.spec_count  = 0u;
       params.spec_data   = 0u;
+      params.pe_metallib_buffer     = uint64_t(uintptr_t(metallib.data()));
+      params.pe_metallib_capacity   = metallib.size();
+      params.pe_reflection_buffer   = uint64_t(uintptr_t(reflection.data()));
+      params.pe_reflection_capacity = reflection.size();
 
       uint32_t status = D9MTAirCompile(&params);
 
-      if (status != D9MT_AIR_OK || !params.out_metallib || !params.out_size) {
+      if (status != D9MT_AIR_OK || !params.out_size) {
         Logger::err(str::format("D3D9 AIR: compile thunk failed (status ", status, ") for ", m_name));
-        if (params.out_metallib) { d9mt_air_free_params f = { params.out_metallib }; D9MTAirFree(&f); }
-        if (params.out_reflection) { d9mt_air_free_params f = { params.out_reflection }; D9MTAirFree(&f); }
         return { };
       }
 
-      const uint8_t* bytes = reinterpret_cast<const uint8_t*>(uintptr_t(params.out_metallib));
-      std::vector<uint8_t> metallib(bytes, bytes + params.out_size);
-
-      { d9mt_air_free_params f = { params.out_metallib }; D9MTAirFree(&f); }
-      if (params.out_reflection) { d9mt_air_free_params f = { params.out_reflection }; D9MTAirFree(&f); }
+      metallib.resize(params.out_size);
+      reflection.resize(params.out_reflection_size);
 
       {
         std::lock_guard lock(m_metallibMutex);

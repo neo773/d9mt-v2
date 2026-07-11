@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "../util/log/log.h"
+#include "../util/util_string.h"
 
 namespace dxvk::backend {
 
@@ -112,13 +113,27 @@ namespace dxvk::backend {
     }
     vinfo.num_layouts = numLayouts;
 
+    /* D3D9 sm3 vertex shaders always declare a point-size output; Metal
+     * rejects that against an explicit primitive-topology class, so the
+     * pipeline's topology class stays Unspecified (matches the classic
+     * vertex-descriptor path). Per-draw primitive type is set on the
+     * encoder, not baked into the PSO. */
+    info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
+
     obj_handle_t err = 0u;
     obj_handle_t pso = MTL4Compiler_newRenderPipelineState(m_compiler, &info, &err);
 
     if (!pso) {
-      Logger::err("RenderPsoCache: pipeline build failed");
-      if (err)
+      if (err) {
+        char buf[512] = {};
+        obj_handle_t desc = NSObject_description(err);
+        if (desc)
+          NSString_getCString(desc, buf, sizeof(buf) - 1u, WMTUTF8StringEncoding);
+        Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
         NSObject_release(err);
+      } else {
+        Logger::err("RenderPsoCache: pipeline build failed (no error object)");
+      }
     }
     return pso;
   }

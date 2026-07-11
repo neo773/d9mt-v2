@@ -78,8 +78,7 @@ WINEMETAL_API uint64_t MTLDevice_currentAllocatedSize(obj_handle_t device);
 
 WINEMETAL_API obj_handle_t MTLDevice_name(obj_handle_t device);
 
-WINEMETAL_API uint32_t
-NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding);
+WINEMETAL_API uint32_t NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding);
 
 WINEMETAL_API obj_handle_t MTLDevice_newCommandQueue(obj_handle_t device, uint64_t maxCommandBufferCount);
 

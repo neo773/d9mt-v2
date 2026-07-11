@@ -80,6 +80,7 @@ struct BufferVar {
   ir::SsaDef def = {};
   ir::BuiltIn builtin = ir::BuiltIn::eLegacyConstFloat;
   bool isCbv = false;        /* DclCbv rather than a legacy builtin */
+  bool isPushData = false;   /* the flat push-constant block (buffer slot 20) */
   uint32_t regIndex = 0u;    /* DclCbv register index */
   uint32_t bufferIndex = 0u;
   uint32_t argIndex = 0u;
@@ -137,6 +138,11 @@ struct AirBuilderImpl {
    * trailing parameters (a function cannot reference the entry point's
    * arguments). Per function: buffer decl id -> llvm arg index. */
   std::unordered_map<uint32_t, std::vector<uint32_t>> fnHiddenBuffers;
+  /* push data: one flat block, per-decl byte offsets, canonical buffer def */
+  bool m_havePush = false;
+  uint32_t m_pushBytes = 0u;
+  ir::SsaDef m_pushDef;
+  std::unordered_map<uint32_t, uint32_t> m_pushOffset;
   std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>> fnBufferArgs;
 
   std::vector<InputVar>   inputs;
@@ -178,7 +184,11 @@ struct AirBuilderImpl {
       case ir::ScalarType::eI32:
       case ir::ScalarType::eU32: return Type::getInt32Ty(ctx);
       case ir::ScalarType::eI16:
-      case ir::ScalarType::eU16: return Type::getInt16Ty(ctx);
+      case ir::ScalarType::eU16:
+      case ir::ScalarType::eMinI16:
+      case ir::ScalarType::eMinU16: return Type::getInt16Ty(ctx);
+      case ir::ScalarType::eI8:
+      case ir::ScalarType::eU8: return Type::getInt8Ty(ctx);   /* D3DCOLOR unpack lanes */
       case ir::ScalarType::eF16: return Type::getHalfTy(ctx);
       case ir::ScalarType::eF32: return Type::getFloatTy(ctx);
       default:
@@ -423,6 +433,16 @@ struct AirBuilderImpl {
           buffers.push_back(buf);
         } break;
 
+        case ir::OpCode::eDclPushData: {
+          uint32_t off = uint32_t(op.getOperand(1u));
+          Type* t = mapType(op.getType(), true);
+          uint32_t bytes = off +
+            uint32_t(mod->getDataLayout().getTypeAllocSize(t));
+          m_pushBytes = m_pushBytes > bytes ? m_pushBytes : bytes;
+          m_pushOffset[op.getDef().getId()] = off;
+          if (!m_havePush) { m_havePush = true; m_pushDef = op.getDef(); }
+        } break;
+
         case ir::OpCode::eDclScratch:
           scratchTypes.emplace(op.getDef().getId(), mapType(op.getType(), false));
           break;
@@ -445,6 +465,15 @@ struct AirBuilderImpl {
         return a.orderKey < b.orderKey;
       });
 
+    if (m_havePush) {
+      BufferVar buf;
+      buf.def = m_pushDef;
+      buf.isPushData = true;
+      buf.type = ArrayType::get(Type::getInt8Ty(ctx), m_pushBytes);
+      buf.name = "pushData";
+      buffers.push_back(buf);
+    }
+
     /* buffer index assignment: ConstFloat -> 0, other builtins 1.. in
      * declaration order; CBVs take their register index offset past the
      * builtin range (with no builtins present, cbv N -> buffer(N)) */
@@ -453,7 +482,9 @@ struct AirBuilderImpl {
     for (const auto& buf : buffers)
       haveBuiltins |= !buf.isCbv;
     for (auto& buf : buffers) {
-      if (buf.isCbv)
+      if (buf.isPushData)
+        buf.bufferIndex = 20u;   /* backend kPushConstantIndex */
+      else if (buf.isCbv)
         buf.bufferIndex = (haveBuiltins ? 8u : 0u) + buf.regIndex;
       else if (buf.builtin == ir::BuiltIn::eLegacyConstFloat)
         buf.bufferIndex = 0u;
@@ -739,6 +770,9 @@ struct AirBuilderImpl {
           ir::SsaDef decl = operandDef(op, 0u);
           if (findTexture(decl) || findSampler(decl) || findBuffer(decl))
             addUse(decl.getId());
+        } else if (op.getOpCode() == ir::OpCode::ePushDataLoad) {
+          if (m_havePush)
+            addUse(m_pushDef.getId());
         } else if (op.getOpCode() == ir::OpCode::eFunctionCall) {
           for (uint32_t bufId : fnHiddenBuffers[operandDef(op, 0u).getId()])
             addUse(bufId);
@@ -1025,6 +1059,8 @@ struct AirBuilderImpl {
 
       /* constant buffers (DclCbv path, post io-lowering) */
       case ir::OpCode::eBufferLoad:   return emitBufferLoad(op);
+      case ir::OpCode::ePushDataLoad:  return emitPushDataLoad(op);
+      case ir::OpCode::eDclPushData:   return;   /* handled in decl scan */
 
       /* resources */
       case ir::OpCode::eDescriptorLoad:  return emitDescriptorLoad(op);
@@ -1546,6 +1582,39 @@ struct AirBuilderImpl {
   }
 
   /* BufferLoad reads through a DescriptorLoad of a DclCbv */
+  void emitPushDataLoad(const ir::Op& op) {
+    ir::SsaDef declDef = operandDef(op, 0u);
+    uint32_t off = m_pushOffset.at(declDef.getId());
+
+    const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
+    auto it = argMap.find(m_pushDef.getId());
+    if (it == argMap.end())
+      unsupported("PushDataLoad outside push arg map");
+
+    Type* i8ty = Type::getInt8Ty(ctx);
+    Value* base = currentFn->getArg(it->second);   /* [N x i8] constant* */
+    Value* i8base = b->CreateBitCast(base, PointerType::get(i8ty, kAsConstant));
+    Value* elem = b->CreateInBoundsGEP(i8ty, i8base, b->getInt64(off));
+
+    Type* loadTy = mapType(op.getType(), false);
+    ir::SsaDef addrDef = operandDef(op, 1u);
+    if (addrDef) {
+      uint64_t sz = mod->getDataLayout().getTypeAllocSize(loadTy);
+      Value* a = b->CreateSExt(getValue(addrDef), b->getInt64Ty());
+      elem = b->CreateInBoundsGEP(i8ty, elem, b->CreateMul(a, b->getInt64(sz)));
+    }
+
+    Value* typed = b->CreateBitCast(elem, PointerType::get(loadTy, kAsConstant));
+    Value* v = b->CreateAlignedLoad(loadTy, typed, MaybeAlign(4u));
+
+    const ir::Type& resType = op.getType();
+    if (resType.isScalarType() &&
+        resType.getBaseType(0u).getBaseType() == ir::ScalarType::eBool)
+      v = b->CreateICmpNE(v, b->getInt32(0));
+
+    setValue(op, v);
+  }
+
   void emitBufferLoad(const ir::Op& op) {
     const ir::Op& descriptor = this->ir.getOpForOperand(op, 0u);
     if (descriptor.getOpCode() != ir::OpCode::eDescriptorLoad)
