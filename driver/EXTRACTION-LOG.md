@@ -481,3 +481,67 @@ build GREEN. Resume STAGE 2 in dependency order, promoting each `.cpp` to fatal 
 
 DoD remaining: from-scratch build green with all driver TUs fatal + d3d9.dll LINKS
 (20/20 def exports resolved; missing backend symbols → minimal seam stubs, logged).
+
+## Phase C-7 — STAGE 2 (bodies) partial: 12 leaf/mid bodies ported fatal (2026-07-11, solo/sequential)
+
+Resumed STAGE 2 solo from PHASE-C6-CHECKPOINT. Ported the leaf + mid-tier `.cpp`
+bodies onto the Mtl seam and promoted **each to fatal CORE the moment it compiled**
+(per-file DoD, no batch checkpointing). From-scratch `bash scripts/build-driver.sh`
+is GREEN: **46 CORE TUs** (was 34), `libdriver_core.a` ~14.8 MB, **Vulkan gate PASS**
+(whitelist stays empty). d3d9.dll link still INCOMPLETE — 20 unexported def entries +
+33 undefined refs, ALL from the un-ported device/adapter/interface/main graph
+(D3D9DeviceEx::*, D3D9Adapter::*, D3D9Multithread::LockContested, MemoryFilePool::*).
+
+### Files DONE this resume (all compile fatal, in CORE)
+| File | Kind | Notes / substitutions |
+|---|---|---|
+| d3d9_common_buffer.cpp | PORT (doc 05) | CreateBuffer/CreateStagingBuffer rewritten to MtlBufferCreateInfo{usage,cpuAccess}: VB/IB→VertexBuffer/IndexBuffer; DIRECT map→cpuAccess Write (Read if readable); staging→Staging+Write/Read. Vulkan usage/stage/access/memFlags dropped. |
+| d3d9_common_texture.cpp | PORT (doc 05) | CreatePrimaryImage/CreateResolveImage→MtlImageCreateInfo (usage from D3D9 case: Sampled/RenderTarget/DepthStencil; cube flag); CreateBuffer→Staging; CheckImageSupport→supportsFormat+deviceInfo extents; CreateView→MtlImageViewKey; GetMipSize/computeMipLevelCount inlined (Vulkan util absent); GetSubresourceFromIndex→MtlSubresourceLayers. DROPPED: m_d3d9Interop, ExportImageInfo, sharedHandle export, OptimizeLayout. PHASE-E: memory-report size approx (m_totalSize), GetPlaneCount=1, view dimensionality, desc.ImageUsage fold, YUV texel-buffer usage. |
+| d3d9_buffer.cpp | KEEP (verbatim) | Vulkan-clean; copied unchanged. |
+| d3d9_surface.cpp / d3d9_volume.cpp / d3d9_texture.cpp | KEEP−interop | Only change: deleted the `ID3D9VkInteropTexture` QueryInterface block (Vulkan interop, doc 02 §DROP). |
+| d3d9_cursor.cpp | KEEP (verbatim) | Already Vulkan-clean; added to CORE. |
+| d3d9_swvp_emu.cpp | STUB port | Hash/eq operators copied verbatim. D3D9SWVPShaderGenerator (dxbc_spv IR geometry ubershader) is the SM3→Air REWRITE track (Phase-D) → REMOVED; GetShaderModule stubbed returning null MtlShaderFunction (doc-sanctioned). PHASE-E: real SWVP ProcessVertices module. |
+| d3d9_annotation.cpp | PORT (§1k) | 3 EmitCs sites: VkDebugUtilsLabelEXT lambdas → `ctx->beginDebugLabel(name)`/`endDebugLabel()`/`insertDebugLabel(name)` (MtlContext*, color dropped). |
+| d3d9_query.cpp | PORT (doc 05 §Queries) | createGpuQuery(VK_QUERY_TYPE_*)→createGpuQuery(MtlQueryType); createGpuEvent; DxvkGpuEventStatus/DxvkQueryData/DxvkGpuQueryStatus→Mtl*; GetTimestampQueryFrequency→device->getTimestampFrequency(); Begin/End(MtlContext*). |
+| d3d9_initializer.cpp | PORT (§1h, 3c) | 4 EmitCs: initBuffer/initImage(no layout)/flushCommandList onto MtlContext; host-visible init memsets slice.buffer()->mapPtr(off); InitBuffer host-visible test via mapPtr!=null (was memFlags); packImageData/computeBlockCount inlined; SyncSharedTexture→no-op (shared handle dropped). |
+| d3d9_constant_buffer.cpp | PORT (doc 05 row 3, §1d/1h) | 4 EmitCs/EmitCsCmd sites onto MtlContext (invalidateBuffer/bindUniformBuffer(Range)/uploadBuffer). CreateBuffer→MtlBufferCreateInfo{UniformBuffer,Write}; DMA split kept; Determine*() rewritten: usage=UniformBuffer, stages=MtlStageVertex/Fragment, memType=Write/Read, align=max(cacheline,256), DMA=false (UMA). mapPtr()→mapPtr field. PHASE-E: storage-buffer fallback, real const alignment query. |
+
+### SEAM CHANGES this resume (logged per plan)
+- **mtl_context.h**: added query/event result surface — `enum MtlQueryType{Occlusion,Timestamp}`,
+  `MtlGpuQueryStatus`, `MtlGpuEventStatus`, `union MtlQueryData`; extended `MtlQuery`
+  (`type`, `virtual getData(MtlQueryData&)`) and `MtlEvent` (`virtual test()`).
+- **mtl_device.h**: added `createGpuQuery(MtlQueryType)`, `createGpuEvent()`,
+  `getTimestampFrequency()` factory decls (+ forward decls of MtlQuery/MtlEvent/MtlQueryType).
+- **mtl_device_stub.cpp**: stub impls — createGpuQuery/Event return live objects,
+  getData→Available+zeros, test→Signaled, getTimestampFrequency→1 GHz (PHASE-E: real
+  visibility-buffer readback + MTLSharedEvent serial compare in backend).
+
+### EmitCs sites ported this resume: 11 (annotation 3 + initializer 4 + constant_buffer 4).
+### Resource-creation sites ported: common_buffer 2 + common_texture 4 (doc 05 tables).
+### PHASE-E markers left (grep `PHASE-E`): common_texture (memory-size approx, GetPlaneCount,
+view dim, desc.ImageUsage fold, YUV texel usage, shared-handle export), common_buffer
+(SWVP storage usage), swvp_emu (real module), initializer (packImageData), constant_buffer
+(storage fallback, const alignment). All are correctness-neutral for the leaf graph or
+belong to the shader/backend REWRITE tracks; none block compilation.
+
+### PHASE-C7-CHECKPOINT — exact position + STAGE 2 remaining
+STAGE 2 is ~55% by file count / far less by line count — the two largest bodies remain.
+Build GREEN, nothing half-written on disk. Remaining, in dependency order:
+
+1. **d3d9_adapter.cpp** (1112 lines, 58 Vk) — caps/format probing onto MtlAdapter/
+   MtlDeviceInfo; CheckDeviceVkFormat path dropped (route via D3D9Format only). Resolves
+   D3D9Adapter::CheckDeviceMultiSampleType + the interface's adapter enumeration.
+2. **d3d9_device.cpp** (9288 lines, 68 EmitCs) — THE linchpin, NOT STARTED. Minimal-token
+   per-site DxvkContext→MtlContext + the header value-swaps (DxvkBufferSlice→MtlBufferSlice,
+   VkOffset3D/VkExtent3D→MtlOrigin/MtlExtent3D, drop m_dxvkShaderOptions/m_hazardLayout/
+   m_depthBiasRepresentation uses, TransformImage drops layout args, D3D9ShaderCreateInfo
+   drops irCreateInfo, D3D9ShaderModuleKey from Sha1Hash+MtlShaderStage). Resolves the bulk
+   of the 33 undefined refs (all D3D9DeviceEx::*). Budget it as its own multi-session task.
+3. **d3d9_swapchain.cpp** — REWRITE onto MtlPresenter (createMtlPresenter/acquire/present/
+   frame-latency); blitter/hud/colorspace/HDR call sites deleted.
+4. **d3d9_interface.cpp + d3d9_main.cpp + exports** — resolves the 20 unexported def entries
+   (Direct3DCreate9*, D3D9on12, D3DPERF_*, DebugSet*, DXVK_*RegisterAnnotation, PSGP*).
+5. **d3d9_multithread.cpp** — tiny; blocked on `sync::spin` (util gap, add to util/sync).
+
+DoD remaining: d3d9.dll LINKS (20/20 def exports resolved; missing backend symbols →
+minimal seam stubs). Vulkan gate already PASS with whitelist empty; keep it that way.

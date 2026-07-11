@@ -52,9 +52,34 @@ namespace dxvk {
   };
 
   class MtlCommandBuffer : public RcObject { };   // MTL4CommandBuffer
-  class MtlQuery         : public RcObject { };   // occlusion / timestamp / event
+
+  // --- query / event result surface (doc 05 §Queries) --------------------
+  // OCCLUSION -> visibility-buffer counter; TIMESTAMP -> serial-based; EVENT ->
+  // submission-serial compare. (was DxvkGpuQuery / DxvkGpuEvent + DxvkQueryData.)
+  enum class MtlQueryType : uint32_t { Occlusion, Timestamp };
+  enum class MtlGpuQueryStatus : uint32_t { Invalid, Pending, Available, Failed };
+  enum class MtlGpuEventStatus : uint32_t { Invalid, Pending, Signaled };
+
+  union MtlQueryData {
+    struct { uint64_t samplesPassed; } occlusion;
+    struct { uint64_t time; }          timestamp;
+  };
+
+  class MtlQuery : public RcObject {         // occlusion / timestamp
+  public:
+    MtlQueryType type = MtlQueryType::Occlusion;
+    // Poll the result. PHASE-C: read the visibility/counter buffer after the
+    // referencing command buffer completes; stub returns Available with zeros.
+    virtual MtlGpuQueryStatus getData(MtlQueryData& out);
+  };
+
+  class MtlEvent : public RcObject {         // GPU MTLEvent / D3DQUERYTYPE_EVENT
+  public:
+    // PHASE-C: MTLSharedEvent value vs completed serial; stub -> Signaled.
+    virtual MtlGpuEventStatus test();
+  };
+
   class MtlSignal        : public RcObject { };   // CPU-visible MTLSharedEvent
-  class MtlEvent         : public RcObject { };   // GPU MTLEvent
   class MtlLatencyTracker: public RcObject { };   // Reflex-style markers (thin)
 
   // --- render-target binding set (was DxvkRenderTargets) -------------------

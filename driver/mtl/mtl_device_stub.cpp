@@ -100,6 +100,30 @@ namespace dxvk {
     return MtlStagingBufferStats();
   }
 
+  // --- query / event (doc 05 §Queries) — stub objects ---------------------
+  MtlGpuQueryStatus MtlQuery::getData(MtlQueryData& out) {
+    out = MtlQueryData{};   // zeroed
+    return MtlGpuQueryStatus::Available;
+  }
+
+  MtlGpuEventStatus MtlEvent::test() {
+    return MtlGpuEventStatus::Signaled;
+  }
+
+  Rc<MtlQuery> MtlDevice::createGpuQuery(MtlQueryType type) {
+    Rc<MtlQuery> q = new MtlQuery();
+    q->type = type;
+    return q;
+  }
+
+  Rc<MtlEvent> MtlDevice::createGpuEvent() {
+    return new MtlEvent();
+  }
+
+  uint64_t MtlDevice::getTimestampFrequency() const {
+    return 1000000000ull;   // 1 GHz placeholder (PHASE-E)
+  }
+
   const MtlDeviceInfo& MtlAdapter::deviceInfo() const {
     return m_info;
   }

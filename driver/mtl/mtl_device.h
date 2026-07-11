@@ -28,6 +28,9 @@
 namespace dxvk {
 
   class MtlContext;
+  class MtlQuery;                       // defined in mtl_context.h
+  class MtlEvent;
+  enum class MtlQueryType : uint32_t;   // defined in mtl_context.h
 
   struct MtlBufferCreateInfo {
     uint64_t     size       = 0u;
@@ -132,6 +135,15 @@ namespace dxvk {
     /* Staging upload space (was DxvkStagingBuffer allocation). */
     virtual Rc<MtlStagingBuffer> createStagingBuffer(MtlDeviceSize size);
     virtual MtlStagingBufferStats getStagingMemoryStatistics();
+
+    /* Query / event objects (was DxvkDevice::createGpuQuery/createGpuEvent).
+     * doc 05 §Queries: occlusion=visibility counter, timestamp=serial-based,
+     * event=submission-serial compare. */
+    virtual Rc<MtlQuery> createGpuQuery(MtlQueryType type);
+    virtual Rc<MtlEvent> createGpuEvent();
+
+    /* Timestamp counter frequency (was properties().limits.timestampPeriod). */
+    virtual uint64_t getTimestampFrequency() const;
 
   protected:
 

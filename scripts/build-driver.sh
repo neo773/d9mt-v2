@@ -69,6 +69,14 @@ CORE+=("$DRV"/d3d9/d3d9_util.cpp "$DRV"/d3d9/d3d9_names.cpp \
 #     VkImageViewType -> MtlTextureViewType; the only Vk touch. dxbc-spirv headers
 #     are third-party -I includes, exempt from the driver Vulkan gate.
 CORE+=("$DRV"/d3d9/d3d9_constant_copy.cpp "$DRV"/d3d9/d3d9_shader_analysis.cpp)
+# Phase C-6 STAGE-2 ported .cpp bodies (promoted to fatal CORE as each compiles):
+CORE+=("$DRV"/d3d9/d3d9_common_buffer.cpp "$DRV"/d3d9/d3d9_common_texture.cpp)
+CORE+=("$DRV"/d3d9/d3d9_buffer.cpp "$DRV"/d3d9/d3d9_surface.cpp \
+       "$DRV"/d3d9/d3d9_volume.cpp "$DRV"/d3d9/d3d9_texture.cpp \
+       "$DRV"/d3d9/d3d9_cursor.cpp)
+CORE+=("$DRV"/d3d9/d3d9_swvp_emu.cpp "$DRV"/d3d9/d3d9_annotation.cpp)
+CORE+=("$DRV"/d3d9/d3d9_query.cpp "$DRV"/d3d9/d3d9_initializer.cpp)
+CORE+=("$DRV"/d3d9/d3d9_constant_buffer.cpp)
 # Phase C-5 STAGE-1 probe: header-only TU proving the ported device-graph headers
 #   (common_buffer/common_texture/resource/subresource/surface/volume/buffer/query)
 #   form a closed, Vulkan-free compile unit on the Mtl seam. Grows as device.h /
