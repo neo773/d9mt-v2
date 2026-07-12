@@ -1,0 +1,73 @@
+driver/backend/mtl_device_impl.cpp
+  s_02998b4ed19c89::t_74210448223d51 93-99
+  s_02998b4ed19c89::t_03d33bcfb2751d 108-126
+  s_02998b4ed19c89::t_cab7c66885f4a4 168-169
+  s_02998b4ed19c89::t_185e5891a12d28 316
+  s_02998b4ed19c89::t_b2d4fd1c6f1d82 332-333
+  s_02998b4ed19c89::t_62058d260d57b6 128-131
+  s_02998b4ed19c89::t_b42c55e12be76e 214-215
+  s_02998b4ed19c89::t_962b0e0023853a 146
+driver/backend/mtl_context_impl2.cpp
+  s_02998b4ed19c89::t_73d4b347561247 308-313,320
+bridge/unix/winemetal_unix.c
+  s_02998b4ed19c89::t_f50907354f0999 5273-5276,5279-5281
+  s_02998b4ed19c89::t_4b44cff9ab907c 6143-6148
+  s_02998b4ed19c89::t_6538a21b03f0f9 6421,6644
+  s_02998b4ed19c89::t_54bcd68215de16 6142
+bridge/winemetal.h
+  s_02998b4ed19c89::t_883956262e0acc 2281-2282
+driver/backend/mtl_submission.h
+  s_02998b4ed19c89::t_d5a9fe5125fd5a 22
+  s_02998b4ed19c89::t_c3a0a9c335392b 78
+driver/backend/mtl_device_impl.h
+  s_02998b4ed19c89::t_9e1d6f44b424db 126-143
+  s_02998b4ed19c89::t_10cf7b352333b4 37,39-41
+  s_02998b4ed19c89::t_99ffe6452b7056 59
+  s_02998b4ed19c89::t_6013b34f0bde83 105-108
+  s_02998b4ed19c89::t_6ce5e32272c7d1 165-167
+  s_02998b4ed19c89::t_fa06a2e0a05095 58
+  s_02998b4ed19c89::t_af9cd7ea4ebfa7 172-179
+bridge/winemetal_thunks.c
+  s_02998b4ed19c89::t_eab8844dedd64c 15,19-25
+  s_02998b4ed19c89::t_157fc5511e7649 1817-1825
+driver/d3d9/d3d9_swapchain.cpp
+  s_02998b4ed19c89::t_2e5e22f3d20e70 674-701,705-706,708-739
+kk-audit.md
+  s_02998b4ed19c89::t_2c1e70cd23dfe5 288-410
+  s_02998b4ed19c89::t_5bcde9546e6433 1-164
+  s_02998b4ed19c89::t_443d8802fbd81c 165-287
+driver/backend/mtl_submission.cpp
+  s_02998b4ed19c89::t_085500995421fb 36,41-48,50-51,53-60,62-63,66-67
+  s_02998b4ed19c89::t_9bcc3a801fc7e5 71-72
+  s_02998b4ed19c89::t_ec3faf81a72c9d 5-7
+  s_02998b4ed19c89::t_ed3aa51a5820dc 73-89
+driver/backend/mtl_context_impl.h
+  s_02998b4ed19c89::t_5d028576d8f6b8 269
+driver/backend/mtl_context_impl.cpp
+  s_02998b4ed19c89::t_6263c2c2e7d462 51-53
+  s_02998b4ed19c89::t_84389ed53024d7 109
+  s_02998b4ed19c89::t_2dc041314a5a78 94-97
+  s_02998b4ed19c89::t_bf2b692317dac1 179-181
+  s_02998b4ed19c89::t_51100e0517efca 84-88
+  s_02998b4ed19c89::t_b247370549c783 250-254,260-262
+d9mt.log
+  s_02998b4ed19c89::t_97d7906bd73626 1-21
+mesa
+  s_02998b4ed19c89::t_74424f8115629b 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8a9c3efc439a555114e915a3ab327131d244453c",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
