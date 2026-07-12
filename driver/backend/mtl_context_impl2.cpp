@@ -224,11 +224,17 @@ namespace dxvk::backend {
           uint32_t(airSlot));
       }
 
-      /* textures: setTexture by MTLResourceID into this stage's table. */
+      /* textures: setTexture by MTLResourceID into this stage's table. An
+       * unbound slot must be CLEARED, not skipped — the argument table persists
+       * across draws, so a stale binding (often a recycled dynamic/UP buffer)
+       * would leak into a later draw that samples that slot -> flicker/ghosting
+       * in multi-draw scenes (single-draw static tests never expose it). */
       for (uint32_t slot = 0u; slot < b.textures.size(); slot++) {
         const Rc<MtlTextureView>& view = b.textures[slot];
-        if (view == nullptr)
+        if (view == nullptr) {
+          MTL4ArgumentTable_setTexture(table, 0u, slot);
           continue;
+        }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
         residentTextureView(view);
         MTL4ArgumentTable_setTexture(table, tv->gpuResourceId, slot);
