@@ -26,7 +26,7 @@ namespace dxvk {
    */
   class D3D9ConstantBuffer {
     static constexpr MtlDeviceSize ShaderConstSize = 1024ull << 10;
-    static constexpr MtlDeviceSize MiscSize        =   64ull << 10;
+    static constexpr MtlDeviceSize MiscSize        = 1024ull << 10;
 
     using Kind = D3D9ShaderResourceMapping::CbvIndex;
   public:

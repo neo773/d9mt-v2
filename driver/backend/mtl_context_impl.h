@@ -28,9 +28,10 @@
  *    table reads the address at the draw snapshot, so ring memory is never
  *    rewritten under a queued draw (exactly the Metal-3 chunk semantics).
  *    D3D9's separate VS/PS constant namespaces map to TWO argument tables
- *    (m_argTable[vertex], m_argTable[fragment]), each bound at its own stage
- *    via setArgumentTable:atStages: — this preserves the setVertexBuffer /
- *    setFragmentBuffer split that a single shared table would collide.
+ *    per draw (vertex, fragment), each bound at its own stage via
+ *    setArgumentTable:atStages:. The table objects themselves are rotated so
+ *    later draw-state writes never mutate a table an earlier encoded draw may
+ *    still read.
  *    Textures/samplers bind via setTexture(gpuResourceID)/setSamplerState.
  *
  * 4. Residency + keep-alive. track() holds an Rc until submit; every bound
@@ -211,8 +212,8 @@ namespace dxvk::backend {
      * index assignment, decision 3). Per stage, the AIR shader reads D3D9
      * constant buffers at Metal buffer indices 0..2 (cF / clip|alphaTest /
      * point|misc) and pulls vertex stage-in from index 3+. VS and PS each own
-     * their own argument table (m_argTable[stage]) so their 0..2 CBV spaces
-     * never collide. Vertex streams bind at kVertexBufferBaseIndex + stream.
+     * their own argument table per draw so their 0..2 CBV spaces never
+     * collide. Vertex streams bind at kVertexBufferBaseIndex + stream.
      * Textures/samplers use the per-stage table's setTexture/setSamplerState
      * resource-id slots. */
     static constexpr uint32_t kVertexBufferBaseIndex = 3u;
@@ -236,6 +237,11 @@ namespace dxvk::backend {
       std::array<CbvBinding, 8> cbvs;
       std::array<uint8_t, 4096> pushData;
       uint32_t pushDirtyLo = 0, pushDirtyHi = 0;
+      uint64_t pushGpuAddress = 0u;
+    };
+
+    struct ArgTablePair {
+      std::array<WmtArgTable, 2> table;
     };
 
     struct VertexStream {
@@ -270,8 +276,11 @@ namespace dxvk::backend {
     uint32_t     m_allocatorSlot = 0u; // ring slot of m_allocator
     obj_handle_t m_allocator    = 0u;  // current frame's allocator (borrowed)
 
-    /* Residency set lives on the DEVICE (add-at-alloc/remove-at-free). */
-    std::array<WmtArgTable, 2>  m_argTable;   // [vertex, fragment]
+    /* Per-draw argument tables. Reusing one mutable MTL4ArgumentTable across
+     * multiple encoded draws races under Metal 4's overlapping execution. */
+    std::vector<ArgTablePair> m_argTables;
+    uint32_t                 m_argTableCursor = 0u;
+    uint32_t                 m_currentArgTable = 0u;
 
     uint32_t           m_dirty = DirtyEverything;
 
@@ -316,6 +325,8 @@ namespace dxvk::backend {
     void closePass();                  // endEncoding + release encoder
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO
+    ArgTablePair createArgumentTablePair() const;
+    void selectArgumentTablesForDraw();
     void bindArgumentTables();         // setArgumentTable per stage on the encoder
     void flushVertexBuffers();         // setAddress vertex streams into VS table
     void flushResources();             // CBVs/textures/samplers/push -> arg tables + ring

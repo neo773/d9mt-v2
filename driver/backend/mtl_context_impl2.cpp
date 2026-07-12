@@ -166,14 +166,18 @@ namespace dxvk::backend {
   // --- argument-table flush (decision 3) -------------------------------------
 
   void MtlContextImpl::flushVertexBuffers() {
-    obj_handle_t table = m_argTable[0].handle();   /* vertex stage */
+    obj_handle_t table = m_argTables[m_currentArgTable].table[0].handle();
     for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
       VertexStream& s = m_vertexStreams[i];
-      if (!s.slice.defined())
+      if (!s.slice.defined()) {
+        MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
         continue;
+      }
       const Rc<MtlBuffer>& buf = s.slice.buffer();
-      if (buf == nullptr)
+      if (buf == nullptr) {
+        MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
         continue;
+      }
       makeResident(buf->handle.buf);
       MTL4ArgumentTable_setAddress(
         table, buf->gpuAddress(s.slice.offset()), kVertexBufferBaseIndex + i);
@@ -183,7 +187,7 @@ namespace dxvk::backend {
   void MtlContextImpl::flushResources() {
     for (uint32_t st = 0u; st < 2u; st++) {
       StageBindings& b = m_bindings[st];
-      obj_handle_t table = m_argTable[st].handle();
+      obj_handle_t table = m_argTables[m_currentArgTable].table[st].handle();
 
       /* The bound shader for this stage carries the CbvIndex -> AIR Metal
        * buffer-slot map (reflection-derived, SOURCE_OF_TRUTH §4b bug 1). The
@@ -197,18 +201,22 @@ namespace dxvk::backend {
        * folded in (bindUniformBufferRange snapshot). */
       for (uint32_t slot = 0u; slot < b.cbvs.size(); slot++) {
         StageBindings::CbvBinding& cbv = b.cbvs[slot];
-        if (!cbv.slice.defined())
-          continue;
-
         /* Only bind CBVs the shader actually declares, at their AIR slot. */
         int32_t airSlot = (fn != nullptr && slot < fn->cbvSlotMap.size())
           ? int32_t(fn->cbvSlotMap[slot]) : -1;
         if (airSlot < 0)
           continue;
 
-        const Rc<MtlBuffer>& buf = cbv.slice.buffer();
-        if (buf == nullptr)
+        if (!cbv.slice.defined()) {
+          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
           continue;
+        }
+
+        const Rc<MtlBuffer>& buf = cbv.slice.buffer();
+        if (buf == nullptr) {
+          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
+          continue;
+        }
         /* Defense-in-depth: a CBV whose MtlBuffer has null/garbage storage
          * would fault on gpuAddress. With the reflection-driven mapping this
          * should never trigger (we only bind declared CBVs). */
@@ -216,6 +224,7 @@ namespace dxvk::backend {
          || uintptr_t(buf->storage().ptr()) < 0x10000u) {
           logOnce("MtlContextImpl: skipped CBV with no backing storage "
                   "(slot-mapping/lifetime bug — see SOURCE_OF_TRUTH)");
+          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
           continue;
         }
         makeResident(buf->handle.buf);
@@ -243,8 +252,10 @@ namespace dxvk::backend {
       /* samplers: setSamplerState by MTLResourceID. */
       for (uint32_t slot = 0u; slot < b.samplers.size(); slot++) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
-        if (sampler == nullptr)
+        if (sampler == nullptr) {
+          MTL4ArgumentTable_setSamplerState(table, 0u, slot);
           continue;
+        }
         auto* sp = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
         MTL4ArgumentTable_setSamplerState(table, sp->gpuResourceId, slot);
       }
@@ -258,10 +269,11 @@ namespace dxvk::backend {
         if (rs.cpuPtr) {
           std::memcpy(rs.cpuPtr, b.pushData.data(), sz);
           makeResident(rs.buffer);
-          MTL4ArgumentTable_setAddress(table, rs.gpuAddress, kPushConstantIndex);
+          b.pushGpuAddress = rs.gpuAddress;
         }
         b.pushDirtyLo = b.pushDirtyHi = 0u;
       }
+      MTL4ArgumentTable_setAddress(table, b.pushGpuAddress, kPushConstantIndex);
     }
   }
 

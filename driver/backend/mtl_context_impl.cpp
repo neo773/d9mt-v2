@@ -45,8 +45,10 @@ namespace dxvk::backend {
     ati.max_samplers               = 16u;
     ati.initialize_bindings        = 1u;
     ati.support_attribute_strides  = 1u;
-    m_argTable[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
-    m_argTable[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+    ArgTablePair pair;
+    pair.table[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+    pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+    m_argTables.push_back(std::move(pair));
 
     /* Residency: the DEVICE owns one lifetime residency set (add-at-alloc /
      * remove-at-free, never wiped). The context just binds it per cmdbuf and
@@ -69,6 +71,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::beginRecording() {
     m_dirty = DirtyEverything;
+    m_argTableCursor = 0u;
 
     /* Rotate to a >= ring-depth-old allocator and reset it. MTL4CommandAllocator
      * contract: every command buffer whose memory came from this allocator must
@@ -409,16 +412,34 @@ namespace dxvk::backend {
     m_pass.pending = false;
     m_dirty = DirtyEverything;
 
-    /* Bind the per-stage argument tables once for the encoder's lifetime;
-     * their CONTENTS change per draw but the table->stage binding is fixed. */
-    bindArgumentTables();
+  }
+
+  MtlContextImpl::ArgTablePair MtlContextImpl::createArgumentTablePair() const {
+    WMTArgTableInfo ati = {};
+    ati.max_buffers                = 31u;
+    ati.max_textures               = 16u;
+    ati.max_samplers               = 16u;
+    ati.initialize_bindings        = 1u;
+    ati.support_attribute_strides  = 1u;
+
+    ArgTablePair pair;
+    pair.table[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(m_device->wmtDevice(), &ati));
+    pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(m_device->wmtDevice(), &ati));
+    return pair;
+  }
+
+  void MtlContextImpl::selectArgumentTablesForDraw() {
+    m_currentArgTable = m_argTableCursor++;
+    if (m_currentArgTable >= m_argTables.size())
+      m_argTables.push_back(createArgumentTablePair());
   }
 
   void MtlContextImpl::bindArgumentTables() {
+    ArgTablePair& pair = m_argTables[m_currentArgTable];
     MTL4RenderCommandEncoder_setArgumentTable(
-      m_pass.encoder, m_argTable[0].handle(), uint64_t(WMTRenderStageVertex));
+      m_pass.encoder, pair.table[0].handle(), uint64_t(WMTRenderStageVertex));
     MTL4RenderCommandEncoder_setArgumentTable(
-      m_pass.encoder, m_argTable[1].handle(), uint64_t(WMTRenderStageFragment));
+      m_pass.encoder, pair.table[1].handle(), uint64_t(WMTRenderStageFragment));
   }
 
   void MtlContextImpl::closePass() {
@@ -638,10 +659,10 @@ namespace dxvk::backend {
 
     if ((m_dirty & DirtyPso) && !resolvePso())
       return false;
-    if (m_dirty & DirtyVertexBuffers)
-      flushVertexBuffers();
-    if (m_dirty & (DirtyResources | DirtyPush))
-      flushResources();
+    selectArgumentTablesForDraw();
+    bindArgumentTables();
+    flushVertexBuffers();
+    flushResources();
     if (m_dirty & (DirtyViewport | DirtyDepthStencil | DirtyBlendColor
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();

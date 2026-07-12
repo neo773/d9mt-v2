@@ -4762,7 +4762,9 @@ namespace dxvk {
         cBuffer = m_upBuffer,
         cSlice  = std::move(slice)
       ] (MtlContext* ctx) mutable {
-        ctx->invalidateBuffer(cBuffer, std::move(cSlice));
+        Rc<MtlAllocation> oldSlice =
+          cBuffer->assignStorage(std::move(cSlice));
+        ctx->invalidateBuffer(cBuffer, std::move(oldSlice));
       });
     }
 
@@ -5527,7 +5529,9 @@ namespace dxvk {
         cBuffer      = std::move(mappingBuffer),
         cBufferSlice = std::move(bufferSlice)
       ] (MtlContext* ctx) mutable {
-        ctx->invalidateBuffer(cBuffer, std::move(cBufferSlice));
+        Rc<MtlAllocation> oldSlice =
+          cBuffer->assignStorage(std::move(cBufferSlice));
+        ctx->invalidateBuffer(cBuffer, std::move(oldSlice));
       });
 
       pResource->SetNeedsReadback(false);

@@ -46,10 +46,12 @@ namespace dxvk {
         cBinding    = uint32_t(m_kind),
         cStages     = m_stages,
         cCpuBuffer  = m_cpuBuffer,
-        cCpuSlice   = m_cpuSlice,
+        cNewSlice   = m_cpuSlice,
         cSize       = size
       ] (MtlContext* ctx) mutable {
-        ctx->invalidateBuffer(cCpuBuffer, std::move(cCpuSlice));
+        Rc<MtlAllocation> oldSlice =
+          cCpuBuffer->assignStorage(std::move(cNewSlice));
+        ctx->invalidateBuffer(cCpuBuffer, std::move(oldSlice));
         ctx->bindUniformBufferRange(cStages, cBinding, 0u, cSize);
       });
 
@@ -133,8 +135,11 @@ namespace dxvk {
         cGpuBuffer = m_gpuBuffer,
         cDiscard   = Discard
       ] (MtlContext* ctx, const StreamCommand* cmd, uint32_t) {
-        if (cDiscard)
-          ctx->invalidateBuffer(cGpuBuffer, cGpuBuffer->allocateStorage());
+        if (cDiscard) {
+          Rc<MtlAllocation> oldGpuSlice =
+            cGpuBuffer->assignStorage(cGpuBuffer->allocateStorage());
+          ctx->invalidateBuffer(cGpuBuffer, std::move(oldGpuSlice));
+        }
 
         ctx->uploadBuffer(cGpuBuffer, cmd->offset, cCpuBuffer, cmd->offset, cmd->size);
       });

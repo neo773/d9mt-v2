@@ -262,7 +262,7 @@ echo "  -> $BUILD/libdriver_core.a ($(wc -c < "$BUILD/libdriver_core.a") bytes)"
 # EXTRACTION-LOG.md. They are attempted here only for readiness reporting.
 echo "=== [driver] D3D9-LEAF attempt (non-fatal) ==="
 D3D9_LEAF=()
-for src in "${D3D9_LEAF[@]}"; do
+for src in "${D3D9_LEAF[@]+"${D3D9_LEAF[@]}"}"; do
   [ -f "$src" ] || { echo "  [skip] ${src#$DRV/} (not present)"; continue; }
   if "$MINGW" "${FLAGS[@]}" -c "$src" -o "$OBJ/$(echo "${src#$DRV/}" | tr '/' '_').o" 2>/tmp/driver_leaf_err.txt; then
     echo "  [ok]   ${src#$DRV/}"
