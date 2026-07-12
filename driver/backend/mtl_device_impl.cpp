@@ -90,6 +90,13 @@ namespace dxvk::backend {
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize);
 
+    /* Device-lifetime residency set (kk model). Add-at-alloc / remove-at-free;
+     * never wiped. The context binds it per cmdbuf + commit/requestResidency
+     * per submit. */
+    WMTResidencySetInfo rsi = {};
+    rsi.initial_capacity = 16384u;
+    m_residencySet = WmtResidencySet::adopt(MTLDevice_newResidencySet(m_device.handle(), &rsi));
+
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
   }
 
@@ -98,7 +105,30 @@ namespace dxvk::backend {
       m_tracker->waitFor(m_tracker->lastSubmittedSerial());
   }
 
+  void* MtlDeviceImpl::hostAlloc(uint64_t size) {
+    void* p = VirtualAlloc(nullptr, SIZE_T(size),
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (unlikely(!p)) {
+      /* 32-bit address space exhausted by in-flight backings. Drain the GPU
+       * and run the retirement spine (thread-safe) so retired allocations
+       * VirtualFree their memory, then retry once. */
+      Logger::warn("MtlDeviceImpl: host allocation failed — draining GPU and retrying");
+      waitForIdle();
+      if (m_tracker)
+        m_tracker->processRetirements();
+      p = VirtualAlloc(nullptr, SIZE_T(size),
+          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      if (!p)
+        Logger::err("MtlDeviceImpl: host allocation failed after drain");
+    }
+    return p;
+  }
+
   MtlAllocationImpl::~MtlAllocationImpl() {
+    /* Remove from the residency set BEFORE releasing the Metal buffer, so a
+     * stale handle never lingers in the set (would fault requestResidency). */
+    if (residencyDevice)
+      residencyDevice->residencyRemove(handle.buf);
     /* Release the Metal buffer BEFORE freeing its bytesNoCopy host memory. */
     owned.reset();
     if (mapPtr) {
@@ -113,8 +143,7 @@ namespace dxvk::backend {
     bufferInfo.options = storageOptions(info.cpuAccess);
     /* 32-bit PE rule: CPU-visible backing allocated in OUR space */
     bufferInfo.memory.set(info.cpuAccess != MtlCpuAccess::None
-      ? VirtualAlloc(nullptr, SIZE_T(info.size),
-          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+      ? hostAlloc(info.size)
       : nullptr);
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
@@ -136,6 +165,8 @@ namespace dxvk::backend {
     storage->mapPtr = bufferInfo.memory.get();
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
+    storage->residencyDevice = this;
+    residencyAdd(handle);   // resident for its whole lifetime (kk model)
     buffer->assignStorage(std::move(storage));
     return buffer;
   }
@@ -180,6 +211,8 @@ namespace dxvk::backend {
     texture->m_info.numLayers   = info.arrayLayers ? info.arrayLayers : 1u;
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
+    texture->residencyDevice = this;
+    residencyAdd(handle);   // resident for its whole lifetime (kk model)
     return texture;
   }
 
@@ -280,8 +313,7 @@ namespace dxvk::backend {
     bufferInfo.length = impl->size;
     bufferInfo.options = storageOptions(impl->info.cpuAccess);
     bufferInfo.memory.set(impl->info.cpuAccess != MtlCpuAccess::None
-      ? VirtualAlloc(nullptr, SIZE_T(impl->size),
-          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+      ? hostAlloc(impl->size)
       : nullptr);
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
@@ -297,6 +329,8 @@ namespace dxvk::backend {
     storage->mapPtr = bufferInfo.memory.get();
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
+    storage->residencyDevice = this;
+    residencyAdd(handle);   // renamed backing resident until it retires
     return storage;
   }
 

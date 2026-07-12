@@ -2278,6 +2278,8 @@ WINEMETAL_API void MTLResidencySet_commit(obj_handle_t residency_set);
 WINEMETAL_API void MTLResidencySet_requestResidency(obj_handle_t residency_set);
 WINEMETAL_API void MTLResidencySet_removeAllAllocations(obj_handle_t residency_set);
 
+WINEMETAL_API void MTLResidencySet_removeAllocation(obj_handle_t residency_set, obj_handle_t resource);
+
 /* --- drawable present (201) ------------------------------------------ *
  * MTL4 splits Metal-3's -[MTLCommandBuffer presentDrawable:] into the queue-
  * level handshake waitForDrawable (before commit) / signalDrawable (after

@@ -1,0 +1,21 @@
+Direct3DCreate9(SDK 32)
+Direct3DCreate9(SDK 32)
+Init: Metal device 'Apple M1 Max', 640x480, hwnd=00010052
+Init: OK
+stub: CreateOffscreenPlainSurface (placeholder surface)
+stub: GetRenderTargetData
+Present: frame 1 OK (0 passes)
+Present: frame 2 OK (0 passes)
+device destroyed
+Direct3DCreate9(SDK 32)
+Init: Metal device 'Apple M1 Max', 640x480, hwnd=00020052
+Init: OK
+stub: DrawPrimitiveUP: non-trianglelist
+Present: frame 3 OK (0 passes)
+device destroyed
+Direct3DCreate9(SDK 32)
+Init: Metal device 'Apple M1 Max', 640x480, hwnd=00030052
+Init: OK
+stub: CreateRenderTarget (placeholder surface)
+stub: CreateTexture: render target (no draw redirection yet)
+stub: D9MTPlainSurface::LockRect

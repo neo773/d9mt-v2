@@ -305,13 +305,19 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::makeResident(obj_handle_t handle) {
+    /* Most resources are already resident from creation (device add-at-alloc).
+     * This covers the exceptions — borrowed handles the device never created:
+     * the CAMetalLayer drawable texture and the visibility buffer. The device
+     * residency set is a set (addAllocation idempotent), so re-adding an
+     * already-resident created resource is a harmless no-op; the local dedup
+     * just avoids the unix round-trip. Never cleared → never wiped. */
     if (!handle)
       return;
     for (obj_handle_t h : m_residentSet)
       if (h == handle)
         return;
     m_residentSet.push_back(handle);
-    MTLResidencySet_addAllocation(m_residencySet.handle(), handle);
+    m_device->residencyAdd(handle);
   }
 
   void MtlContextImpl::residentTextureView(const Rc<MtlTextureView>& view) {

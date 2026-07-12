@@ -34,11 +34,11 @@ namespace dxvk::backend {
   class MtlAllocationImpl : public MtlAllocation {
   public:
     WmtBuffer owned;
+    class MtlDeviceImpl* residencyDevice = nullptr;   // for remove-at-free
 
-    /* Frees the VirtualAlloc'd host backing (bytesNoCopy memory). Runs only
-     * after the retirement spine drops the last Rc, i.e. the GPU is done.
-     * Without this every buffer create/MAP_DISCARD rename leaked 32-bit
-     * address space until VirtualAlloc returned NULL (staging memcpy to 0). */
+    /* Frees the VirtualAlloc'd host backing (bytesNoCopy memory) and removes
+     * the allocation from the device residency set. Runs only after the
+     * retirement spine drops the last Rc, i.e. the GPU is done. */
     ~MtlAllocationImpl();
   };
 
@@ -55,6 +55,8 @@ namespace dxvk::backend {
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
     MtlImageCreateInfo info  = { };
+    class MtlDeviceImpl* residencyDevice = nullptr;   // for remove-at-free
+    ~MtlTextureImpl();   // inline-defined after MtlDeviceImpl below
   };
 
   class MtlTextureViewImpl : public MtlTextureView {
@@ -100,6 +102,10 @@ namespace dxvk::backend {
     uint64_t getNextSerial() override;
     void     waitForIdle() override;
 
+    /* VirtualAlloc with a drain-and-retry fallback when the 32-bit address
+     * space is exhausted by in-flight buffer backings. */
+    void*    hostAlloc(uint64_t size);
+
     bool supportsFormat(
             MtlFormat                   format,
             MtlUsage                    usage) const override;
@@ -116,6 +122,24 @@ namespace dxvk::backend {
 
     SubmissionTracker& submissions() { return *m_tracker; }
     UploadRing&        uploadRing()  { return *m_ring; }
+
+    /* ONE device-lifetime residency set (kk model): every Metal allocation is
+     * added at creation and removed at destruction, so the set always covers
+     * exactly the live resources. It is NEVER wiped mid-frame — that was the
+     * cause of non-resident GPU faults (a bound-but-not-re-touched resource
+     * dropped out of the set). The context binds it per cmdbuf and does
+     * commit+requestResidency per submit. */
+    obj_handle_t residencySet() const { return m_residencySet.handle(); }
+    void residencyAdd(obj_handle_t alloc) {
+      if (!alloc) return;
+      std::lock_guard<std::mutex> lock(m_residencyMutex);
+      MTLResidencySet_addAllocation(m_residencySet.handle(), alloc);
+    }
+    void residencyRemove(obj_handle_t alloc) {
+      if (!alloc) return;
+      std::lock_guard<std::mutex> lock(m_residencyMutex);
+      MTLResidencySet_removeAllocation(m_residencySet.handle(), alloc);
+    }
 
     /* Cached MTLDepthStencilState keyed by the folded depth-stencil state
      * (setDepthStencilState is not a PSO key; the DSSO is bound dynamically). */
@@ -138,8 +162,19 @@ namespace dxvk::backend {
     std::mutex m_dssoMutex;
     std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
 
+    std::mutex      m_residencyMutex;
+    WmtResidencySet m_residencySet;   // device-lifetime; add-at-alloc/remove-at-free
+
     friend class MtlContextImpl;
 
   };
+
+  /* Inline (weak comdat) so TUs that construct MtlTextureImpl — e.g. the
+   * presenter wrapping a drawable — don't each emit a conflicting strong
+   * out-of-line definition. Defined here now that MtlDeviceImpl is complete. */
+  inline MtlTextureImpl::~MtlTextureImpl() {
+    if (residencyDevice)
+      residencyDevice->residencyRemove(owned.handle());
+  }
 
 }

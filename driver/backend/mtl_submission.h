@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "wmt_handle.h"
@@ -74,6 +75,7 @@ private:
   uint64_t m_nextSerial = 1u;
   uint64_t m_completedCache = 0u;
 
+  std::mutex m_retireMutex;
   std::vector<Retirement> m_retirements;
 
 };

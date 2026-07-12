@@ -671,77 +671,72 @@ namespace dxvk {
     Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
     Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
 
-    // Acquire the next drawable (CAMetalLayer nextDrawable). Contract 3e: the
-    // returned MtlPresenterSync carries the drawable acquire/release tokens.
-    MtlAcquiredDrawable drawable = m_wctx->presenter->acquireNextImage(m_wctx->frameId + 1u);
+    // Bump frame ID for the acquire below.
+    m_wctx->frameId += 1;
 
-    if (drawable.valid) {
-      // Bump frame ID
-      m_wctx->frameId += 1;
+    // The ENTIRE present — drawable acquire, blit, signal, present, release —
+    // runs on the CS thread. Acquiring nextDrawable on the producer thread and
+    // releasing it on the CS thread let >maximumDrawableCount(3) drawables go
+    // outstanding, blocking nextDrawable and deadlocking both threads at
+    // exactly 3 frames. dxmt acquires late, on the encode thread; so do we.
+    m_parent->EmitCs([
+      cPresenter = m_wctx->presenter,
+      cSrcView   = swapImageView,
+      cSrcImage  = swapImage,
+      cDevice    = m_device,
+      cFrameId   = m_wctx->frameId,
+      cParamsW   = uint32_t(m_presentParams.BackBufferWidth),
+      cParamsH   = uint32_t(m_presentParams.BackBufferHeight),
+      cSignal    = m_wctx->frameLatencySignal
+    ] (MtlContext* ctx) {
+      // Gated backbuffer readback (verifier) — before the present copy, on
+      // the fully-rendered app backbuffer. No-op unless the trigger exists.
+      DumpBackbufferIfRequested(ctx, cDevice, cSrcImage, cParamsW, cParamsH);
 
-      // Present from CS thread so we don't have to synchronize with it first.
-      m_parent->EmitCs([
-        cPresenter = m_wctx->presenter,
-        cSrcView   = swapImageView,
-        cSrcImage  = swapImage,
-        cDevice    = m_device,
-        cDrawable  = drawable,
-        cFrameId   = m_wctx->frameId,
-        cParamsW   = uint32_t(m_presentParams.BackBufferWidth),
-        cParamsH   = uint32_t(m_presentParams.BackBufferHeight),
-        cSignal    = m_wctx->frameLatencySignal
-      ] (MtlContext* ctx) {
-        // Gated backbuffer readback (verifier) — before the present copy, on
-        // the fully-rendered app backbuffer. No-op unless the trigger exists.
-        DumpBackbufferIfRequested(ctx, cDevice, cSrcImage, cParamsW, cParamsH);
-
-        // The backend presenter blits the current back buffer (cSrcView) into the
-        // acquired drawable; here we wire the acquire/release drawable semaphores
-        // to the submit (synchronizeWsi, contract 3e), commit, and present.
-        // Copy the app's rendered back buffer into the acquired drawable
-        // before presenting (D3D9 Present = backbuffer -> front/drawable).
-        if (cSrcView != nullptr && cSrcView->image != nullptr && cDrawable.texture != nullptr) {
-          /* Clamp to min(backbuffer, drawable): the CAMetalLayer drawable can
-           * be smaller than the app backbuffer, and an over-sized copy is an
-           * out-of-bounds fault that hangs the GPU. */
-          const MtlSize src = cSrcView->image->extent;
-          const MtlSize dst = cDrawable.texture->extent;
-          MtlSize extent = {
-            std::min(src.width,  dst.width  ? dst.width  : src.width),
-            std::min(src.height, dst.height ? dst.height : src.height),
-            1u };
-          /* A zero-sized copy is a Metal API violation (NSException — kills the
-           * process); it also means the extents above are broken — log it. */
-          if (extent.width == 0u || extent.height == 0u) {
-            static bool warned = false;
-            if (!warned) {
-              warned = true;
-              Logger::warn(str::format("D3D9SwapChainEx: present copy extent is zero"
-                " (src=", src.width, "x", src.height,
-                " dst=", dst.width, "x", dst.height, ") — skipping copy"));
-            }
-          } else {
-            ctx->copyTexture(
-              cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
-              cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
-          }
-        }
-        ctx->synchronizeWsi(cDrawable.sync);
-        ctx->flushCommandList(nullptr, nullptr);
-        cPresenter->present(cDrawable);
-        Logger::debug("D3D9: frame presented");
-
-        // Frame-latency signalling (contract 3e — deadlock-class). The real signal
-        // is posted from the presenter's drawable-present completion handler; we
-        // additionally bump the swapchain's frame-latency fence so SyncFrameLatency
-        // can throttle the app to N frames in flight.
+      // Acquire the drawable HERE (CS thread) — one thread owns the whole
+      // acquire/present/release cycle.
+      MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
+      if (!cDrawable.valid) {
+        // Occluded / no drawable this frame — still advance the frame fences so
+        // the limiter and any waiter don't stall.
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
           cSignal->signal(cFrameId);
-      });
+        return;
+      }
 
-      m_parent->FlushCsChunk();
-    }
+      // Copy the app's rendered back buffer into the acquired drawable
+      // before presenting (D3D9 Present = backbuffer -> front/drawable).
+      if (cSrcView != nullptr && cSrcView->image != nullptr && cDrawable.texture != nullptr) {
+        /* Clamp to min(backbuffer, drawable): the CAMetalLayer drawable can
+         * be smaller than the app backbuffer, and an over-sized copy is an
+         * out-of-bounds fault that hangs the GPU. */
+        const MtlSize src = cSrcView->image->extent;
+        const MtlSize dst = cDrawable.texture->extent;
+        MtlSize extent = {
+          std::min(src.width,  dst.width  ? dst.width  : src.width),
+          std::min(src.height, dst.height ? dst.height : src.height),
+          1u };
+        if (extent.width && extent.height) {
+          ctx->copyTexture(
+            cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
+            cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+        }
+      }
+      // synchronizeWsi: submit the blit, then signalDrawable + present. No
+      // pre-commit waitForDrawable (dxmt omits it; a wait on a drawable the
+      // display never releases blocks the queue timeline forever, so the
+      // completion event after it never fires — the classic wedge).
+      ctx->synchronizeWsi(cDrawable.sync);
+      cPresenter->present(cDrawable);
+      Logger::debug("D3D9: frame presented");
+
+      cPresenter->signalFrameLatency(cFrameId);
+      if (cSignal != nullptr)
+        cSignal->signal(cFrameId);
+    });
+
+    m_parent->FlushCsChunk();
 
     SyncFrameLatency();
 

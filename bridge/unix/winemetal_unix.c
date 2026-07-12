@@ -5270,8 +5270,15 @@ _MTLDevice_registryID(void *obj) {
 static NTSTATUS
 _MTLSharedEvent_waitUntilSignaledValue(void *obj) {
   struct unixcall_mtlsharedevent_waituntilsignaledvalue *params = obj;
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] waitUntilSignaledValue value=%llu tmo=%llu ENTER (cur=%llu)\n",
+            (unsigned long long)params->value, (unsigned long long)params->timeout_ms,
+            (unsigned long long)[(id<MTLSharedEvent>)params->event signaledValue]);
   bool timeout = [(id<MTLSharedEvent>)params->event waitUntilSignaledValue:params->value timeoutMS:params->timeout_ms];
   params->ret_timeout = timeout;
+  if (getenv("D9MT_WSILOG"))
+    fprintf(stderr, "D9MT-WSI[unix] waitUntilSignaledValue value=%llu EXIT signaled=%d\n",
+            (unsigned long long)params->value, (int)timeout);
   return STATUS_SUCCESS;
 }
 
@@ -6133,6 +6140,13 @@ _MTLResidencySet_addAllocation(void *obj) {
 }
 
 static NTSTATUS
+_MTLResidencySet_removeAllocation(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTLResidencySet>)params->handle removeAllocation:(id<MTLAllocation>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLResidencySet_commit(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
   [(id<MTLResidencySet>)params->handle commit];
@@ -6404,6 +6418,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MetalDrawable_present,                                /* 201 */
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
     &_MTL4CommandEncoder_barrier,                           /* 203 */
+    &_MTLResidencySet_removeAllocation,                     /* 204 */
 };
 
 #ifndef DXMT_NATIVE
@@ -6626,5 +6641,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalDrawable_present,                                /* 201 */
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
     &_MTL4CommandEncoder_barrier,                           /* 203 */
+    &_MTLResidencySet_removeAllocation,                     /* 204 */
 };
 #endif

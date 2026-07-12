@@ -266,10 +266,8 @@ namespace dxvk::backend {
     uint32_t     m_allocatorSlot = 0u; // ring slot of m_allocator
     obj_handle_t m_allocator    = 0u;  // current frame's allocator (borrowed)
 
-    /* ONE residency set per context; per-stage argument tables (decision 3). */
-    WmtResidencySet             m_residencySet;
+    /* Residency set lives on the DEVICE (add-at-alloc/remove-at-free). */
     std::array<WmtArgTable, 2>  m_argTable;   // [vertex, fragment]
-    uint64_t     m_residencyEpochSerial = 0u; // max serial that used the set
 
     uint32_t           m_dirty = DirtyEverything;
 

@@ -12,10 +12,17 @@
 #ifdef NDEBUG
 #define UNIX_CALL(code, params) WINE_UNIX_CALL(code, params)
 #else
+#include <stdio.h>
 #define UNIX_CALL(code, params)                                                                                        \
   {                                                                                                                    \
     NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
-    assert(!status && "unix call failed");                                                                             \
+    if (status) {                                                                                                      \
+      fprintf(stderr, "winemetal: unix call %d FAILED status=0x%x\n", (int)(code), (unsigned)status);                  \
+      fflush(stderr);                                                                                                  \
+      /* retain/release (codes 0/1) failing at teardown leaks instead of                                               \
+       * aborting the process; anything else is still fatal. */                                                        \
+      assert(((code) == 0 || (code) == 1) && "unix call failed");                                                      \
+    }                                                                                                                  \
   }
 #endif
 
@@ -1806,4 +1813,13 @@ MTL4CommandEncoder_barrier(obj_handle_t encoder, uint64_t after_stages,
   params.before_stages = before_queue_stages;
   params.visibility = visibility_options;
   UNIX_CALL(203, &params);
+}
+
+/* --- residency set single remove (204) ------------------------------ */
+WINEMETAL_API void
+MTLResidencySet_removeAllocation(obj_handle_t residency_set, obj_handle_t resource) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = residency_set;
+  params.arg = resource;
+  UNIX_CALL(204, &params);
 }

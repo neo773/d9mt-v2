@@ -48,10 +48,9 @@ namespace dxvk::backend {
     m_argTable[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
     m_argTable[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
 
-    /* ONE residency set per context (decision 4). */
-    WMTResidencySetInfo rsi = {};
-    rsi.initial_capacity = 4096u;
-    m_residencySet = WmtResidencySet::adopt(MTLDevice_newResidencySet(dev, &rsi));
+    /* Residency: the DEVICE owns one lifetime residency set (add-at-alloc /
+     * remove-at-free, never wiped). The context just binds it per cmdbuf and
+     * commits it per submit. */
 
     /* Allocator ring seed: slot 0 exists so pre-frame resource-init cmdbufs
      * (before the first beginRecording) have backing memory. beginRecording
@@ -82,33 +81,20 @@ namespace dxvk::backend {
       m_allocators[slot] = WmtAllocator::adopt(
         MTLDevice_newCommandAllocator(m_device->wmtDevice()));
     } else {
-      if (m_device->submissions().completedSerial() < m_allocatorSerial[slot]) {
-        /* BISECT: log-only while diagnosing GTA boot death — gate suspected */
-        static std::atomic<uint32_t> n{0};
-        if (n.fetch_add(1u) < 8u)
-          Logger::warn(str::format("allocator slot ", slot, " reset while serial ",
-            m_allocatorSerial[slot], " > completed ",
-            m_device->submissions().completedSerial()));
-      }
+      /* MTL4CommandAllocator contract: the slot's prior command buffers must
+       * have COMPLETED before reset. Block on the slot's last serial (a real
+       * wait, not a log) or reset corrupts command memory the GPU is reading. */
+      if (m_device->submissions().completedSerial() < m_allocatorSerial[slot])
+        m_device->submissions().waitFor(m_allocatorSerial[slot]);
       MTL4CommandAllocator_reset(m_allocators[slot].handle());
     }
     m_allocator = m_allocators[slot].handle();
     m_allocatorSlot = slot;
 
-    /* Rebuild the residency set only once the epoch that last used it has
-     * retired — never evict an allocation an in-flight cmdbuf still reads. */
-    if (m_device->submissions().completedSerial() >= m_residencyEpochSerial) {
-      MTLResidencySet_removeAllAllocations(m_residencySet.handle());
-      MTLResidencySet_commit(m_residencySet.handle());
-      m_residentSet.clear();
-      /* Context-lifetime allocations must survive the rebuild: the
-       * visibility buffer is written by EVERY pass (occlusion counters) but
-       * ensureVisBuffer only adds it once — losing it here is a GPU write
-       * fault ("BIF0 page fault") the first time a game uses occlusion
-       * queries after an epoch rotation. */
-      if (m_visBuffer)
-        makeResident(m_visBuffer.handle());
-    }
+    /* NO residency wipe. The device set is add-at-alloc / remove-at-free and
+     * lives forever — wiping it mid-run (the old epoch rebuild) dropped
+     * bound-but-not-re-touched resources out of residency and faulted the GPU
+     * ("BIF0 page fault"). Resources are resident from creation to free. */
 
     ensureCommandBuffer();
   }
@@ -120,7 +106,7 @@ namespace dxvk::backend {
     m_cmdbuf = WmtCommandBuffer::adopt(
       MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
     MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
-    MTL4CommandBuffer_useResidencySet(m_cmdbuf.handle(), m_residencySet.handle());
+    MTL4CommandBuffer_useResidencySet(m_cmdbuf.handle(), m_device->residencySet());
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
@@ -190,9 +176,9 @@ namespace dxvk::backend {
 
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
-    /* Realize residency before the GPU runs this cmdbuf (decision 4). */
-    MTLResidencySet_commit(m_residencySet.handle());
-    MTLResidencySet_requestResidency(m_residencySet.handle());
+    /* Realize residency before the GPU runs this cmdbuf (device set). */
+    MTLResidencySet_commit(m_device->residencySet());
+    MTLResidencySet_requestResidency(m_device->residencySet());
 
     obj_handle_t cb = m_cmdbuf.handle();
     gpuCaptureBeforeCommit(m_device->wmtDevice());
@@ -201,7 +187,6 @@ namespace dxvk::backend {
 
     /* MTL4: the completion signal is a queue-timeline op AFTER commit. */
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
-    m_residencyEpochSerial = serial;
     /* Every submission recorded from the current allocator slot pins that
      * slot until this serial retires (see beginRecording reset gate). */
     m_allocatorSerial[m_allocatorSlot] = serial;
@@ -262,17 +247,19 @@ namespace dxvk::backend {
       closePass();
     ensureCommandBuffer();
 
-    /* GPU-side wait: the drawable's backing texture must be released by the
-     * display before this cmdbuf writes it. Enqueued before commit. */
-    MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
-
+    /* Commit the blit that wrote the drawable. NO pre-commit waitForDrawable:
+     * dxmt omits it, and a queue-timeline wait on a drawable the display never
+     * releases blocks forever — the completion signalEvent enqueued after it
+     * then never fires and every CPU wait wedges. signalDrawable + present come
+     * AFTER commit (the Metal 4 present handshake). */
     submit(false);
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
     MetalDrawable_present(sync.drawable);
     /* Balance the retain taken in the bridge's nextDrawable — after present
-     * nothing touches the drawable again; without this the CAMetalLayer's
-     * drawable pool starves (maximumDrawableCount ~3) and nextDrawable stalls. */
+     * nothing touches the drawable again. Acquire/present/release now all run
+     * on the CS thread (see D3D9SwapChainEx::PresentImage), so no drawable is
+     * ever held across a thread boundary. */
     NSObject_release(sync.drawable);
   }
 
