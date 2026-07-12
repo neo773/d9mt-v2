@@ -198,18 +198,11 @@ uniform RenderStates {
     uint packedSamplerIndices[TextureStageCount / 2u];
 };
 
+// v2: only t2d + tcube (2 arrays x TextureStageCount = 16) so the FF fragment
+// stage fits Metal's ~16-slot argument table. t3d and the depth-compare shadow
+// arrays (t2dShadow/tcubeShadow) were dropped — see sampleTexture().
 layout(set = SRV_SET, binding = SRV_PS_BASE) uniform texture2D t2d[TextureStageCount];
 layout(set = SRV_SET, binding = SRV_PS_BASE) uniform textureCube tcube[TextureStageCount];
-layout(set = SRV_SET, binding = SRV_PS_BASE) uniform texture3D t3d[TextureStageCount];
-
-// v2 adaptation: the Dref/shadow FF sampling path uses dedicated declarations so
-// spirv-cross keeps t2d/tcube above as plain colour textures (texture2d/texturecube).
-// If t2d were used in both a colour sample and a compare sample, spirv-cross would
-// promote it to depth2d, which Metal cannot bind a colour texture to. FF shadow
-// sampling is virtually never used; these depth arrays land at higher [[texture]]
-// slots and stay unbound for the colour cases.
-layout(set = SRV_SET, binding = SRV_PS_BASE) uniform texture2D t2dShadow[TextureStageCount];
-layout(set = SRV_SET, binding = SRV_PS_BASE) uniform textureCube tcubeShadow[TextureStageCount];
 
 // v2 adaptation: DXVK's bindless `sampler sampler_heap[]` (indexed by a packed
 // per-stage heap index) is replaced by a fixed sampler array matching v2's
@@ -318,25 +311,18 @@ vec4 sampleTexture(uint stage, vec4 texcoord, vec4 previousStageTextureVal) {
     // some reason this appears to return a null vector on native.
     vec4 texVal = vec4(0.0f);
 
+    // v2: Metal's argument table caps at ~16 texture bindings, but the DXVK FF
+    // layout wants 5 type-arrays x8 = 40 [[texture]] slots. Keep only t2d + tcube
+    // (16 total) so every referenced binding fits and is set. The dropped arrays
+    // — t3d and the depth-compare shadow variants — are virtually never used in
+    // FF; TYPE_3D falls back to a 2D sample, and DREF/shadow modes sample the
+    // colour texture (no hardware depth compare).
     switch (state.type) {
-        case TEXTURE_TYPE_2D:
-            if (state.mode >= SAMPLER_MODE_DREF) {
-                texcoord.z = adjustDref(texcoord.z, state);
-                texVal = texture(sampler2DShadow(t2dShadow[stage], samplers[stage]), texcoord.xyz).xxxx;
-            } else {
-                texVal = texture(sampler2D(t2d[stage], samplers[stage]), texcoord.xy);
-            }
-            break;
         case TEXTURE_TYPE_CUBE:
-            if (state.mode >= SAMPLER_MODE_DREF) {
-                texcoord.w = adjustDref(texcoord.w, state);
-                texVal = texture(samplerCubeShadow(tcubeShadow[stage], samplers[stage]), texcoord).xxxx;
-            } else {
-                texVal = texture(samplerCube(tcube[stage], samplers[stage]), texcoord.xyz);
-            }
+            texVal = texture(samplerCube(tcube[stage], samplers[stage]), texcoord.xyz);
             break;
-        case TEXTURE_TYPE_3D:
-            texVal = texture(sampler3D(t3d[stage], samplers[stage]), texcoord.xyz);
+        default: // TEXTURE_TYPE_2D and TEXTURE_TYPE_3D
+            texVal = texture(sampler2D(t2d[stage], samplers[stage]), texcoord.xy);
             break;
     }
 
