@@ -240,6 +240,24 @@ int main(void) {
 
   int overall = passA && passB && passC;
   LOG("RESULT: %s  (A=%d B=%d C=%d)", overall?"PASS":"FAIL", passA, passB, passC);
+
+  if (GetEnvironmentVariableA("HOLD", NULL, 0)) {
+    LOG("HOLD: rendering FF POSITIONT textured quad on loop (close window to quit)");
+    IDirect3DDevice9_SetFVF(dev, FVF);
+    IDirect3DDevice9_SetTexture(dev,0,(IDirect3DBaseTexture9*)tex);
+    IDirect3DDevice9_SetRenderState(dev,D3DRS_LIGHTING,FALSE);
+    for(;;){
+      MSG msg; while(PeekMessageA(&msg,NULL,0,0,PM_REMOVE)){ if(msg.message==WM_QUIT) goto done; TranslateMessage(&msg); DispatchMessageA(&msg); }
+      IDirect3DDevice9_Clear(dev,0,NULL,D3DCLEAR_TARGET,D3DCOLOR_XRGB(16,16,40),1.f,0);
+      IDirect3DDevice9_BeginScene(dev);
+      IDirect3DDevice9_DrawPrimitiveUP(dev,D3DPT_TRIANGLESTRIP,2,q,sizeof(struct V));
+      IDirect3DDevice9_EndScene(dev);
+      IDirect3DDevice9_Present(dev,NULL,NULL,NULL,NULL);
+      Sleep(16);
+    }
+    done:;
+  }
+
   IDirect3DTexture9_Release(tex);
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);
   return 0;

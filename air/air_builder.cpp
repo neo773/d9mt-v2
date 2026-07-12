@@ -719,6 +719,14 @@ struct AirBuilderImpl {
     return nullptr;
   }
 
+  const InputVar* findInput(ir::SsaDef def) const {
+    for (const auto& in : inputs) {
+      if (in.def == def)
+        return &in;
+    }
+    return nullptr;
+  }
+
   /* LLVM type of the hidden trailing param forwarding this declaration */
   Type* hiddenParamType(ir::SsaDef declDef) {
     if (const BufferVar* buf = findBuffer(declDef))
@@ -729,6 +737,8 @@ struct AirBuilderImpl {
       return samplerHandleType();
     if (const OutputVar* out = findOutput(declDef))
       return PointerType::get(out->type, 0u); /* entry output alloca */
+    if (const InputVar* in = findInput(declDef))
+      return in->type; /* stage-in input threaded by value */
     unsupported("hidden param for unknown declaration");
   }
 
@@ -761,6 +771,13 @@ struct AirBuilderImpl {
         if (op.getOpCode() == ir::OpCode::eInputLoad) {
           if (const BufferVar* buf = findBuffer(operandDef(op, 0u)))
             addUse(buf->def.getId());
+          /* Stage-in inputs (air.position, fog, user interpolants) live as
+           * entry-point arguments. A helper (dxbc-spirv fog/clip functions load
+           * these directly) cannot reach the entry's args, so thread the loaded
+           * value in as a hidden param — the entry never needs this (currentFnDef
+           * == entry is filtered by addUse's owner check below). */
+          else if (const InputVar* in = findInput(operandDef(op, 0u)))
+            addUse(in->def.getId());
         } else if (op.getOpCode() == ir::OpCode::eOutputStore) {
           /* outputs written from helper functions arrive as pointers to
            * the entry's output allocas */
@@ -794,7 +811,7 @@ struct AirBuilderImpl {
 
       if (op.getDef() == entryDef) {
         createEntryFunction();
-        /* entry accesses resources through its own binding arguments */
+        /* entry accesses resources (and stage-in inputs) through its own args */
         auto& argMap = fnBufferArgs[entryDef.getId()];
         for (const auto& buf : buffers)
           argMap.emplace(buf.def.getId(), buf.argIndex);
@@ -802,6 +819,8 @@ struct AirBuilderImpl {
           argMap.emplace(tex.def.getId(), tex.argIndex);
         for (const auto& smp : samplers)
           argMap.emplace(smp.def.getId(), smp.argIndex);
+        for (const auto& in : inputs)
+          argMap.emplace(in.def.getId(), in.argIndex);
         continue;
       }
 
@@ -1266,11 +1285,14 @@ struct AirBuilderImpl {
     ir::SsaDef decl = operandDef(op, 0u);
     ir::SsaDef addrDef = operandDef(op, 1u);
 
-    /* stage-in input? */
+    /* stage-in input? Resolve through the *current* function's arg map: the
+     * entry reads its own stage-in argument, a helper reads the value threaded
+     * to it as a hidden param (a function cannot reach the entry's args). */
     for (const auto& in : inputs) {
       if (in.def != decl)
         continue;
-      Value* param = entryFn->getArg(in.argIndex);
+      const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
+      Value* param = currentFn->getArg(argMap.at(in.def.getId()));
       setValue(op, !addrDef
         ? param
         : b->CreateExtractElement(param,
@@ -1492,17 +1514,27 @@ struct AirBuilderImpl {
     return fn;
   }
 
-  /* The air.fast_* intrinsics are scalar (.f32). The sm3 pipeline is mostly
+  /* The air.fast_* intrinsics are scalar .f32. The sm3 pipeline is mostly
    * scalarized, but some shaders (e.g. GTA) reach here with a vector operand;
-   * decompose it into per-component scalar calls and reassemble. */
+   * decompose it into per-component scalar calls and reassemble.
+   *
+   * min16float shaders lower to `half`; there is no guaranteed half variant of
+   * these fast intrinsics and getAirMathFn caches by name, so a half operand
+   * would clash with the cached float(float) declaration. Compute in float
+   * (promote args, truncate result) — the .f32 intrinsic is always available. */
   Value* callScalarMath(const std::string& base, Type* scalarTy,
                         std::initializer_list<Value*> args) {
+    const bool isHalf = scalarTy->isHalfTy();
+    Type* calcTy = isHalf ? Type::getFloatTy(ctx) : scalarTy;
+    std::vector<Value*> callArgs;
+    for (Value* v : args)
+      callArgs.push_back(isHalf ? b->CreateFPExt(v, calcTy) : v);
     CallInst* call = b->CreateCall(
-      getAirMathFn(base + ".f32", scalarTy,
-        std::vector<Type*>(args.size(), scalarTy)),
-      std::vector<Value*>(args));
+      getAirMathFn(base + ".f32", calcTy,
+        std::vector<Type*>(callArgs.size(), calcTy)),
+      callArgs);
     call->setFastMathFlags(FastMathFlags::getFast());
-    return call;
+    return isHalf ? b->CreateFPTrunc(call, scalarTy) : static_cast<Value*>(call);
   }
 
   void emitAirMathUnary(const ir::Op& op, const std::string& base) {
@@ -1534,10 +1566,7 @@ struct AirBuilderImpl {
       setValue(op, res);
       return;
     }
-    CallInst* call = b->CreateCall(
-      getAirMathFn(base + ".f32", type, { type, type }), { a, c });
-    call->setFastMathFlags(FastMathFlags::getFast());
-    setValue(op, call);
+    setValue(op, callScalarMath(base, type, { a, c }));
   }
 
   Type* requireScalarI32(const ir::Op& op) {

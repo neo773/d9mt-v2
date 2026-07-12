@@ -177,10 +177,16 @@ namespace dxvk::backend {
     texInfo.width = info.extent.width;
     texInfo.height = info.extent.height;
     texInfo.depth = info.extent.depth;
-    /* Metal requires arrayLength >= 1 even for non-array textures; cube uses
-     * the declared face/array count. */
-    texInfo.array_length = info.arrayLayers > 0u ? info.arrayLayers : 1u;
     texInfo.type = wmtTextureType(info);
+    /* Metal's arrayLength counts array *slices*, and for cube types the 6 faces
+     * are implicit (NOT slices): MTLTextureTypeCube requires arrayLength == 1,
+     * MTLTextureTypeCubeArray requires arrayLength == number-of-cubes. D3D9
+     * passes arrayLayers == 6*cubeCount, so divide by 6 for cube types. Non-cube
+     * array textures use arrayLayers directly; everything needs arrayLength >= 1. */
+    uint32_t arrayLength = info.arrayLayers > 0u ? info.arrayLayers : 1u;
+    if (info.cube)
+      arrayLength = arrayLength / 6u > 0u ? arrayLength / 6u : 1u;
+    texInfo.array_length = arrayLength;
     texInfo.mipmap_level_count = info.mipLevels;
     texInfo.sample_count = info.sampleCount;
     texInfo.usage = WMTTextureUsage(textureUsage(info.usage));

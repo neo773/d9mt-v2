@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -8,7 +9,17 @@
 #include "../thread.h"
 
 namespace dxvk {
-  
+
+  /* ONE diagnostic-logging switch for the whole driver. Set D9MT_TRACE=1 to
+   * enable every gated Logger::info trace line (clear/load-action, D3D9
+   * interface queries, etc). Cached once. Behaviour toggles that CHANGE
+   * rendering for bisection (D9MT_NOCOLORCLEAR / D9MT_NOPSOCACHE) stay separate
+   * — those are not logging. */
+  inline bool d9mtTrace() {
+    static const bool s_on = std::getenv("D9MT_TRACE") != nullptr;
+    return s_on;
+  }
+
   enum class LogLevel : uint32_t {
     Trace = 0,
     Debug = 1,

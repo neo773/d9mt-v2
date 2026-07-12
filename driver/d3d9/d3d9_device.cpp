@@ -1878,7 +1878,7 @@ namespace dxvk {
     if (unlikely(!Count && pRects))
       return D3D_OK;
 
-    if (std::getenv("D9MT_CLRLOG"))
+    if (d9mtTrace())
       Logger::info(str::format("D3D9::Clear Flags=0x", std::hex, Flags, std::dec,
         " (TARGET=", (Flags & D3DCLEAR_TARGET) ? 1 : 0,
         " ZB=", (Flags & D3DCLEAR_ZBUFFER) ? 1 : 0,

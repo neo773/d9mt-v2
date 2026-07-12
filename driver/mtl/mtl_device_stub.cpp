@@ -6,6 +6,8 @@
 #include "mtl_context.h"
 
 #include "../util/log/log.h"
+#include "../util/util_env.h"
+#include "../util/config/config.h"
 
 // Log-and-return stub so the frontend port compiles/links before the real
 // backend (driver/backend) is wired in. Every method that returns an object
@@ -153,6 +155,14 @@ namespace dxvk {
 
   MtlInstance::MtlInstance() {
     wsi::init();   // upstream DxvkInstance ctor parity (dxvk_instance.cpp:30)
+
+    // Build the driver config the same way DxvkInstance does: user config
+    // (dxvk.conf / d3d9.conf) then per-app profiles keyed off the full exe
+    // path (dxvk_instance.cpp:32-34). Without this, the g_profiles table
+    // (e.g. Oblivion modeCountCompatibility) is dead code and never applies.
+    m_config.merge(Config::getUserConfig());
+    m_config.merge(Config::getAppConfig(env::getExePath()));
+    m_config.logOptions();
   }
 
   MtlInstance::~MtlInstance() {

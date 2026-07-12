@@ -83,10 +83,15 @@ namespace dxvk {
 
     if (unlikely(m_d3d9Options.shaderModel == 0))
       Logger::warn("D3D9InterfaceEx: WARNING! Fixed-function exclusive mode is enabled.");
+
+    if (d9mtTrace())
+      Logger::info(str::format("ITRACE D3D9InterfaceEx CTOR this=", this, " ext=", m_extended));
   }
 
 
   D3D9InterfaceEx::~D3D9InterfaceEx() {
+    if (d9mtTrace())
+      Logger::info(str::format("ITRACE D3D9InterfaceEx DTOR this=", this));
     g_dxvkInstance.release();
   }
 
@@ -133,9 +138,15 @@ namespace dxvk {
           UINT                    Adapter,
           DWORD                   Flags,
           D3DADAPTER_IDENTIFIER9* pIdentifier) {
-    if (auto* adapter = GetAdapter(Adapter))
-      return adapter->GetAdapterIdentifier(Flags, pIdentifier);
-
+    if (d9mtTrace()) Logger::info(str::format("ITRACE GetAdapterIdentifier a=", Adapter));
+    if (auto* adapter = GetAdapter(Adapter)) {
+      HRESULT hr = adapter->GetAdapterIdentifier(Flags, pIdentifier);
+      if (d9mtTrace() && SUCCEEDED(hr))
+        Logger::info(str::format("ITRACE   id Driver='", pIdentifier->Driver,
+          "' Desc='", pIdentifier->Description, "' Vendor=", pIdentifier->VendorId,
+          " Device=", pIdentifier->DeviceId));
+      return hr;
+    }
     return D3DERR_INVALIDCALL;
   }
 
@@ -151,6 +162,7 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9InterfaceEx::GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE* pMode) {
+    if (d9mtTrace()) Logger::info(str::format("ITRACE GetAdapterDisplayMode a=", Adapter));
     if (auto* adapter = GetAdapter(Adapter)) {
       D3DDISPLAYMODEEX modeEx = { };
       modeEx.Size = sizeof(D3DDISPLAYMODEEX);
@@ -177,10 +189,13 @@ namespace dxvk {
           D3DFORMAT  AdapterFormat,
           D3DFORMAT  BackBufferFormat,
           BOOL       bWindowed) {
-    if (auto* adapter = GetAdapter(Adapter))
-      return adapter->CheckDeviceType(
+    if (auto* adapter = GetAdapter(Adapter)) {
+      HRESULT hr = adapter->CheckDeviceType(
         DevType, EnumerateFormat(AdapterFormat),
         EnumerateFormat(BackBufferFormat), bWindowed);
+      if (d9mtTrace()) Logger::info(str::format("ITRACE CheckDeviceType a=", Adapter, " dev=", DevType, " af=", AdapterFormat, " bb=", BackBufferFormat, " win=", bWindowed, " -> 0x", std::hex, uint32_t(hr), std::dec));
+      return hr;
+    }
 
     return D3DERR_INVALIDCALL;
   }
@@ -193,12 +208,14 @@ namespace dxvk {
           DWORD           Usage,
           D3DRESOURCETYPE RType,
           D3DFORMAT       CheckFormat) {
-    if (auto* adapter = GetAdapter(Adapter))
-      return adapter->CheckDeviceFormat(
+    if (auto* adapter = GetAdapter(Adapter)) {
+      HRESULT hr = adapter->CheckDeviceFormat(
         DeviceType, EnumerateFormat(AdapterFormat),
-        Usage, RType,
-        EnumerateFormat(CheckFormat));
-
+        Usage, RType, EnumerateFormat(CheckFormat));
+      if (d9mtTrace()) Logger::info(str::format("ITRACE CheckDeviceFormat fmt=", uint32_t(CheckFormat),
+        " usage=", Usage, " rtype=", uint32_t(RType), " -> 0x", std::hex, uint32_t(hr), std::dec));
+      return hr;
+    }
     return D3DERR_INVALIDCALL;
   }
 
@@ -254,10 +271,15 @@ namespace dxvk {
           UINT       Adapter,
           D3DDEVTYPE DeviceType,
           D3DCAPS9*  pCaps) {
-    if (auto* adapter = GetAdapter(Adapter))
-      return adapter->GetDeviceCaps(
-        DeviceType, pCaps);
-
+    if (d9mtTrace()) Logger::info(str::format("ITRACE GetDeviceCaps a=", Adapter, " type=", DeviceType));
+    if (auto* adapter = GetAdapter(Adapter)) {
+      HRESULT hr = adapter->GetDeviceCaps(DeviceType, pCaps);
+      if (d9mtTrace() && SUCCEEDED(hr) && pCaps)
+        Logger::info(str::format("ITRACE   caps PS=", pCaps->PixelShaderVersion,
+          " VS=", pCaps->VertexShaderVersion, " MaxTexW=", pCaps->MaxTextureWidth,
+          " Caps2=", pCaps->Caps2, " DevCaps=", pCaps->DevCaps));
+      return hr;
+    }
     return D3DERR_INVALIDCALL;
   }
 
@@ -305,6 +327,10 @@ namespace dxvk {
     modeEx.Size = sizeof(D3DDISPLAYMODEEX);
     HRESULT hr = this->EnumAdapterModesEx(Adapter, &filter, Mode, &modeEx);
 
+    if (d9mtTrace()) Logger::info(str::format("ITRACE EnumAdapterModes fmt=", uint32_t(Format),
+      " mode=", Mode, " -> 0x", std::hex, uint32_t(hr), std::dec,
+      SUCCEEDED(hr) ? str::format(" ", modeEx.Width, "x", modeEx.Height, "@", modeEx.RefreshRate) : ""));
+
     if (FAILED(hr))
       return hr;
 
@@ -321,8 +347,11 @@ namespace dxvk {
 
 
   UINT STDMETHODCALLTYPE D3D9InterfaceEx::GetAdapterModeCountEx(UINT Adapter, CONST D3DDISPLAYMODEFILTER* pFilter) {
-    if (auto* adapter = GetAdapter(Adapter))
-      return adapter->GetAdapterModeCountEx(pFilter);
+    if (auto* adapter = GetAdapter(Adapter)) {
+      UINT n = adapter->GetAdapterModeCountEx(pFilter);
+      if (d9mtTrace()) Logger::info(str::format("ITRACE GetAdapterModeCount a=", Adapter, " fmt=", pFilter ? pFilter->Format : 0, " -> ", n));
+      return n;
+    }
 
     return 0;
   }
@@ -359,6 +388,8 @@ namespace dxvk {
           D3DPRESENT_PARAMETERS* pPresentationParameters,
           D3DDISPLAYMODEEX*      pFullscreenDisplayMode,
           IDirect3DDevice9Ex**   ppReturnedDeviceInterface) {
+    if (d9mtTrace()) Logger::info(str::format("ITRACE CreateDeviceEx a=", Adapter, " type=", DeviceType,
+      " behavior=0x", std::hex, BehaviorFlags, std::dec));
     InitReturnPtr(ppReturnedDeviceInterface);
 
     if (unlikely(ppReturnedDeviceInterface  == nullptr

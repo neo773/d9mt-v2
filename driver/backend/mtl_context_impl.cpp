@@ -294,7 +294,7 @@ namespace dxvk::backend {
   void MtlContextImpl::clearRenderTarget(
     const Rc<MtlTextureView>& view, MtlAspectMask clear,
     MtlClearValue value, MtlAspectMask discard) {
-    if (std::getenv("D9MT_CLRLOG") && (clear & MtlAspectColor))
+    if (d9mtTrace() && (clear & MtlAspectColor))
       Logger::info(str::format("CLR color img=",
         (void*)(view ? view->image.ptr() : nullptr),
         " rgba=", value.color.r, ",", value.color.g, ",", value.color.b));
@@ -378,7 +378,7 @@ namespace dxvk::backend {
       info.colors[i].load_action = m_pass.clearColor[i]
         ? WMTLoadActionClear : WMTLoadActionLoad;
       info.colors[i].store_action = WMTStoreActionStore;
-      if (std::getenv("D9MT_CLRLOG") && i == 0)
+      if (d9mtTrace() && i == 0)
         Logger::info(str::format("MAT color img=", (void*)impl->image.ptr(),
           " load=", m_pass.clearColor[i] ? "CLEAR" : "LOAD"));
       if (m_pass.clearColor[i]) {
