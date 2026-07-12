@@ -214,6 +214,14 @@ namespace dxvk {
     RGBA16Snorm        = 112,
     RGBA16Float        = 115,
     RGBA32Float        = 125,
+    // Driver-internal VERTEX-ATTRIBUTE-ONLY marker. Metal has no 3-component
+    // 32-bit PIXEL format, but it does have MTLVertexFormatFloat3. A D3D9 FLOAT3
+    // attribute must map to Float3 (not be promoted to Float4) so the shader's
+    // 4th component defaults to 1.0 per D3D9 rules, instead of reading stale
+    // bytes as w. Promoting FLOAT3->Float4 read w=0 and collapsed GTA IV's 2D
+    // XYZRHW/POSITIONT screen-space quads (loading art + legal text). Value is
+    // outside the real MTLPixelFormat range; must never reach pixel-format code.
+    RGB32Float         = 900,
     // depth / stencil
     Depth16Unorm       = 250,
     Depth32Float       = 252,

@@ -185,6 +185,10 @@ namespace dxvk {
       case Kind::PSStaticConstants:
         return MtlStageFragment;
 
+      // FF spec data feeds both the VS and PS ubershaders.
+      case Kind::SpecData:
+        return MtlStageVertex | MtlStageFragment;
+
       case Kind::Count:
         break;
     }

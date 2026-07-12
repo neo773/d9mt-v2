@@ -1619,6 +1619,18 @@ namespace dxvk {
     MtlStagingBuffer                m_stagingBuffer;
     Rc<sync::Fence>                 m_stagingBufferFence;
     MtlDeviceSize                   m_stagingMemorySignaled = 0ull;
+    /* Monotonic bytes allocated by staging backings that have already been
+     * retired (replaced when full). Keeps GetStagingMemoryStatistics().allocated
+     * monotonic across backing swaps so the throttle + fence accounting stays
+     * correct. */
+    MtlDeviceSize                   m_stagingAllocatedBase = 0ull;
+    /* Retired (full) staging backings kept alive until the GPU is done reading
+     * their uploads. .first = staging-fence value at/after which the GPU has
+     * consumed everything in that backing (safe to free). copyBuffer only
+     * borrows the staging Rc (drops it after ENCODING, not GPU execution), so
+     * freeing a retired backing before this fence value corrupts in-flight
+     * uploads (garbled 2D text/geometry). */
+    std::vector<std::pair<MtlDeviceSize, Rc<MtlBuffer>>> m_retiredStagingBuffers;
 
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
     MtlDeviceSize                   m_discardMemoryOnFlush = 0u;

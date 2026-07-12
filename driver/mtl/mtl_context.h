@@ -50,7 +50,12 @@ namespace dxvk {
   public:
     MtlShaderStage  stage = MtlShaderStage::Vertex;
     MtlObjectHandle library = MtlNullHandle;
-    // PHASE-C: reflection (DxvkShaderMetadata-equivalent), entry name.
+    // AIR entry-point name inside `library`. MSC-compiled app shaders use
+    // "main"; the hand-authored fixed-function ubershaders use "ffVsMain"/
+    // "ffFsMain" (Metal reserves "main" for hand-written MSL). resolvePso
+    // forwards this to the render-PSO builder.
+    const char*     entryName = "main";
+    // PHASE-C: reflection (DxvkShaderMetadata-equivalent).
 
     // CbvIndex -> AIR Metal buffer-slot map (SOURCE_OF_TRUTH §4b bug 1). The
     // frontend binds constant buffers at raw CbvIndex; the AIR shader reads them

@@ -219,6 +219,10 @@ namespace dxvk::backend {
     /* Provisional per-draw push-constant buffer index (top of the 0..30 Metal
      * buffer table, clear of CBVs 0..2 and streams 3..18). */
     static constexpr uint32_t kPushConstantIndex = 20u;
+    /* Bytes reserved at the front of each stage's push buffer for the shared
+     * D3D9SharedPushData block (matches DXVK MaxSharedPushDataSize). Per-stage
+     * push blocks (vs/ffvs/ffps) start immediately after. */
+    static constexpr uint32_t kPushSharedBlockSize = 32u;
 
     // --- per-stage bound state (flat D3D9 slot model) ----------------------
     struct StageBindings {

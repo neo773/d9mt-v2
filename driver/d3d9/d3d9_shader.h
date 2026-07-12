@@ -145,6 +145,11 @@ namespace dxvk {
       PSShared                = 5u,
       PSStaticConstants       = 6u,
 
+      // Fixed-function spec-constant data (D3D9SpecData). DXVK bakes this as
+      // Vulkan specialization constants; the v2 FF ubershaders (auto-converted
+      // from GLSL) instead read it as a plain CBV bound to both stages.
+      SpecData                = 7u,
+
       Count
     };
 

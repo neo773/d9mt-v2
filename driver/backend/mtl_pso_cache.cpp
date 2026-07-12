@@ -34,7 +34,19 @@ namespace dxvk::backend {
   : m_compiler(compiler) { }
 
   obj_handle_t RenderPsoCache::get(
-    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary) {
+    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
+    const char* vsEntry, const char* fsEntry) {
+    /* DIAGNOSTIC: D9MT_NOPSOCACHE forces a fresh build with the LIVE shader
+     * libraries every draw (drops the memo + any cached entry for this key).
+     * Tests whether a stale/collided cached PSO — e.g. a reused vs/fs library
+     * handle mapping to the same key — is rendering wrong (block artwork). Slow;
+     * for diagnosis only. */
+    static const bool s_noPsoCache = std::getenv("D9MT_NOPSOCACHE") != nullptr;
+    if (s_noPsoCache) {
+      m_hasLast = false;
+      m_cache.erase(key);
+    }
+
     /* one-entry memo: same-material draw runs skip the map entirely */
     if (m_hasLast && m_lastKey == key)
       return m_lastPso;
@@ -47,7 +59,7 @@ namespace dxvk::backend {
       return m_lastPso;
     }
 
-    obj_handle_t pso = build(key, vsLibrary, fsLibrary);
+    obj_handle_t pso = build(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
     if (!pso)
       return 0u;
 
@@ -59,15 +71,26 @@ namespace dxvk::backend {
   }
 
   obj_handle_t RenderPsoCache::build(
-    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary) {
+    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
+    const char* vsEntry, const char* fsEntry) {
 
     WMTMtl4RenderPipelineInfo info = {};
     info.vertex_library            = vsLibrary;
     info.fragment_library          = fsLibrary;
-    /* AIR entry point is "main" (air_builder + air_render_test). Fragment is
-     * optional (depth-only passes); leave its name null when no PS. */
-    info.vertex_entry_name.set("main");
-    info.fragment_entry_name.set(fsLibrary ? "main" : nullptr);
+    /* AIR entry point is "main" for MSC-compiled app shaders (air_builder +
+     * air_render_test); the hand-authored fixed-function ubershaders carry
+     * their own entry names ("ffVsMain"/"ffFsMain") since Metal reserves
+     * "main". Fragment is optional (depth-only passes); leave its name null
+     * when no PS. */
+    info.vertex_entry_name.set(vsEntry ? vsEntry : "main");
+    info.fragment_entry_name.set(fsLibrary ? (fsEntry ? fsEntry : "main") : nullptr);
+    if (vsEntry && vsEntry[0] == 'f' && vsEntry[1] == 'f') {
+      static bool s_ffOnce = false;
+      if (!s_ffOnce) { s_ffOnce = true;
+        Logger::warn(str::format("D9MT-FF: building FF render PSO vsEntry=", vsEntry,
+          " fsEntry=", (fsLibrary && fsEntry) ? fsEntry : "(none)",
+          " attrs=", uint32_t(key.attrCount), " colors=", uint32_t(key.colorCount))); }
+    }
     info.rasterization_enabled     = 1u;
     info.raster_sample_count       = key.sampleCount ? key.sampleCount : 1u;
     info.alpha_to_coverage_enabled = key.alphaToCoverage != 0u ? 1u : 0u;

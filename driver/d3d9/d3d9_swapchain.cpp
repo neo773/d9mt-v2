@@ -740,24 +740,22 @@ namespace dxvk {
 
     SyncFrameLatency();
 
-    // Rotate swap chain buffers so that the back buffer at index 0 becomes the
-    // front buffer.
+    // BLIT/COPY present model (both windowed AND fullscreen): PresentImage copies
+    // back buffer 0 -> the freshly-acquired CAMetalLayer drawable every frame, so
+    // the OS always gives us a clean front surface and buffer 0 is the app's
+    // persistent back buffer. Rotating the swap-chain buffers here would repoint
+    // buffer 0 at a different physical texture each present, so an app that
+    // composes its frame INCREMENTALLY (GTA IV builds its loading/legal art a few
+    // pretransformed tiles per frame and relies on the back buffer surviving
+    // Present regardless of DISCARD) loses everything but the current frame's tiles
+    // — the "one lone tile per present / CRT-scanline" failure. This previously
+    // only skipped rotation when Windowed; GTA runs FULLSCREEN and hit the same
+    // bug. With a copy-based present, rotation is never needed for display
+    // correctness, so keep buffer 0 stable in both modes.
     //
-    // WINDOWED = blit model: real drivers present windowed swap chains by
-    // copying, so the backbuffer's content survives Present regardless of
-    // swap effect, and games depend on it (GTA IV composes its loading art
-    // incrementally, a few pretransformed tiles per frame — rotation showed
-    // one lone tile per present). Skip rotation and keep buffer 0 stable.
-    if (!m_presentParams.Windowed) {
-      uint32_t rotatingBufferCount = m_backBuffers.size();
-      if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
-        // The front buffer only exists for GetFrontBufferData.
-        rotatingBufferCount -= 1;
-      }
-
-      for (uint32_t i = 1; i < rotatingBufferCount; i++)
-        m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
-    }
+    // (If GetFrontBufferData / a true multi-buffer flip chain ever needs the old
+    // rotation, gate it on that specific case — not on Windowed.)
+    (void)0;
 
     m_parent->m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
   }

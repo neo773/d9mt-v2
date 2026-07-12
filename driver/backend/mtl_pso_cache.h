@@ -55,8 +55,12 @@ namespace dxvk::backend {
     uint64_t vsCookie = 0u;      /* shader identity incl. spec + linkage */
     uint64_t fsCookie = 0u;
 
-    PsoVertexAttr   attrs[16] = { };
-    PsoVertexLayout layouts[16] = { };
+    // 20 (>= 18) so the fixed-function ubershader's full input signature fits:
+    // its stage_in declares all 18 FF vertex registers (Position0..BlendIndices),
+    // and Metal requires EVERY declared attribute to be present in the vertex
+    // descriptor (unlike Vulkan, which tolerates missing attributes).
+    PsoVertexAttr   attrs[20] = { };
+    PsoVertexLayout layouts[20] = { };
     uint8_t attrCount = 0u;
     uint8_t layoutCount = 0u;
 
@@ -96,7 +100,9 @@ namespace dxvk::backend {
     obj_handle_t get(
             const RenderPsoKey& key,
             obj_handle_t        vsLibrary,
-            obj_handle_t        fsLibrary);
+            obj_handle_t        fsLibrary,
+            const char*         vsEntry = "main",
+            const char*         fsEntry = "main");
 
     size_t size() const { return m_cache.size(); }
 
@@ -118,7 +124,9 @@ namespace dxvk::backend {
     obj_handle_t build(
             const RenderPsoKey& key,
             obj_handle_t        vsLibrary,
-            obj_handle_t        fsLibrary);
+            obj_handle_t        fsLibrary,
+            const char*         vsEntry,
+            const char*         fsEntry);
 
   };
 

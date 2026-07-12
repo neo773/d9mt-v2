@@ -32,6 +32,14 @@ namespace dxvk {
 
   class D3D9DeviceEx;
   struct D3D9Options;
+  class MtlDevice;
+  class D3D9InputSignature;
+
+  // Fixed-function vertex input signature: maps the app's vertex declaration
+  // semantics onto the FF ubershader's fixed [[attribute(n)]] slots. Ported
+  // from DXVK's CreateFixedFunctionIsgn (register order == FF shader input
+  // locations). Defined in d3d9_fixed_function.cpp; used by BindInputLayout.
+  const D3D9InputSignature& GetFixedFunctionIsgn();
 
   enum D3D9FF_VertexBlendMode {
     D3D9FF_VertexBlendMode_Disabled,
@@ -64,6 +72,12 @@ namespace dxvk {
   public:
 
     D3D9FFShaderModuleSet() = default;
+
+    // Build the two FF ubershaders from the build-time-embedded metallibs
+    // (d3d9_ff_metallib.h) via device->createShaderFunction, and set each
+    // function's cbvSlotMap so the frontend's CBV bindings land at the MSL
+    // [[buffer(n)]] slots the ubershaders declare. Called once at device init.
+    void Initialize(const Rc<MtlDevice>& device);
 
     template<D3D9ShaderType Stage>
     Rc<MtlShaderFunction> GetShader() {

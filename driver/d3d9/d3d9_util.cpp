@@ -266,9 +266,11 @@ namespace dxvk {
     switch (Type) {
       case D3DDECLTYPE_FLOAT1:    return MtlFormat::R32Float;
       case D3DDECLTYPE_FLOAT2:    return MtlFormat::RG32Float;
-      // FLOAT3 (RGB32F) is not in the Metal pixel-format subset (no 3-component
-      // 32-bit); PHASE-C: MtlVertexFormat. Was VK_FORMAT_R32G32B32_SFLOAT.
-      case D3DDECLTYPE_FLOAT3:    return MtlFormat::Invalid;
+      // FLOAT3 has no 3-component 32-bit PIXEL format, but Metal's VERTEX format
+      // Float3 exists. Use the vertex-only RGB32Float marker so the attribute is
+      // read as Float3 (shader w defaults to 1.0) — promoting to Float4 read a
+      // stale w=0 and broke D3D9 FLOAT3/XYZRHW positions (GTA IV 2D).
+      case D3DDECLTYPE_FLOAT3:    return MtlFormat::RGB32Float;
       case D3DDECLTYPE_FLOAT4:    return MtlFormat::RGBA32Float;
       case D3DDECLTYPE_D3DCOLOR:  return MtlFormat::BGRA8Unorm;
       // Scaled vertex formats have no MtlFormat (pixel) analogue -> PHASE-C.

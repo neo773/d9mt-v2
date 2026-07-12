@@ -173,12 +173,22 @@ namespace dxvk {
   }
 
   inline MtlStagingBuffer::MtlStagingBuffer(const Rc<MtlDevice>& device, MtlDeviceSize size) {
+    reinit(device, size);
+  }
+
+  /* Swap in a fresh backing buffer and reset the linear allocator. RcObject
+   * deletes assignment, so a full staging buffer is recycled via this in-place
+   * re-init rather than reassignment. The previous backing stays alive as long
+   * as any outstanding slice still holds its Rc (GPU-in-flight uploads). */
+  inline void MtlStagingBuffer::reinit(const Rc<MtlDevice>& device, MtlDeviceSize size) {
     MtlBufferCreateInfo info = { };
     info.size      = size;
     info.usage     = MtlUsage::Staging;
     info.cpuAccess = MtlCpuAccess::Write;
     m_buffer = device ? device->createBuffer(info) : nullptr;
     m_size   = size;
+    m_offset = 0u;
+    m_stats  = { };
   }
 
   /**

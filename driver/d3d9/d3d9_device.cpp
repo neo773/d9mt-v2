@@ -66,6 +66,10 @@ namespace dxvk {
 
     InitShaderOptions();
 
+    // Build the fixed-function ubershaders (VS/FS) from their build-time-embedded
+    // metallibs now that the Metal device is live, and set their cbvSlotMaps.
+    m_ffModules.Initialize(m_dxvkDevice);
+
     // If we can SWVP, then we use an extended constant set
     // as SWVP has many more slots available than HWVP.
     bool canSWVP = CanSWVP();
@@ -1701,6 +1705,23 @@ namespace dxvk {
         texInfo->SetNeedsMipGen(true);
     }
 
+    // D3D9 forbids a texture being sampled and used as a render target at the
+    // same time. If the surface we just bound as RT belongs to a texture that
+    // is still bound to a sampler (e.g. an RT sampled in the previous frame's
+    // composite pass), unbind it. Otherwise the feedback-loop hazard path
+    // recreates the RT image and re-dirties the framebuffer AFTER a pending
+    // Clear was folded into the pass, silently dropping the clear — the RT is
+    // then loaded, not cleared, and every frame's draw accumulates (RT
+    // feedback garbage; the GTA-shaped black/garbage-world failure).
+    if (texInfo != nullptr) {
+      if (IDirect3DBaseTexture9* rtBase = rt->GetBaseTexture()) {
+        for (uint32_t i = 0; i < m_state.textures->size(); i++) {
+          if (m_state.textures[i] == rtBase)
+            SetStateTexture(i, nullptr);
+        }
+      }
+    }
+
     // Update hazards now that the RT has changed
     UpdateActiveHazardsRT(std::numeric_limits<uint32_t>::max());
 
@@ -1856,6 +1877,12 @@ namespace dxvk {
           DWORD    Stencil) {
     if (unlikely(!Count && pRects))
       return D3D_OK;
+
+    if (std::getenv("D9MT_CLRLOG"))
+      Logger::info(str::format("D3D9::Clear Flags=0x", std::hex, Flags, std::dec,
+        " (TARGET=", (Flags & D3DCLEAR_TARGET) ? 1 : 0,
+        " ZB=", (Flags & D3DCLEAR_ZBUFFER) ? 1 : 0,
+        ") Count=", Count, " Color=0x", std::hex, Color, std::dec));
 
     D3D9DeviceLock lock = LockDevice();
     BindFramebuffer();
@@ -4751,6 +4778,38 @@ namespace dxvk {
   D3D9BufferSlice D3D9DeviceEx::AllocStagingBuffer(MtlDeviceSize size) {
     D3D9BufferSlice result;
     result.slice = m_stagingBuffer.alloc(size);
+    if (unlikely(!result.slice.defined())) {
+      // The staging backing is a linear allocator with no in-place recycle —
+      // once its 4 MiB fills, every alloc fails. Retire the full backing and
+      // start a fresh one big enough for this request. Without this the backing
+      // filled once and every later upload failed ("staging allocation failed
+      // (address space?)") — GTA IV streamed past 4 MiB and crashed.
+      //
+      // The retired backing must stay alive until the GPU has finished reading
+      // its uploads: copyBuffer only BORROWS the staging Rc (dropped after the
+      // copy is encoded, not executed), so freeing it early corrupts in-flight
+      // uploads (garbled 2D text). Stash it under the staging-fence value at
+      // which those uploads are guaranteed consumed, and release stashed
+      // backings lazily once the fence has passed.
+      m_stagingAllocatedBase += m_stagingBuffer.stats().allocated;
+      m_retiredStagingBuffers.emplace_back(m_stagingAllocatedBase, m_stagingBuffer.buffer());
+
+      MtlDeviceSize newSize = std::max<MtlDeviceSize>(size, StagingBufferSize);
+      m_stagingBuffer.reinit(GetDXVKDevice(), newSize);
+      result.slice = m_stagingBuffer.alloc(size);
+    }
+
+    // Drop retired backings the GPU has finished consuming.
+    if (unlikely(!m_retiredStagingBuffers.empty())) {
+      const uint64_t fenceValue = m_stagingBufferFence->value();
+      m_retiredStagingBuffers.erase(
+        std::remove_if(m_retiredStagingBuffers.begin(), m_retiredStagingBuffers.end(),
+          [fenceValue](const std::pair<MtlDeviceSize, Rc<MtlBuffer>>& e) {
+            return fenceValue >= e.first;
+          }),
+        m_retiredStagingBuffers.end());
+    }
+
     result.mapPtr = result.slice.mapPtr(0);
     return result;
   }
@@ -4789,6 +4848,7 @@ namespace dxvk {
 
   MtlStagingBufferStats D3D9DeviceEx::GetStagingMemoryStatistics() const {
     MtlStagingBufferStats stats = m_stagingBuffer.stats();
+    stats.allocated += m_stagingAllocatedBase;   // include retired backings (monotonic)
     stats.allocated += m_discardMemoryCounter;
     stats.allocated += m_discardMemoryCounter - m_discardMemoryOnFlush;
     return stats;
@@ -7580,13 +7640,12 @@ namespace dxvk {
 
       const auto& vertexElements = m_state.vertexDecl->GetElements();
 
-      // GetFixedFunctionIsgn() is PHASE-D-deferred (needs the shader-analysis ISGN
-      // builder); use a default (empty) FF input signature for now. PHASE-E: real
-      // fixed-function vertex input signature.
-      D3D9InputSignature ffIsgn = { };
+      // Fixed-function draws map the app's vertex declaration onto the FF
+      // ubershader's fixed input registers via the FF input signature (ported
+      // from DXVK's CreateFixedFunctionIsgn).
       const D3D9InputSignature& inputSignature = UseProgrammableVS()
         ? GetCommonShader(m_state.vertexShader)->GetInputSignature()
-        : ffIsgn;
+        : GetFixedFunctionIsgn();
 
       auto elementCount = vertexElements.size();
       auto elementBlock = EmitCsCmd<D3DVERTEXELEMENT9>(D3D9CmdType::None, elementCount, [
@@ -9053,6 +9112,15 @@ namespace dxvk {
       ctx->setFunctionConstants(MtlPipeline::Graphics,
         0u, sizeof(cSpecData) / sizeof(uint32_t), &cSpecData);
     });
+
+    // The FF ubershaders (auto-converted from DXVK GLSL) read D3D9SpecData as a
+    // plain CBV (CbvIndex::SpecData, bound to both stages) rather than Vulkan
+    // specialization constants. Upload the current spec bytes; the CBV is only
+    // consumed by shaders whose cbvSlotMap declares SpecData (the FF ubershaders),
+    // so programmable draws ignore it. Layout is byte-identical to the GLSL
+    // SpecConsts block (20 dwords, scalar).
+    auto specCbv = GetConstantBuffer(CbvIndex::SpecData).AllocTyped<D3D9SpecData>(1u);
+    *specCbv = m_specData;
   }
 
 

@@ -37,6 +37,7 @@ namespace dxvk::backend {
       switch (f) {
         case MtlFormat::R32Float:     return WMTAttributeFormatFloat;
         case MtlFormat::RG32Float:    return WMTAttributeFormatFloat2;
+        case MtlFormat::RGB32Float:   return WMTAttributeFormatFloat3;
         case MtlFormat::RGBA32Float:  return WMTAttributeFormatFloat4;
         case MtlFormat::RGBA8Unorm:   return WMTAttributeFormatUChar4Normalized;
         case MtlFormat::BGRA8Unorm:   return WMTAttributeFormatUChar4Normalized_BGRA;
@@ -96,7 +97,7 @@ namespace dxvk::backend {
     key.vsCookie = uint64_t(m_vs->library);
     key.fsCookie = m_fs != nullptr ? uint64_t(m_fs->library) : 0u;
 
-    uint32_t nAttr = std::min<uint32_t>(uint32_t(m_vertexAttrs.size()), 16u);
+    uint32_t nAttr = std::min<uint32_t>(uint32_t(m_vertexAttrs.size()), 20u);
     for (uint32_t i = 0u; i < nAttr; i++) {
       const MtlVertexAttr& src = m_vertexAttrs[i];
       PsoVertexAttr& a = key.attrs[i];
@@ -106,11 +107,21 @@ namespace dxvk::backend {
     }
     key.attrCount = uint8_t(nAttr);
 
-    uint32_t nLayout = std::min<uint32_t>(uint32_t(m_vertexLayouts.size()), 16u);
+    uint32_t nLayout = std::min<uint32_t>(uint32_t(m_vertexLayouts.size()), 20u);
     for (uint32_t i = 0u; i < nLayout; i++) {
       const MtlVertexLayout& src = m_vertexLayouts[i];
       PsoVertexLayout& l = key.layouts[i];
-      l.stride       = uint16_t(src.stride);
+      /* D3D9's authoritative per-stream stride comes from SetStreamSource, kept
+       * live in m_vertexStreams. The frontend-supplied layout stride can be 0
+       * (declaration bound before the stream, or not carried through), and a 0
+       * stride makes Metal assert "buffer at index N has no stride" — GTA IV
+       * world geometry hits this and the device dies. Prefer the live stream
+       * stride whenever we have one. */
+      uint32_t strideVal = src.stride;
+      if (src.binding < m_vertexStreams.size()
+       && m_vertexStreams[src.binding].stride != 0u)
+        strideVal = m_vertexStreams[src.binding].stride;
+      l.stride       = uint16_t(strideVal);
       l.stepFunction = src.perInstance ? 2u : 1u;
       l.pad          = uint8_t(kVertexBufferBaseIndex + src.binding);  /* buffer idx */
     }
@@ -142,7 +153,9 @@ namespace dxvk::backend {
     /* depthFormat/stencilFormat stay 0 — Metal 4 omits them from the pipeline
      * descriptor, so they must not add spurious PSO variants (decision 9). */
 
-    obj_handle_t pso = m_psoCache.get(key, vsLibrary, fsLibrary);
+    const char* vsEntry = m_vs->entryName ? m_vs->entryName : "main";
+    const char* fsEntry = (m_fs != nullptr && m_fs->entryName) ? m_fs->entryName : "main";
+    obj_handle_t pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
     if (!pso)
       return false;
 

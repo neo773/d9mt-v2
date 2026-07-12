@@ -275,20 +275,48 @@ namespace dxvk::backend {
     m_dirty |= DirtyPso | DirtyViewport;
   }
 
+  /* Two MtlTextureViews name the SAME render-pass attachment when they view the
+   * same subresource of the same texture — NOT when they are the same object.
+   * createImageView() interns nothing (a fresh view per call), so comparing the
+   * Rc pointers here only "worked" by heap-address reuse and silently degraded
+   * to loadAction=Load on frames where the SetRenderTarget view and the Clear
+   * view landed at different addresses — dropping the clear (RT accumulation /
+   * feedback garbage; GTA-shaped). Compare the backing texture + subresource. */
+  static bool sameAttachment(const Rc<MtlTextureView>& a,
+                             const Rc<MtlTextureView>& b) {
+    if (a == b)                     return true;
+    if (a == nullptr || b == nullptr) return false;
+    return a->image.ptr()  == b->image.ptr()
+        && a->key.baseMip  == b->key.baseMip
+        && a->key.baseLayer == b->key.baseLayer;
+  }
+
   void MtlContextImpl::clearRenderTarget(
     const Rc<MtlTextureView>& view, MtlAspectMask clear,
     MtlClearValue value, MtlAspectMask discard) {
+    if (std::getenv("D9MT_CLRLOG") && (clear & MtlAspectColor))
+      Logger::info(str::format("CLR color img=",
+        (void*)(view ? view->image.ptr() : nullptr),
+        " rgba=", value.color.r, ",", value.color.g, ",", value.color.b));
+    /* DIAGNOSTIC: D9MT_NOCOLORCLEAR drops COLOR clears (keeps depth/stencil) so
+     * the backbuffer is preserved (loadAction=Load). Tests whether GTA's 2D is
+     * accumulated across frames (would compose the full loading image) vs
+     * redrawn per frame (shader/transform bug). */
+    if (std::getenv("D9MT_NOCOLORCLEAR") && (clear & MtlAspectColor)) {
+      clear = MtlAspectMask(clear & ~MtlAspectColor);
+      if (!clear) return;
+    }
     /* Fold into the pending pass when the view is one of its attachments
      * and the encoder hasn't opened; else flush as a mini-pass. */
     if (!m_pass.active && m_pass.pending) {
       for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
-        if (m_pass.targets.color[i] == view && (clear & MtlAspectColor)) {
+        if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
           m_pass.clearColor[i] = true;
           m_pass.clearValues[i] = value;
           return;
         }
       }
-      if (m_pass.targets.depthStencil == view) {
+      if (sameAttachment(m_pass.targets.depthStencil, view)) {
         if (clear & MtlAspectDepth)   { m_pass.clearDepth = true;   m_pass.depthClear = value.depth; }
         if (clear & MtlAspectStencil) { m_pass.clearStencil = true; m_pass.stencilClear = value.stencil; }
         return;
@@ -350,6 +378,9 @@ namespace dxvk::backend {
       info.colors[i].load_action = m_pass.clearColor[i]
         ? WMTLoadActionClear : WMTLoadActionLoad;
       info.colors[i].store_action = WMTStoreActionStore;
+      if (std::getenv("D9MT_CLRLOG") && i == 0)
+        Logger::info(str::format("MAT color img=", (void*)impl->image.ptr(),
+          " load=", m_pass.clearColor[i] ? "CLEAR" : "LOAD"));
       if (m_pass.clearColor[i]) {
         const auto& v = m_pass.clearValues[i];
         info.colors[i].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
@@ -531,12 +562,21 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) {
+    // Each stage owns a private push buffer (bound at kPushConstantIndex). The FF
+    // ubershaders (auto-converted from DXVK's GLSL) declare a RenderStates push
+    // block laid out as: D3D9SharedPushData at byte 0 (reserving MaxSharedPushDataSize
+    // = 32 bytes), then the per-stage block (D3D9Vs/Ffvs/FfpsPushData) at byte 32.
+    // The D3D9*PushData::Offset fields are relative to their block base, so a
+    // single-stage block must be shifted past the shared reservation (this mirrors
+    // DxvkPushDataBlock::computeBlockOffsetForStage: shared -> 0, per-stage -> 32).
+    const bool  isShared   = (uint32_t(stages) & (uint32_t(stages) - 1u)) != 0u;
+    const uint32_t baseOff = isShared ? 0u : kPushSharedBlockSize;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
         auto& b = m_bindings[s];
-        std::memcpy(b.pushData.data() + offset, data, size);
-        b.pushDirtyLo = b.pushDirtyLo ? std::min(b.pushDirtyLo, offset) : offset;
-        b.pushDirtyHi = std::max(b.pushDirtyHi, offset + size);
+        std::memcpy(b.pushData.data() + baseOff + offset, data, size);
+        b.pushDirtyLo = b.pushDirtyLo ? std::min(b.pushDirtyLo, baseOff + offset) : baseOff + offset;
+        b.pushDirtyHi = std::max(b.pushDirtyHi, baseOff + offset + size);
       }
     }
     m_dirty |= DirtyPush;

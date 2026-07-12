@@ -304,6 +304,9 @@ namespace dxvk {
     // backing shared buffer from the device. Defined in mtl_device.h.
     MtlStagingBuffer(const Rc<MtlDevice>& device, MtlDeviceSize size);
 
+    // In-place re-init with a fresh backing (RcObject deletes assignment).
+    void reinit(const Rc<MtlDevice>& device, MtlDeviceSize size);
+
     MtlBufferSlice alloc(MtlDeviceSize size, MtlDeviceSize align = 256u) {
       MtlDeviceSize offset = (m_offset + align - 1u) & ~(align - 1u);
       if (offset + size > m_size)
@@ -317,6 +320,10 @@ namespace dxvk {
     void reset() { m_offset = 0u; m_stats.used = 0u; }
 
     const MtlStagingBufferStats& stats() const { return m_stats; }
+
+    // The backing buffer — used to keep a retired (full) backing alive until the
+    // GPU has finished reading its uploads before it is dropped.
+    const Rc<MtlBuffer>& buffer() const { return m_buffer; }
 
   private:
     Rc<MtlBuffer> m_buffer;
