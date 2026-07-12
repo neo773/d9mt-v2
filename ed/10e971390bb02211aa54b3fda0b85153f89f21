@@ -1,0 +1,39 @@
+air/air_builder.cpp
+  s_02998b4ed19c89::t_ed9f3abf233691 722-729
+  s_02998b4ed19c89::t_a8c2194929c303 1569
+  s_02998b4ed19c89::t_d2ddee0eb3e336 814,822-823
+  s_02998b4ed19c89::t_e417b790bb83bc 1288-1290,1294-1295
+  s_02998b4ed19c89::t_33f5e31ed4e03c 1517,1519-1524,1527-1531,1533-1535,1537
+  s_02998b4ed19c89::t_2c269303c18bfe 774-780
+  s_02998b4ed19c89::t_5ae5cef6a00e78 740-741
+driver/backend/mtl_context_impl.cpp
+  s_02998b4ed19c89::t_f04413ab982583 297,381
+driver/d3d9/d3d9_device.cpp
+  s_02998b4ed19c89::t_d675ed29600c0e 1881
+driver/backend/mtl_device_impl.cpp
+  s_02998b4ed19c89::t_0c5f09769d93fb 181-189
+driver/d3d9/d3d9_interface.cpp
+  s_02998b4ed19c89::t_a5e1b01478ab6c 86-88,93-94,141-149,165,192-193,196-198,211-212,214-218,274-282,330-333,350-354,391-392
+driver/mtl/mtl_device_stub.cpp
+  s_02998b4ed19c89::t_38909f93f8257e 9-10,158-165
+driver/util/log/log.h
+  s_02998b4ed19c89::t_cdc03636012b45 4,12-22
+test/code_ff.c
+  s_02998b4ed19c89::t_590e062e509287 243-260
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "ed10e971390bb02211aa54b3fda0b85153f89f21",
+  "prompts": {},
+  "sessions": {
+    "s_02998b4ed19c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "29fb460c-2047-4c53-946d-34ef41582781",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
