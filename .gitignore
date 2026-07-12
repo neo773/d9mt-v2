@@ -23,3 +23,8 @@ examples/triangle/*.png
 /toolchains/
 # (also as symlink)
 /third_party/dxbc-spirv
+
+# reference tree + runtime logs (not ours)
+mesa/
+d9mt.log
+*.gputrace/
