@@ -1,0 +1,35 @@
+driver/d3d9/d3d9_device.cpp
+  s_8269cf02397702::t_548b5ac14660a0 5532,5534
+  s_8269cf02397702::t_8fc9d17d394f26 5533
+  s_8269cf02397702::t_d6219059807f23 4765-4767
+driver/backend/mtl_context_impl2.cpp
+  s_8269cf02397702::t_55c30440c5c3ab 169,172-173,175,177-178,180,190,210-214,216-217,219,227,255-256,258,272,276
+driver/d3d9/d3d9_constant_buffer.h
+  s_8269cf02397702::t_4425b1b161f907 29
+scripts/build-driver.sh
+  s_8269cf02397702::t_87b810c9208aeb 265
+driver/d3d9/d3d9_constant_buffer.cpp
+  s_8269cf02397702::t_5330fc7f4935e2 49,52-54
+  s_8269cf02397702::t_425b7628f4f417 138-142
+driver/backend/mtl_context_impl.h
+  s_8269cf02397702::t_6892b15bca0c37 31-34,240-244,279-283,328-329
+  s_8269cf02397702::t_0c1df3263fe147 215-216
+driver/backend/mtl_context_impl.cpp
+  s_8269cf02397702::t_7cf53a1d0caec9 48-51,74,415-434,438,440,442,662-665
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "b5bc4b87534050a0f26e348fb27443bb60ec88ae",
+  "prompts": {},
+  "sessions": {
+    "s_8269cf02397702": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5850-0d19-78d3-9017-20b1ca25a5d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
