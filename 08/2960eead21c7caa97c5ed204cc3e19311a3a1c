@@ -1,0 +1,22 @@
+air/air_builder.cpp
+  s_4f41b3463432c4::t_3c2a464622e2fa 446-454,456-457
+  s_4f41b3463432c4::t_e7ca1a0ef6d4e6 1698
+  s_4f41b3463432c4::t_dc9e47c7081c13 109-117
+  s_4f41b3463432c4::t_5d0b513c09a664 1672-1678,1682-1690,1692,1694-1697,1700
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "082960eead21c7caa97c5ed204cc3e19311a3a1c",
+  "prompts": {},
+  "sessions": {
+    "s_4f41b3463432c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7abdd841-8c23-402a-adbc-8997f62f0c9b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
