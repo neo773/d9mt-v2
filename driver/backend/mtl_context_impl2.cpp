@@ -6,6 +6,8 @@
 
 #include "../util/log/log.h"
 
+#include "mtl_profiler.h"
+
 // Build-time-generated: g_blitMetallib[] (backend/shaders/mtl_blit.metal
 // compiled to a .metallib by scripts/build-driver.sh) — the meta-blit
 // fullscreen-triangle pipeline behind blitTextureView.
@@ -85,6 +87,7 @@ namespace dxvk::backend {
   // --- PSO resolve (decision 9) ----------------------------------------------
 
   bool MtlContextImpl::resolvePso() {
+    prof::Scope profScope(prof::ResolvePso);
     if (m_vs == nullptr)
       return false;
 
@@ -210,6 +213,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushVertexBuffers() {
+    prof::Scope profScope(prof::FlushVertexBuffers);
     ArgTablePair&   pair   = m_argTables[m_currentArgTable];
     obj_handle_t    table  = pair.table[0].handle();
     ArgTableShadow& shadow = pair.shadow[0];
@@ -235,6 +239,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushResources() {
+    prof::Scope profScope(prof::FlushResources);
     ArgTablePair& pair = m_argTables[m_currentArgTable];
     for (uint32_t st = 0u; st < 2u; st++) {
       StageBindings&  b      = m_bindings[st];
@@ -324,6 +329,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushDynamicState() {
+    prof::Scope profScope(prof::FlushDynamicState);
     /* Encoder dynamic state rides the same wmtcmd batch as the table writes
      * and draws — values are snapshotted into the commands here. */
 

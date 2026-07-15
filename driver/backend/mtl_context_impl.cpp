@@ -9,6 +9,8 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+#include "mtl_profiler.h"
+
 /*
  * METAL 4 backend (SOURCE_OF_TRUTH §2). Implementation notes live in
  * mtl_context_impl.h (the 9 architecture decisions). Section order mirrors the
@@ -77,6 +79,10 @@ namespace dxvk::backend {
   // --- lifecycle -----------------------------------------------------------
 
   void MtlContextImpl::beginRecording() {
+    /* PROF: allocator rotation + the waitFor on the slot's last serial — a
+     * large bucket here means the CPU is waiting on the GPU (pacing), not
+     * that this function does work. */
+    prof::Scope profScope(prof::BeginRecording);
     m_dirty = DirtyEverything;
     /* NOTE: do NOT reset m_argTableCursor here. The argument-table pool is a
      * cross-frame ring (selectArgumentTablesForDraw); resetting the cursor per
@@ -185,6 +191,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::submit(bool waitCompleted) {
+    prof::Scope profScope(prof::Submit);
     if (m_pass.active)
       closePass();
 
@@ -271,11 +278,15 @@ namespace dxvk::backend {
 
   void MtlContextImpl::endFrame() {
     uint64_t completed = m_device->submissions().completedSerial();
-    /* Retirements drop the last Rcs (allocations enqueue their deferred
-     * removal), then the tracker flushes removals whose serial completed. */
-    m_device->submissions().processRetirements();
-    m_device->residency().serialRetired(completed);
-    m_device->uploadRing().onComplete(completed);
+    {
+      prof::Scope profScope(prof::EndFrame);
+      /* Retirements drop the last Rcs (allocations enqueue their deferred
+       * removal), then the tracker flushes removals whose serial completed. */
+      m_device->submissions().processRetirements();
+      m_device->residency().serialRetired(completed);
+      m_device->uploadRing().onComplete(completed);
+    }
+    prof::onFrameEnd();
 
     /* DIAG: per-frame growth watch (leak instrumentation; observers only).
      * bufNew/bufRename/bufRecycle/imgNew attribute residency churn to its
@@ -301,6 +312,9 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::synchronizeWsi(MtlPresenterSync sync) {
+    /* PROF: contains one Submit (the present commit) — read Submit as a
+     * sub-bucket of SynchronizeWsi on present frames. */
+    prof::Scope profScope(prof::SynchronizeWsi);
     /* Contract 3e + METAL 4 present handshake (decision 5): waitForDrawable
      * BEFORE commit, signalDrawable + drawable present AFTER commit. The
      * swapchain acquires the drawable, records the backbuffer blit into it,
@@ -518,6 +532,7 @@ namespace dxvk::backend {
      * beginRecording(), which runs ONCE at device creation (not per frame), so
      * the pool grew ~1 table/draw forever and exhausted the 32-bit address space
      * after ~30s. */
+    prof::bump(prof::CntArgRotate);
     const uint64_t completed = m_device->submissions().completedSerial();
     const size_t   n         = m_argTables.size();
 
@@ -560,6 +575,8 @@ namespace dxvk::backend {
   void MtlContextImpl::flushCmdChunk() {
     if (m_cmdChunk.empty())
       return;
+    prof::Scope profScope(prof::FlushCmdChunk);
+    prof::bump(prof::CntChunkFlush);
     /* ONE crossing replays the whole batch natively (mtl_cmd_chunk.h /
      * winemetal.h code 208). The unix side consumes the structs
      * synchronously, so the arena recycles immediately — no GPU-lifetime
@@ -769,6 +786,7 @@ namespace dxvk::backend {
   void MtlContextImpl::draw(uint32_t count, const MtlDrawArgs* args) {
     if (!prepareDraw())
       return;
+    prof::Scope profScope(prof::EncodeDraw);
     for (uint32_t i = 0; i < count; i++) {
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw>(
         uint16_t(WMTMtl4RenderCommandDraw));
@@ -787,6 +805,7 @@ namespace dxvk::backend {
      * through the slice's captured backing, never the live buffer. */
     if (m_indexBuffer.storage() == nullptr)
       return;
+    prof::Scope profScope(prof::EncodeDraw);
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
@@ -813,6 +832,10 @@ namespace dxvk::backend {
   bool MtlContextImpl::prepareDraw() {
     if (!m_pass.pending && !m_pass.active)
       return false;                       /* no render targets bound */
+    /* PROF: parent bucket for the whole per-draw resolve; ResolvePso/
+     * FlushVertexBuffers/FlushResources/FlushDynamicState (and an arena-cap
+     * FlushCmdChunk) nest inside it. */
+    prof::Scope profScope(prof::PrepareDraw);
     materializePass();
 
     /* Arena cap: replay-and-recycle mid-pass once the batch crosses the cap.
@@ -864,6 +887,7 @@ namespace dxvk::backend {
     /* all folded state is now bound on the encoder / argument tables; the
      * next draw only re-flushes what changes (ring slices already snapshot). */
     m_dirty = 0u;
+    prof::bump(prof::CntDraws);
     return true;
   }
 

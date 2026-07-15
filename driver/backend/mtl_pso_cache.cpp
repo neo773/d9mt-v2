@@ -15,6 +15,8 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+#include "mtl_profiler.h"
+
 namespace dxvk::backend {
 
   namespace {
@@ -59,6 +61,9 @@ namespace dxvk::backend {
       return m_lastPso;
     }
 
+    /* PROF: a cache miss here is a SYNCHRONOUS pipeline compile on the draw
+     * hot path (CS thread) — correlates with frame-time dips. */
+    prof::bump(prof::CntPsoMiss);
     obj_handle_t pso = build(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
     if (!pso)
       return 0u;
