@@ -1,0 +1,50 @@
+bridge/winemetal_thunks.c
+  s_4f41b3463432c4::t_e917a98b02beb4 1852-1860
+driver/backend/mtl_context_impl2.cpp
+  s_4f41b3463432c4::t_d530d35116df72 266,270,277,281
+  s_4f41b3463432c4::t_14cbcf93b8afbb 249,254
+  s_4f41b3463432c4::t_201a8413980f27 300
+  s_4f41b3463432c4::t_6ca6f77c6436b5 1057-1063
+  s_4f41b3463432c4::t_8405d8c453c1b0 1039-1046
+  s_4f41b3463432c4::t_84878891b9cae4 336-341,346-351,355-362,366-378
+  s_4f41b3463432c4::t_678dc16c2b9c25 162-164,169-196,206-207,209,217
+  s_4f41b3463432c4::t_39f757284ed05d 305-306,310-317
+  s_4f41b3463432c4::t_40e4f87fa09765 409-413,415
+driver/backend/mtl_context_impl.cpp
+  s_4f41b3463432c4::t_bb54b2795d1f06 540-558,565-568
+  s_4f41b3463432c4::t_bf73b2eba020f1 790-799
+  s_4f41b3463432c4::t_ca55500007e321 808-814
+  s_4f41b3463432c4::t_6eeca4d829f14f 763-769
+  s_4f41b3463432c4::t_be228679451025 569
+bridge/unix/winemetal_unix.c
+  s_4f41b3463432c4::t_2c8c2eab4899ee 6412
+  s_4f41b3463432c4::t_c74f27716fc211 6816
+  s_4f41b3463432c4::t_dbd730569b2f4d 7043
+  s_4f41b3463432c4::t_f9427e1fbaa627 6229-6358
+driver/backend/mtl_context_impl.h
+  s_4f41b3463432c4::t_d1bce0990418f7 305-313
+  s_4f41b3463432c4::t_fcaedb0dbd8ee1 88
+  s_4f41b3463432c4::t_1895df66da4e73 240-244
+  s_4f41b3463432c4::t_5296c2ffcb03a8 382-390
+  s_4f41b3463432c4::t_c471cc1e71ae76 36-42
+bridge/winemetal.h
+  s_4f41b3463432c4::t_893dfcbc8a9b3b 2344-2547
+driver/backend/mtl_cmd_chunk.h
+  s_4f41b3463432c4::t_822e599e1c9372 57-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d554c2b1673f98d3c5a94584a6fbce14bb324771",
+  "prompts": {},
+  "sessions": {
+    "s_4f41b3463432c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7abdd841-8c23-402a-adbc-8997f62f0c9b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
