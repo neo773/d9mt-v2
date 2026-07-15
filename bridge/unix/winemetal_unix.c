@@ -1577,7 +1577,7 @@ _MTLDevice_currentAllocatedSize(void *obj) {
 static NTSTATUS
 _MTLDevice_name(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle name];
+  params->ret = (obj_handle_t)[[(id<MTLDevice>)params->handle name] retain];
   return STATUS_SUCCESS;
 }
 
@@ -1607,7 +1607,7 @@ _NSAutoreleasePool_alloc_init(void *obj) {
 static NTSTATUS
 _MTLCommandQueue_commandBuffer(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBuffer];
+  params->ret = (obj_handle_t)[[(id<MTLCommandQueue>)params->handle commandBuffer] retain];
   return STATUS_SUCCESS;
 }
 
@@ -2080,7 +2080,7 @@ _MTLDevice_newLibrary(void *obj) {
   id<MTLDevice> device = (id<MTLDevice>)params->device;
   NSError *err = NULL;
   params->ret_library = (obj_handle_t)[device newLibraryWithData:(dispatch_data_t)params->data error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && !err && params->ret_library) {
     const void *bytes = NULL;
@@ -2124,7 +2124,7 @@ _NSString_lengthOfBytesUsingEncoding(void *obj) {
 static NTSTATUS
 _NSObject_description(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(NSObject *)params->handle description];
+  params->ret = (obj_handle_t)[[(NSObject *)params->handle description] retain];
   return STATUS_SUCCESS;
 }
 
@@ -2148,7 +2148,7 @@ _MTLDevice_newComputePipelineState(void *obj) {
       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
   params->ret_pso =
       (obj_handle_t)[device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   if (!err && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addComputePipelineFunctionsWithDescriptor:descriptor
                                                                                                       error:&err];
@@ -2174,7 +2174,7 @@ _MTLDevice_newComputePipelineState(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_blitCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
+  params->ret = (obj_handle_t)[[(id<MTLCommandBuffer>)params->handle blitCommandEncoder] retain];
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled()) {
     pthread_mutex_lock(&dxmt_apitrace_lock);
@@ -2193,8 +2193,7 @@ _MTLCommandBuffer_blitCommandEncoder(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle
-      computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+  params->ret = (obj_handle_t)[[(id<MTLCommandBuffer>)params->handle computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial] retain];
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled()) {
     pthread_mutex_lock(&dxmt_apitrace_lock);
@@ -2299,7 +2298,7 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
     descriptor.tileHeight = info->tile_height;
   }
 
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  params->ret = (obj_handle_t)[[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor] retain];
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled()) {
     pthread_mutex_lock(&dxmt_apitrace_lock);
@@ -2433,7 +2432,7 @@ _MTLDevice_newRenderPipelineState(void *obj) {
                                                                                               options:options
                                                                                            reflection:nil
                                                                                                 error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   const BOOL pso_created = params->ret_pso != 0;
   if (pso_created && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
@@ -2535,7 +2534,7 @@ _MTLDevice_newRenderPipelineStateWithVertexDescriptor(void *obj) {
                                                                                               options:MTLPipelineOptionNone
                                                                                            reflection:nil
                                                                                                 error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   return STATUS_SUCCESS;
 }
 
@@ -2626,7 +2625,7 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
                                                                            options:options
                                                                         reflection:nil
                                                                              error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   const BOOL pso_created = params->ret_pso != 0;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
   if (@available(macOS 15, *)) {
@@ -4610,14 +4609,14 @@ thunk32_AirconvUnsupportedGetArgumentsInfo(void *args) {
 static NTSTATUS
 _MTLCommandBuffer_error(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle error];
+  params->ret = (obj_handle_t)[[(id<MTLCommandBuffer>)params->handle error] retain];
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _MTLCommandBuffer_logs(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle logs];
+  params->ret = (obj_handle_t)[[(id<MTLCommandBuffer>)params->handle logs] retain];
   return STATUS_SUCCESS;
 }
 
@@ -4862,7 +4861,7 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
   }
 
   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && params->ret && !err) {
     pthread_mutex_lock(&dxmt_apitrace_lock);
@@ -5118,7 +5117,7 @@ _MTLDevice_newBinaryArchive(void *obj) {
   }
   NSError *err = NULL;
   params->ret_archive = (obj_handle_t)[(id<MTLDevice>)params->device newBinaryArchiveWithDescriptor:desc error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   [desc release];
   if (url)
     [url release];
@@ -5134,7 +5133,7 @@ _MTLBinaryArchive_serialize(void *obj) {
   NSURL *url = [[NSURL alloc] initFileURLWithPath:path_str];
   NSError *err = NULL;
   [(id<MTLBinaryArchive>)params->archive serializeToURL:url error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   [url release];
   [path_str release];
   return STATUS_SUCCESS;
@@ -5333,7 +5332,7 @@ _MTLCommandBuffer_blitCommandEncoderWithSampleBuffers(void *obj) {
     desc.endOfEncoderSampleIndex = attachments[i].end_of_encoder_sample_index;
   }
 
-  params->ret = (obj_handle_t)[cmdbuf blitCommandEncoderWithDescriptor:blit_desc];
+  params->ret = (obj_handle_t)[[cmdbuf blitCommandEncoderWithDescriptor:blit_desc] retain];
 
   [blit_desc release];
   return STATUS_SUCCESS;
@@ -5399,7 +5398,7 @@ _MTLDevice_newTileRenderPipelineState(void *obj) {
                                                                                                   options:options
                                                                                                reflection:nil
                                                                                                     error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   const BOOL pso_created = params->ret_pso != 0;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
   if (@available(macOS 15, *)) {
@@ -5853,7 +5852,7 @@ _MTL4CommandBuffer_renderCommandEncoder(void *obj) {
             (void *)info->colors[0].texture, (unsigned)info->colors[0].load_action,
             info->colors[0].clear_color.r, info->colors[0].clear_color.g,
             info->colors[0].clear_color.b, info->colors[0].clear_color.a);
-  params->ret = (obj_handle_t)[(id<MTL4CommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  params->ret = (obj_handle_t)[[(id<MTL4CommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor] retain];
   [descriptor release];
   return STATUS_SUCCESS;
 }
@@ -5963,7 +5962,7 @@ _MTL4RenderCommandEncoder_drawIndexedPrimitives(void *obj) {
 static NTSTATUS
 _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  params->ret = (obj_handle_t)[(id<MTL4CommandBuffer>)params->handle computeCommandEncoder];
+  params->ret = (obj_handle_t)[[(id<MTL4CommandBuffer>)params->handle computeCommandEncoder] retain];
   return STATUS_SUCCESS;
 }
 
@@ -6126,7 +6125,7 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:nil
                                                                                                    error:&err];
-  params->ret_error = (obj_handle_t)err;
+  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
   [descriptor release];
   return STATUS_SUCCESS;
 }
@@ -6227,450 +6226,687 @@ _MTL4CommandQueue_removeResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- autorelease-pool dispatch wrappers --------------------------------- *
+ * Wine threads have no NSAutoreleasePool, so every autoreleased object a
+ * Metal/CA call produces on this side would leak for the process lifetime
+ * (objc "MISSING POOLS ... just leaking"). Each unix call therefore runs
+ * inside its own pool. Returned handles survive the drain by convention:
+ * creation calls return +1 references and property getters return objects
+ * owned by longer-lived parents (drawable.texture, layer.residencySet).
+ * NSObject_retain/release stay unwrapped: pure refcount ops, no autorelease,
+ * and they are the hottest entries. */
+#define D9MT_POOLED(fn) \
+  static NTSTATUS fn##_pooled(void *obj) { \
+    NTSTATUS status; \
+    @autoreleasepool { status = fn(obj); } \
+    return status; \
+  }
+D9MT_POOLED(_CGColorSpace_checkColorSpaceSupported)
+D9MT_POOLED(_CacheReader_alloc_init)
+D9MT_POOLED(_CacheReader_get)
+D9MT_POOLED(_CacheWriter_alloc_init)
+D9MT_POOLED(_CacheWriter_set)
+D9MT_POOLED(_CreateMetalViewFromHWND)
+D9MT_POOLED(_DeveloperHUDProperties_addLabel)
+D9MT_POOLED(_DeveloperHUDProperties_instance)
+D9MT_POOLED(_DeveloperHUDProperties_remove)
+D9MT_POOLED(_DeveloperHUDProperties_updateLabel)
+D9MT_POOLED(_DispatchData_alloc_init)
+D9MT_POOLED(_MTL4ArgumentTable_setAddress)
+D9MT_POOLED(_MTL4ArgumentTable_setAddressWithStride)
+D9MT_POOLED(_MTL4ArgumentTable_setSamplerState)
+D9MT_POOLED(_MTL4ArgumentTable_setTexture)
+D9MT_POOLED(_MTL4CommandAllocator_reset)
+D9MT_POOLED(_MTL4CommandBuffer_beginCommandBuffer)
+D9MT_POOLED(_MTL4CommandBuffer_computeCommandEncoder)
+D9MT_POOLED(_MTL4CommandBuffer_endCommandBuffer)
+D9MT_POOLED(_MTL4CommandBuffer_renderCommandEncoder)
+D9MT_POOLED(_MTL4CommandBuffer_useResidencySet)
+D9MT_POOLED(_MTL4CommandEncoder_barrier)
+D9MT_POOLED(_MTL4CommandQueue_addResidencySet)
+D9MT_POOLED(_MTL4CommandQueue_commit)
+D9MT_POOLED(_MTL4CommandQueue_removeResidencySet)
+D9MT_POOLED(_MTL4CommandQueue_signalDrawable)
+D9MT_POOLED(_MTL4CommandQueue_signalEvent)
+D9MT_POOLED(_MTL4CommandQueue_waitForDrawable)
+D9MT_POOLED(_MTL4CommandQueue_waitForEvent)
+D9MT_POOLED(_MTL4Compiler_newRenderPipelineState)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_copyFromBufferToBuffer)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_copyFromBufferToTexture)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_copyFromTextureToBuffer)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_copyFromTextureToTexture)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_fillBuffer)
+D9MT_POOLED(_MTL4ComputeCommandEncoder_generateMipmaps)
+D9MT_POOLED(_MTL4RenderCommandEncoder_drawIndexedPrimitives)
+D9MT_POOLED(_MTL4RenderCommandEncoder_drawPrimitives)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setArgumentTable)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setBlendColor)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setCullMode)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setDepthBias)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setDepthStencilState)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setFrontFacingWinding)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setRenderPipelineState)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setScissorRect)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setStencilReferenceValue)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setViewport)
+D9MT_POOLED(_MTL4RenderCommandEncoder_setVisibilityResultMode)
+D9MT_POOLED(_MTLBinaryArchive_serialize)
+D9MT_POOLED(_MTLBlitCommandEncoder_encodeCommands)
+D9MT_POOLED(_MTLBuffer_didModifyRange)
+D9MT_POOLED(_MTLBuffer_newTexture)
+D9MT_POOLED(_MTLBuffer_updateContents)
+D9MT_POOLED(_MTLCaptureManager_sharedCaptureManager)
+D9MT_POOLED(_MTLCaptureManager_startCapture)
+D9MT_POOLED(_MTLCaptureManager_stopCapture)
+D9MT_POOLED(_MTLCommandBuffer_blitCommandEncoder)
+D9MT_POOLED(_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers)
+D9MT_POOLED(_MTLCommandBuffer_commit)
+D9MT_POOLED(_MTLCommandBuffer_computeCommandEncoder)
+D9MT_POOLED(_MTLCommandBuffer_encodeSignalEvent)
+D9MT_POOLED(_MTLCommandBuffer_encodeSpatialScale)
+D9MT_POOLED(_MTLCommandBuffer_encodeTemporalScale)
+D9MT_POOLED(_MTLCommandBuffer_encodeWaitForEvent)
+D9MT_POOLED(_MTLCommandBuffer_error)
+D9MT_POOLED(_MTLCommandBuffer_logs)
+D9MT_POOLED(_MTLCommandBuffer_presentDrawable)
+D9MT_POOLED(_MTLCommandBuffer_presentDrawableAfterMinimumDuration)
+D9MT_POOLED(_MTLCommandBuffer_property)
+D9MT_POOLED(_MTLCommandBuffer_renderCommandEncoder)
+D9MT_POOLED(_MTLCommandBuffer_status)
+D9MT_POOLED(_MTLCommandBuffer_waitUntilCompleted)
+D9MT_POOLED(_MTLCommandEncoder_endEncoding)
+D9MT_POOLED(_MTLCommandEncoder_setLabel)
+D9MT_POOLED(_MTLCommandQueue_commandBuffer)
+D9MT_POOLED(_MTLComputeCommandEncoder_encodeCommands)
+D9MT_POOLED(_MTLCopyAllDevices)
+D9MT_POOLED(_MTLCounterSampleBuffer_newTimestampBuffer)
+D9MT_POOLED(_MTLCounterSampleBuffer_resolveCounterRange)
+D9MT_POOLED(_MTLDevice_currentAllocatedSize)
+D9MT_POOLED(_MTLDevice_hasUnifiedMemory)
+D9MT_POOLED(_MTLDevice_minimumLinearTextureAlignmentForPixelFormat)
+D9MT_POOLED(_MTLDevice_name)
+D9MT_POOLED(_MTLDevice_newArgumentTable)
+D9MT_POOLED(_MTLDevice_newBinaryArchive)
+D9MT_POOLED(_MTLDevice_newBuffer)
+D9MT_POOLED(_MTLDevice_newCommandAllocator)
+D9MT_POOLED(_MTLDevice_newCommandQueue)
+D9MT_POOLED(_MTLDevice_newComputePipelineState)
+D9MT_POOLED(_MTLDevice_newDepthStencilState)
+D9MT_POOLED(_MTLDevice_newEvent)
+D9MT_POOLED(_MTLDevice_newFence)
+D9MT_POOLED(_MTLDevice_newLibrary)
+D9MT_POOLED(_MTLDevice_newMTL4CommandBuffer)
+D9MT_POOLED(_MTLDevice_newMTL4CommandQueue)
+D9MT_POOLED(_MTLDevice_newMTL4Compiler)
+D9MT_POOLED(_MTLDevice_newMeshRenderPipelineState)
+D9MT_POOLED(_MTLDevice_newPlacementHeap)
+D9MT_POOLED(_MTLDevice_newRenderPipelineState)
+D9MT_POOLED(_MTLDevice_newRenderPipelineStateWithVertexDescriptor)
+D9MT_POOLED(_MTLDevice_newResidencySet)
+D9MT_POOLED(_MTLDevice_newSamplerState)
+D9MT_POOLED(_MTLDevice_newSharedEvent)
+D9MT_POOLED(_MTLDevice_newSharedEventWithMachPort)
+D9MT_POOLED(_MTLDevice_newSharedTexture)
+D9MT_POOLED(_MTLDevice_newSpatialScaler)
+D9MT_POOLED(_MTLDevice_newTemporalScaler)
+D9MT_POOLED(_MTLDevice_newTexture)
+D9MT_POOLED(_MTLDevice_newTileRenderPipelineState)
+D9MT_POOLED(_MTLDevice_recommendedMaxWorkingSetSize)
+D9MT_POOLED(_MTLDevice_registryID)
+D9MT_POOLED(_MTLDevice_setShouldMaximizeConcurrentCompilation)
+D9MT_POOLED(_MTLDevice_sparseTileSize)
+D9MT_POOLED(_MTLDevice_supportsBCTextureCompression)
+D9MT_POOLED(_MTLDevice_supportsFXSpatialScaler)
+D9MT_POOLED(_MTLDevice_supportsFXTemporalScaler)
+D9MT_POOLED(_MTLDevice_supportsFamily)
+D9MT_POOLED(_MTLDevice_supportsPlacementSparse)
+D9MT_POOLED(_MTLDevice_supportsTextureSampleCount)
+D9MT_POOLED(_MTLDevice_updateSparseTextureMappings)
+D9MT_POOLED(_MTLLibrary_newFunction)
+D9MT_POOLED(_MTLLibrary_newFunctionWithConstants)
+D9MT_POOLED(_MTLLogContainer_enumerate)
+D9MT_POOLED(_MTLRenderCommandEncoder_encodeCommands)
+D9MT_POOLED(_MTLResidencySet_addAllocation)
+D9MT_POOLED(_MTLResidencySet_commit)
+D9MT_POOLED(_MTLResidencySet_removeAllAllocations)
+D9MT_POOLED(_MTLResidencySet_removeAllocation)
+D9MT_POOLED(_MTLResidencySet_requestResidency)
+D9MT_POOLED(_MTLSharedEvent_createMachPort)
+D9MT_POOLED(_MTLSharedEvent_setWin32EventAtValue)
+D9MT_POOLED(_MTLSharedEvent_signalValue)
+D9MT_POOLED(_MTLSharedEvent_signaledValue)
+D9MT_POOLED(_MTLSharedEvent_waitUntilSignaledValue)
+D9MT_POOLED(_MTLTexture_arrayLength)
+D9MT_POOLED(_MTLTexture_depth)
+D9MT_POOLED(_MTLTexture_height)
+D9MT_POOLED(_MTLTexture_mipmapLevelCount)
+D9MT_POOLED(_MTLTexture_newTextureView)
+D9MT_POOLED(_MTLTexture_pixelFormat)
+D9MT_POOLED(_MTLTexture_replaceRegion)
+D9MT_POOLED(_MTLTexture_usage)
+D9MT_POOLED(_MTLTexture_width)
+D9MT_POOLED(_MetalDrawable_present)
+D9MT_POOLED(_MetalDrawable_texture)
+D9MT_POOLED(_MetalLayer_getEDRValue)
+D9MT_POOLED(_MetalLayer_getProps)
+D9MT_POOLED(_MetalLayer_nextDrawable)
+D9MT_POOLED(_MetalLayer_residencySet)
+D9MT_POOLED(_MetalLayer_setColorSpace)
+D9MT_POOLED(_MetalLayer_setProps)
+D9MT_POOLED(_NSArray_count)
+D9MT_POOLED(_NSArray_object)
+D9MT_POOLED(_NSObject_description)
+D9MT_POOLED(_NSString_alloc_init)
+D9MT_POOLED(_NSString_getCString)
+D9MT_POOLED(_NSString_lengthOfBytesUsingEncoding)
+D9MT_POOLED(_NSString_string)
+D9MT_POOLED(_ReleaseMetalView)
+D9MT_POOLED(_SharedEventListener_create)
+D9MT_POOLED(_SharedEventListener_destroy)
+D9MT_POOLED(_SharedEventListener_start)
+D9MT_POOLED(_WMTApitraceCommandBufferBegin)
+D9MT_POOLED(_WMTApitraceCommandBufferCommit)
+D9MT_POOLED(_WMTApitracePresentDrawable)
+D9MT_POOLED(_WMTApitraceSessionClose)
+D9MT_POOLED(_WMTApitraceSessionEnsureOpen)
+D9MT_POOLED(_WMTApitraceSessionFlush)
+D9MT_POOLED(_WMTApitraceSessionSealCheckpoint)
+D9MT_POOLED(_WMTApitraceSetCurrentD3DSequence)
+D9MT_POOLED(_WMTBootstrapLookUp)
+D9MT_POOLED(_WMTBootstrapRegister)
+D9MT_POOLED(_WMTGetDisplayDescription)
+D9MT_POOLED(_WMTGetOSVersion)
+D9MT_POOLED(_WMTGetPrimaryDisplayId)
+D9MT_POOLED(_WMTGetSecondaryDisplayId)
+D9MT_POOLED(_WMTQueryDisplaySetting)
+D9MT_POOLED(_WMTQueryDisplaySettingForLayer)
+D9MT_POOLED(_WMTSetMetalShaderCachePath)
+D9MT_POOLED(_WMTUpdateDisplaySetting)
+D9MT_POOLED(thunk32_AirconvUnsupportedCompile)
+D9MT_POOLED(thunk32_AirconvUnsupportedGetArgumentsInfo)
+D9MT_POOLED(thunk32_AirconvUnsupportedInitialize)
+D9MT_POOLED(thunk32_DXSOCompile)
+D9MT_POOLED(thunk32_DXSOGetCompiledBitcode)
+D9MT_POOLED(thunk32_DXSOInitialize)
+D9MT_POOLED(thunk32_SM50Compile)
+D9MT_POOLED(thunk32_SM50CompileGeometryPipelineGeometry)
+D9MT_POOLED(thunk32_SM50CompileGeometryPipelineVertex)
+D9MT_POOLED(thunk32_SM50CompileTessellationPipelineDomain)
+D9MT_POOLED(thunk32_SM50CompileTessellationPipelineHull)
+D9MT_POOLED(thunk32_SM50GetArgumentsInfo)
+D9MT_POOLED(thunk32_SM50GetCompiledBitcode)
+D9MT_POOLED(thunk32_SM50GetErrorMessage)
+D9MT_POOLED(thunk32_SM50Initialize)
+D9MT_POOLED(thunk_AirconvUnsupportedCompile)
+D9MT_POOLED(thunk_AirconvUnsupportedDestroy)
+D9MT_POOLED(thunk_AirconvUnsupportedGetArgumentsInfo)
+D9MT_POOLED(thunk_AirconvUnsupportedInitialize)
+D9MT_POOLED(thunk_D9MTAirCompile)
+D9MT_POOLED(thunk_D9MTAirFree)
+D9MT_POOLED(thunk_D9MTAirVersion)
+D9MT_POOLED(thunk_DXSOCompile)
+D9MT_POOLED(thunk_DXSODestroy)
+D9MT_POOLED(thunk_DXSODestroyBitcode)
+D9MT_POOLED(thunk_DXSOGetCompiledBitcode)
+D9MT_POOLED(thunk_DXSOInitialize)
+D9MT_POOLED(thunk_SM50Compile)
+D9MT_POOLED(thunk_SM50CompileGeometryPipelineGeometry)
+D9MT_POOLED(thunk_SM50CompileGeometryPipelineVertex)
+D9MT_POOLED(thunk_SM50CompileTessellationPipelineDomain)
+D9MT_POOLED(thunk_SM50CompileTessellationPipelineHull)
+D9MT_POOLED(thunk_SM50Destroy)
+D9MT_POOLED(thunk_SM50DestroyBitcode)
+D9MT_POOLED(thunk_SM50FreeError)
+D9MT_POOLED(thunk_SM50GetArgumentsInfo)
+D9MT_POOLED(thunk_SM50GetCompiledBitcode)
+D9MT_POOLED(thunk_SM50GetErrorMessage)
+D9MT_POOLED(thunk_SM50Initialize)
+#undef D9MT_POOLED
+
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
-    &_NSArray_object,
-    &_NSArray_count,
-    &_MTLCopyAllDevices,
-    &_MTLDevice_recommendedMaxWorkingSetSize,
-    &_MTLDevice_currentAllocatedSize,
-    &_MTLDevice_name,
-    &_NSString_getCString,
-    &_MTLDevice_newCommandQueue,
+    &_NSArray_object_pooled,
+    &_NSArray_count_pooled,
+    &_MTLCopyAllDevices_pooled,
+    &_MTLDevice_recommendedMaxWorkingSetSize_pooled,
+    &_MTLDevice_currentAllocatedSize_pooled,
+    &_MTLDevice_name_pooled,
+    &_NSString_getCString_pooled,
+    &_MTLDevice_newCommandQueue_pooled,
     &_NSAutoreleasePool_alloc_init,
-    &_MTLCommandQueue_commandBuffer,
-    &_MTLCommandBuffer_commit,
-    &_MTLCommandBuffer_waitUntilCompleted,
-    &_MTLCommandBuffer_status,
-    &_MTLDevice_newSharedEvent,
-    &_MTLSharedEvent_signaledValue,
-    &_MTLCommandBuffer_encodeSignalEvent,
-    &_MTLDevice_newBuffer,
-    &_MTLDevice_newSamplerState,
-    &_MTLDevice_newDepthStencilState,
-    &_MTLDevice_newTexture,
-    &_MTLBuffer_newTexture,
-    &_MTLTexture_newTextureView,
-    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat,
-    &_MTLDevice_newLibrary,
-    &_MTLLibrary_newFunction,
-    &_NSString_lengthOfBytesUsingEncoding,
-    &_NSObject_description,
-    &_MTLDevice_newComputePipelineState,
-    &_MTLCommandBuffer_blitCommandEncoder,
-    &_MTLCommandBuffer_computeCommandEncoder,
-    &_MTLCommandBuffer_renderCommandEncoder,
-    &_MTLCommandEncoder_endEncoding,
-    &_MTLDevice_newRenderPipelineState,
-    &_MTLDevice_newMeshRenderPipelineState,
-    &_MTLBlitCommandEncoder_encodeCommands,
-    &_MTLComputeCommandEncoder_encodeCommands,
-    &_MTLRenderCommandEncoder_encodeCommands,
-    &_MTLTexture_pixelFormat,
-    &_MTLTexture_width,
-    &_MTLTexture_height,
-    &_MTLTexture_depth,
-    &_MTLTexture_arrayLength,
-    &_MTLTexture_mipmapLevelCount,
-    &_MTLTexture_replaceRegion,
-    &_MTLBuffer_didModifyRange,
-    &_MTLCommandBuffer_presentDrawable,
-    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration,
-    &_MTLDevice_supportsFamily,
-    &_MTLDevice_supportsBCTextureCompression,
-    &_MTLDevice_supportsTextureSampleCount,
-    &_MTLDevice_hasUnifiedMemory,
-    &_MTLCaptureManager_sharedCaptureManager,
-    &_MTLCaptureManager_startCapture,
-    &_MTLCaptureManager_stopCapture,
-    &_MTLDevice_newTemporalScaler,
-    &_MTLDevice_newSpatialScaler,
-    &_MTLCommandBuffer_encodeTemporalScale,
-    &_MTLCommandBuffer_encodeSpatialScale,
-    &_NSString_string,
-    &_NSString_alloc_init,
-    &_DeveloperHUDProperties_instance,
-    &_DeveloperHUDProperties_addLabel,
-    &_DeveloperHUDProperties_updateLabel,
-    &_DeveloperHUDProperties_remove,
-    &_MetalDrawable_texture,
-    &_MetalLayer_nextDrawable,
-    &_MTLDevice_supportsFXSpatialScaler,
-    &_MTLDevice_supportsFXTemporalScaler,
-    &_MetalLayer_setProps,
-    &_MetalLayer_getProps,
-    &_CreateMetalViewFromHWND,
-    &_ReleaseMetalView,
-    &thunk_SM50Initialize,
-    &thunk_SM50Destroy,
-    &thunk_SM50Compile,
-    &thunk_SM50GetCompiledBitcode,
-    &thunk_SM50DestroyBitcode,
-    &thunk_SM50GetErrorMessage,
-    &thunk_SM50FreeError,
-    &thunk_SM50CompileGeometryPipelineVertex,
-    &thunk_SM50CompileGeometryPipelineGeometry,
-    &_MTLTexture_usage,
-    &thunk_SM50CompileTessellationPipelineHull,
-    &thunk_SM50CompileTessellationPipelineDomain,
-    &_MTLCommandEncoder_setLabel,
-    &_MTLDevice_setShouldMaximizeConcurrentCompilation,
-    &thunk_SM50GetArgumentsInfo,
-    &thunk_AirconvUnsupportedInitialize,
-    &thunk_AirconvUnsupportedDestroy,
-    &thunk_AirconvUnsupportedCompile,
-    &thunk_AirconvUnsupportedGetArgumentsInfo,
-    &_MTLCommandBuffer_error,
-    &_MTLCommandBuffer_logs,
-    &_MTLLogContainer_enumerate,
-    &_CGColorSpace_checkColorSpaceSupported,
-    &_MetalLayer_setColorSpace,
-    &_WMTGetPrimaryDisplayId,
-    &_WMTGetSecondaryDisplayId,
-    &_WMTGetDisplayDescription,
-    &_MetalLayer_getEDRValue,
-    &_MTLLibrary_newFunctionWithConstants,
-    &_WMTQueryDisplaySetting,
-    &_WMTUpdateDisplaySetting,
-    &_WMTQueryDisplaySettingForLayer,
-    &_MTLCommandBuffer_encodeWaitForEvent,
-    &_MTLSharedEvent_signalValue,
-    &_MTLSharedEvent_setWin32EventAtValue,
-    &_MTLDevice_newFence,
-    &_MTLDevice_newEvent,
-    &_MTLBuffer_updateContents,
-    &_SharedEventListener_create,
-    &_SharedEventListener_start,
-    &_SharedEventListener_destroy,
-    &_WMTGetOSVersion,
-    &_MTLDevice_newBinaryArchive,
-    &_MTLBinaryArchive_serialize,
-    &_DispatchData_alloc_init,
-    &_CacheReader_alloc_init,
-    &_CacheReader_get,
-    &_CacheWriter_alloc_init,
-    &_CacheWriter_set,
-    &_WMTSetMetalShaderCachePath,
-    &_MTLDevice_newSharedTexture,
-    &_WMTBootstrapRegister,
-    &_WMTBootstrapLookUp,
-    &_MTLSharedEvent_createMachPort,
-    &_MTLDevice_newSharedEventWithMachPort,
-    &_MTLDevice_registryID,
-    &_MTLSharedEvent_waitUntilSignaledValue,
-    &_MTLCounterSampleBuffer_newTimestampBuffer,
-    &_MTLCounterSampleBuffer_resolveCounterRange,
-    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
-    &_MTLCommandBuffer_property,
-    &_MTLDevice_newTileRenderPipelineState,
+    &_MTLCommandQueue_commandBuffer_pooled,
+    &_MTLCommandBuffer_commit_pooled,
+    &_MTLCommandBuffer_waitUntilCompleted_pooled,
+    &_MTLCommandBuffer_status_pooled,
+    &_MTLDevice_newSharedEvent_pooled,
+    &_MTLSharedEvent_signaledValue_pooled,
+    &_MTLCommandBuffer_encodeSignalEvent_pooled,
+    &_MTLDevice_newBuffer_pooled,
+    &_MTLDevice_newSamplerState_pooled,
+    &_MTLDevice_newDepthStencilState_pooled,
+    &_MTLDevice_newTexture_pooled,
+    &_MTLBuffer_newTexture_pooled,
+    &_MTLTexture_newTextureView_pooled,
+    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat_pooled,
+    &_MTLDevice_newLibrary_pooled,
+    &_MTLLibrary_newFunction_pooled,
+    &_NSString_lengthOfBytesUsingEncoding_pooled,
+    &_NSObject_description_pooled,
+    &_MTLDevice_newComputePipelineState_pooled,
+    &_MTLCommandBuffer_blitCommandEncoder_pooled,
+    &_MTLCommandBuffer_computeCommandEncoder_pooled,
+    &_MTLCommandBuffer_renderCommandEncoder_pooled,
+    &_MTLCommandEncoder_endEncoding_pooled,
+    &_MTLDevice_newRenderPipelineState_pooled,
+    &_MTLDevice_newMeshRenderPipelineState_pooled,
+    &_MTLBlitCommandEncoder_encodeCommands_pooled,
+    &_MTLComputeCommandEncoder_encodeCommands_pooled,
+    &_MTLRenderCommandEncoder_encodeCommands_pooled,
+    &_MTLTexture_pixelFormat_pooled,
+    &_MTLTexture_width_pooled,
+    &_MTLTexture_height_pooled,
+    &_MTLTexture_depth_pooled,
+    &_MTLTexture_arrayLength_pooled,
+    &_MTLTexture_mipmapLevelCount_pooled,
+    &_MTLTexture_replaceRegion_pooled,
+    &_MTLBuffer_didModifyRange_pooled,
+    &_MTLCommandBuffer_presentDrawable_pooled,
+    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration_pooled,
+    &_MTLDevice_supportsFamily_pooled,
+    &_MTLDevice_supportsBCTextureCompression_pooled,
+    &_MTLDevice_supportsTextureSampleCount_pooled,
+    &_MTLDevice_hasUnifiedMemory_pooled,
+    &_MTLCaptureManager_sharedCaptureManager_pooled,
+    &_MTLCaptureManager_startCapture_pooled,
+    &_MTLCaptureManager_stopCapture_pooled,
+    &_MTLDevice_newTemporalScaler_pooled,
+    &_MTLDevice_newSpatialScaler_pooled,
+    &_MTLCommandBuffer_encodeTemporalScale_pooled,
+    &_MTLCommandBuffer_encodeSpatialScale_pooled,
+    &_NSString_string_pooled,
+    &_NSString_alloc_init_pooled,
+    &_DeveloperHUDProperties_instance_pooled,
+    &_DeveloperHUDProperties_addLabel_pooled,
+    &_DeveloperHUDProperties_updateLabel_pooled,
+    &_DeveloperHUDProperties_remove_pooled,
+    &_MetalDrawable_texture_pooled,
+    &_MetalLayer_nextDrawable_pooled,
+    &_MTLDevice_supportsFXSpatialScaler_pooled,
+    &_MTLDevice_supportsFXTemporalScaler_pooled,
+    &_MetalLayer_setProps_pooled,
+    &_MetalLayer_getProps_pooled,
+    &_CreateMetalViewFromHWND_pooled,
+    &_ReleaseMetalView_pooled,
+    &thunk_SM50Initialize_pooled,
+    &thunk_SM50Destroy_pooled,
+    &thunk_SM50Compile_pooled,
+    &thunk_SM50GetCompiledBitcode_pooled,
+    &thunk_SM50DestroyBitcode_pooled,
+    &thunk_SM50GetErrorMessage_pooled,
+    &thunk_SM50FreeError_pooled,
+    &thunk_SM50CompileGeometryPipelineVertex_pooled,
+    &thunk_SM50CompileGeometryPipelineGeometry_pooled,
+    &_MTLTexture_usage_pooled,
+    &thunk_SM50CompileTessellationPipelineHull_pooled,
+    &thunk_SM50CompileTessellationPipelineDomain_pooled,
+    &_MTLCommandEncoder_setLabel_pooled,
+    &_MTLDevice_setShouldMaximizeConcurrentCompilation_pooled,
+    &thunk_SM50GetArgumentsInfo_pooled,
+    &thunk_AirconvUnsupportedInitialize_pooled,
+    &thunk_AirconvUnsupportedDestroy_pooled,
+    &thunk_AirconvUnsupportedCompile_pooled,
+    &thunk_AirconvUnsupportedGetArgumentsInfo_pooled,
+    &_MTLCommandBuffer_error_pooled,
+    &_MTLCommandBuffer_logs_pooled,
+    &_MTLLogContainer_enumerate_pooled,
+    &_CGColorSpace_checkColorSpaceSupported_pooled,
+    &_MetalLayer_setColorSpace_pooled,
+    &_WMTGetPrimaryDisplayId_pooled,
+    &_WMTGetSecondaryDisplayId_pooled,
+    &_WMTGetDisplayDescription_pooled,
+    &_MetalLayer_getEDRValue_pooled,
+    &_MTLLibrary_newFunctionWithConstants_pooled,
+    &_WMTQueryDisplaySetting_pooled,
+    &_WMTUpdateDisplaySetting_pooled,
+    &_WMTQueryDisplaySettingForLayer_pooled,
+    &_MTLCommandBuffer_encodeWaitForEvent_pooled,
+    &_MTLSharedEvent_signalValue_pooled,
+    &_MTLSharedEvent_setWin32EventAtValue_pooled,
+    &_MTLDevice_newFence_pooled,
+    &_MTLDevice_newEvent_pooled,
+    &_MTLBuffer_updateContents_pooled,
+    &_SharedEventListener_create_pooled,
+    &_SharedEventListener_start_pooled,
+    &_SharedEventListener_destroy_pooled,
+    &_WMTGetOSVersion_pooled,
+    &_MTLDevice_newBinaryArchive_pooled,
+    &_MTLBinaryArchive_serialize_pooled,
+    &_DispatchData_alloc_init_pooled,
+    &_CacheReader_alloc_init_pooled,
+    &_CacheReader_get_pooled,
+    &_CacheWriter_alloc_init_pooled,
+    &_CacheWriter_set_pooled,
+    &_WMTSetMetalShaderCachePath_pooled,
+    &_MTLDevice_newSharedTexture_pooled,
+    &_WMTBootstrapRegister_pooled,
+    &_WMTBootstrapLookUp_pooled,
+    &_MTLSharedEvent_createMachPort_pooled,
+    &_MTLDevice_newSharedEventWithMachPort_pooled,
+    &_MTLDevice_registryID_pooled,
+    &_MTLSharedEvent_waitUntilSignaledValue_pooled,
+    &_MTLCounterSampleBuffer_newTimestampBuffer_pooled,
+    &_MTLCounterSampleBuffer_resolveCounterRange_pooled,
+    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers_pooled,
+    &_MTLCommandBuffer_property_pooled,
+    &_MTLDevice_newTileRenderPipelineState_pooled,
     // Upstream apitrace block: indices 136..142 (UNIX_CALL hard-codes
     // these in winemetal_thunks.c WMTApitrace*).
-    &_WMTApitraceSessionEnsureOpen,
-    &_WMTApitraceSessionClose,
-    &_WMTApitraceSetCurrentD3DSequence,
-    &_WMTApitraceCommandBufferBegin,
-    &_WMTApitraceCommandBufferCommit,
-    &_WMTApitracePresentDrawable,
-    &_WMTApitraceSessionSealCheckpoint,
-    &_MTLDevice_supportsPlacementSparse,
-    &_MTLDevice_sparseTileSize,
-    &_MTLDevice_newPlacementHeap,
-    &_MTLDevice_updateSparseTextureMappings,
-    &_WMTApitraceSessionFlush,
+    &_WMTApitraceSessionEnsureOpen_pooled,
+    &_WMTApitraceSessionClose_pooled,
+    &_WMTApitraceSetCurrentD3DSequence_pooled,
+    &_WMTApitraceCommandBufferBegin_pooled,
+    &_WMTApitraceCommandBufferCommit_pooled,
+    &_WMTApitracePresentDrawable_pooled,
+    &_WMTApitraceSessionSealCheckpoint_pooled,
+    &_MTLDevice_supportsPlacementSparse_pooled,
+    &_MTLDevice_sparseTileSize_pooled,
+    &_MTLDevice_newPlacementHeap_pooled,
+    &_MTLDevice_updateSparseTextureMappings_pooled,
+    &_WMTApitraceSessionFlush_pooled,
     // DXSO block: indices 148..152, must match unix_dxso_* in
     // airconv_thunks.h. It sits immediately after upstream's apitrace +
     // sparse entries; if upstream inserts more above this line, move both
     // this block and the airconv_thunks.h anchor forward in lock-step.
-    &thunk_DXSOInitialize,
-    &thunk_DXSODestroy,
-    &thunk_DXSOCompile,
-    &thunk_DXSOGetCompiledBitcode,
-    &thunk_DXSODestroyBitcode,
+    &thunk_DXSOInitialize_pooled,
+    &thunk_DXSODestroy_pooled,
+    &thunk_DXSOCompile_pooled,
+    &thunk_DXSOGetCompiledBitcode_pooled,
+    &thunk_DXSODestroyBitcode_pooled,
     /* d9mt additions: codes 153..156, lock-step in both tables.
        All param layouts are 8-byte/arch-invariant: shared thunks. */
-    &_MTLDevice_newRenderPipelineStateWithVertexDescriptor,
-    &thunk_D9MTAirVersion,
-    &thunk_D9MTAirCompile,
-    &thunk_D9MTAirFree,
+    &_MTLDevice_newRenderPipelineStateWithVertexDescriptor_pooled,
+    &thunk_D9MTAirVersion_pooled,
+    &thunk_D9MTAirCompile_pooled,
+    &thunk_D9MTAirFree_pooled,
     /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step in both
        tables. All param layouts are 8-byte/arch-invariant: shared thunks. */
-    &_MTLDevice_newMTL4CommandQueue,                        /* 157 */
-    &_MTLDevice_newCommandAllocator,                        /* 158 */
-    &_MTLDevice_newMTL4CommandBuffer,                       /* 159 */
-    &_MTLDevice_newArgumentTable,                           /* 160 */
-    &_MTLDevice_newMTL4Compiler,                            /* 161 */
-    &_MTLDevice_newResidencySet,                            /* 162 */
-    &_MTL4CommandAllocator_reset,                           /* 163 */
-    &_MTL4CommandBuffer_beginCommandBuffer,                 /* 164 */
-    &_MTL4CommandBuffer_endCommandBuffer,                   /* 165 */
-    &_MTL4CommandBuffer_useResidencySet,                    /* 166 */
-    &_MTL4CommandQueue_commit,                              /* 167 */
-    &_MTL4CommandQueue_waitForDrawable,                     /* 168 */
-    &_MTL4CommandQueue_signalDrawable,                      /* 169 */
-    &_MTL4CommandQueue_signalEvent,                         /* 170 */
-    &_MTL4CommandQueue_waitForEvent,                        /* 171 */
-    &_MTL4ArgumentTable_setAddress,                         /* 172 */
-    &_MTL4ArgumentTable_setAddressWithStride,               /* 173 */
-    &_MTL4ArgumentTable_setTexture,                         /* 174 */
-    &_MTL4ArgumentTable_setSamplerState,                    /* 175 */
-    &_MTL4CommandBuffer_renderCommandEncoder,               /* 176 */
-    &_MTL4RenderCommandEncoder_setArgumentTable,            /* 177 */
-    &_MTL4RenderCommandEncoder_setRenderPipelineState,      /* 178 */
-    &_MTL4RenderCommandEncoder_setViewport,                 /* 179 */
-    &_MTL4RenderCommandEncoder_setScissorRect,              /* 180 */
-    &_MTL4RenderCommandEncoder_setDepthStencilState,        /* 181 */
-    &_MTL4RenderCommandEncoder_setCullMode,                 /* 182 */
-    &_MTL4RenderCommandEncoder_setFrontFacingWinding,       /* 183 */
-    &_MTL4RenderCommandEncoder_setDepthBias,                /* 184 */
-    &_MTL4RenderCommandEncoder_setBlendColor,               /* 185 */
-    &_MTL4RenderCommandEncoder_setStencilReferenceValue,    /* 186 */
-    &_MTL4RenderCommandEncoder_drawPrimitives,              /* 187 */
-    &_MTL4RenderCommandEncoder_drawIndexedPrimitives,       /* 188 */
-    &_MTL4CommandBuffer_computeCommandEncoder,              /* 189 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer,     /* 190 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture,    /* 191 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture,   /* 192 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer,    /* 193 */
-    &_MTL4ComputeCommandEncoder_fillBuffer,                 /* 194 */
-    &_MTL4ComputeCommandEncoder_generateMipmaps,            /* 195 */
-    &_MTL4Compiler_newRenderPipelineState,                  /* 196 */
-    &_MTLResidencySet_addAllocation,                        /* 197 */
-    &_MTLResidencySet_commit,                               /* 198 */
-    &_MTLResidencySet_requestResidency,                     /* 199 */
-    &_MTLResidencySet_removeAllAllocations,                 /* 200 */
-    &_MetalDrawable_present,                                /* 201 */
-    &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
-    &_MTL4CommandEncoder_barrier,                           /* 203 */
-    &_MTLResidencySet_removeAllocation,                     /* 204 */
-    &_MetalLayer_residencySet,                              /* 205 */
-    &_MTL4CommandQueue_addResidencySet,                     /* 206 */
-    &_MTL4CommandQueue_removeResidencySet,                  /* 207 */
+    &_MTLDevice_newMTL4CommandQueue_pooled,                        /* 157 */
+    &_MTLDevice_newCommandAllocator_pooled,                        /* 158 */
+    &_MTLDevice_newMTL4CommandBuffer_pooled,                       /* 159 */
+    &_MTLDevice_newArgumentTable_pooled,                           /* 160 */
+    &_MTLDevice_newMTL4Compiler_pooled,                            /* 161 */
+    &_MTLDevice_newResidencySet_pooled,                            /* 162 */
+    &_MTL4CommandAllocator_reset_pooled,                           /* 163 */
+    &_MTL4CommandBuffer_beginCommandBuffer_pooled,                 /* 164 */
+    &_MTL4CommandBuffer_endCommandBuffer_pooled,                   /* 165 */
+    &_MTL4CommandBuffer_useResidencySet_pooled,                    /* 166 */
+    &_MTL4CommandQueue_commit_pooled,                              /* 167 */
+    &_MTL4CommandQueue_waitForDrawable_pooled,                     /* 168 */
+    &_MTL4CommandQueue_signalDrawable_pooled,                      /* 169 */
+    &_MTL4CommandQueue_signalEvent_pooled,                         /* 170 */
+    &_MTL4CommandQueue_waitForEvent_pooled,                        /* 171 */
+    &_MTL4ArgumentTable_setAddress_pooled,                         /* 172 */
+    &_MTL4ArgumentTable_setAddressWithStride_pooled,               /* 173 */
+    &_MTL4ArgumentTable_setTexture_pooled,                         /* 174 */
+    &_MTL4ArgumentTable_setSamplerState_pooled,                    /* 175 */
+    &_MTL4CommandBuffer_renderCommandEncoder_pooled,               /* 176 */
+    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,            /* 177 */
+    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,      /* 178 */
+    &_MTL4RenderCommandEncoder_setViewport_pooled,                 /* 179 */
+    &_MTL4RenderCommandEncoder_setScissorRect_pooled,              /* 180 */
+    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,        /* 181 */
+    &_MTL4RenderCommandEncoder_setCullMode_pooled,                 /* 182 */
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,       /* 183 */
+    &_MTL4RenderCommandEncoder_setDepthBias_pooled,                /* 184 */
+    &_MTL4RenderCommandEncoder_setBlendColor_pooled,               /* 185 */
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,    /* 186 */
+    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,              /* 187 */
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,       /* 188 */
+    &_MTL4CommandBuffer_computeCommandEncoder_pooled,              /* 189 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,     /* 190 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,    /* 191 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,   /* 192 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,    /* 193 */
+    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,                 /* 194 */
+    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,            /* 195 */
+    &_MTL4Compiler_newRenderPipelineState_pooled,                  /* 196 */
+    &_MTLResidencySet_addAllocation_pooled,                        /* 197 */
+    &_MTLResidencySet_commit_pooled,                               /* 198 */
+    &_MTLResidencySet_requestResidency_pooled,                     /* 199 */
+    &_MTLResidencySet_removeAllAllocations_pooled,                 /* 200 */
+    &_MetalDrawable_present_pooled,                                /* 201 */
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,     /* 202 */
+    &_MTL4CommandEncoder_barrier_pooled,                           /* 203 */
+    &_MTLResidencySet_removeAllocation_pooled,                     /* 204 */
+    &_MetalLayer_residencySet_pooled,                              /* 205 */
+    &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
+    &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
 };
 
 #ifndef DXMT_NATIVE
 const void *__wine_unix_call_wow64_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
-    &_NSArray_object,
-    &_NSArray_count,
-    &_MTLCopyAllDevices,
-    &_MTLDevice_recommendedMaxWorkingSetSize,
-    &_MTLDevice_currentAllocatedSize,
-    &_MTLDevice_name,
-    &_NSString_getCString,
-    &_MTLDevice_newCommandQueue,
+    &_NSArray_object_pooled,
+    &_NSArray_count_pooled,
+    &_MTLCopyAllDevices_pooled,
+    &_MTLDevice_recommendedMaxWorkingSetSize_pooled,
+    &_MTLDevice_currentAllocatedSize_pooled,
+    &_MTLDevice_name_pooled,
+    &_NSString_getCString_pooled,
+    &_MTLDevice_newCommandQueue_pooled,
     &_NSAutoreleasePool_alloc_init,
-    &_MTLCommandQueue_commandBuffer,
-    &_MTLCommandBuffer_commit,
-    &_MTLCommandBuffer_waitUntilCompleted,
-    &_MTLCommandBuffer_status,
-    &_MTLDevice_newSharedEvent,
-    &_MTLSharedEvent_signaledValue,
-    &_MTLCommandBuffer_encodeSignalEvent,
-    &_MTLDevice_newBuffer,
-    &_MTLDevice_newSamplerState,
-    &_MTLDevice_newDepthStencilState,
-    &_MTLDevice_newTexture,
-    &_MTLBuffer_newTexture,
-    &_MTLTexture_newTextureView,
-    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat,
-    &_MTLDevice_newLibrary,
-    &_MTLLibrary_newFunction,
-    &_NSString_lengthOfBytesUsingEncoding,
-    &_NSObject_description,
-    &_MTLDevice_newComputePipelineState,
-    &_MTLCommandBuffer_blitCommandEncoder,
-    &_MTLCommandBuffer_computeCommandEncoder,
-    &_MTLCommandBuffer_renderCommandEncoder,
-    &_MTLCommandEncoder_endEncoding,
-    &_MTLDevice_newRenderPipelineState,
-    &_MTLDevice_newMeshRenderPipelineState,
-    &_MTLBlitCommandEncoder_encodeCommands,
-    &_MTLComputeCommandEncoder_encodeCommands,
-    &_MTLRenderCommandEncoder_encodeCommands,
-    &_MTLTexture_pixelFormat,
-    &_MTLTexture_width,
-    &_MTLTexture_height,
-    &_MTLTexture_depth,
-    &_MTLTexture_arrayLength,
-    &_MTLTexture_mipmapLevelCount,
-    &_MTLTexture_replaceRegion,
-    &_MTLBuffer_didModifyRange,
-    &_MTLCommandBuffer_presentDrawable,
-    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration,
-    &_MTLDevice_supportsFamily,
-    &_MTLDevice_supportsBCTextureCompression,
-    &_MTLDevice_supportsTextureSampleCount,
-    &_MTLDevice_hasUnifiedMemory,
-    &_MTLCaptureManager_sharedCaptureManager,
-    &_MTLCaptureManager_startCapture,
-    &_MTLCaptureManager_stopCapture,
-    &_MTLDevice_newTemporalScaler,
-    &_MTLDevice_newSpatialScaler,
-    &_MTLCommandBuffer_encodeTemporalScale,
-    &_MTLCommandBuffer_encodeSpatialScale,
-    &_NSString_string,
-    &_NSString_alloc_init,
-    &_DeveloperHUDProperties_instance,
-    &_DeveloperHUDProperties_addLabel,
-    &_DeveloperHUDProperties_updateLabel,
-    &_DeveloperHUDProperties_remove,
-    &_MetalDrawable_texture,
-    &_MetalLayer_nextDrawable,
-    &_MTLDevice_supportsFXSpatialScaler,
-    &_MTLDevice_supportsFXTemporalScaler,
-    &_MetalLayer_setProps,
-    &_MetalLayer_getProps,
-    &_CreateMetalViewFromHWND,
-    &_ReleaseMetalView,
-    &thunk32_SM50Initialize,
-    &thunk_SM50Destroy,
-    &thunk32_SM50Compile,
-    &thunk32_SM50GetCompiledBitcode,
-    &thunk_SM50DestroyBitcode,
-    &thunk32_SM50GetErrorMessage,
-    &thunk_SM50FreeError,
-    &thunk32_SM50CompileGeometryPipelineVertex,
-    &thunk32_SM50CompileGeometryPipelineGeometry,
-    &_MTLTexture_usage,
-    &thunk32_SM50CompileTessellationPipelineHull,
-    &thunk32_SM50CompileTessellationPipelineDomain,
-    &_MTLCommandEncoder_setLabel,
-    &_MTLDevice_setShouldMaximizeConcurrentCompilation,
-    &thunk32_SM50GetArgumentsInfo,
-    &thunk32_AirconvUnsupportedInitialize,
-    &thunk_AirconvUnsupportedDestroy,
-    &thunk32_AirconvUnsupportedCompile,
-    &thunk32_AirconvUnsupportedGetArgumentsInfo,
-    &_MTLCommandBuffer_error,
-    &_MTLCommandBuffer_logs,
-    &_MTLLogContainer_enumerate,
-    &_CGColorSpace_checkColorSpaceSupported,
-    &_MetalLayer_setColorSpace,
-    &_WMTGetPrimaryDisplayId,
-    &_WMTGetSecondaryDisplayId,
-    &_WMTGetDisplayDescription,
-    &_MetalLayer_getEDRValue,
-    &_MTLLibrary_newFunctionWithConstants,
-    &_WMTQueryDisplaySetting,
-    &_WMTUpdateDisplaySetting,
-    &_WMTQueryDisplaySettingForLayer,
-    &_MTLCommandBuffer_encodeWaitForEvent,
-    &_MTLSharedEvent_signalValue,
-    &_MTLSharedEvent_setWin32EventAtValue,
-    &_MTLDevice_newFence,
-    &_MTLDevice_newEvent,
-    &_MTLBuffer_updateContents,
-    &_SharedEventListener_create,
-    &_SharedEventListener_start,
-    &_SharedEventListener_destroy,
-    &_WMTGetOSVersion,
-    &_MTLDevice_newBinaryArchive,
-    &_MTLBinaryArchive_serialize,
-    &_DispatchData_alloc_init,
-    &_CacheReader_alloc_init,
-    &_CacheReader_get,
-    &_CacheWriter_alloc_init,
-    &_CacheWriter_set,
-    &_WMTSetMetalShaderCachePath,
-    &_MTLDevice_newSharedTexture,
-    &_WMTBootstrapRegister,
-    &_WMTBootstrapLookUp,
-    &_MTLSharedEvent_createMachPort,
-    &_MTLDevice_newSharedEventWithMachPort,
-    &_MTLDevice_registryID,
-    &_MTLSharedEvent_waitUntilSignaledValue,
-    &_MTLCounterSampleBuffer_newTimestampBuffer,
-    &_MTLCounterSampleBuffer_resolveCounterRange,
-    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
-    &_MTLCommandBuffer_property,
-    &_MTLDevice_newTileRenderPipelineState,
+    &_MTLCommandQueue_commandBuffer_pooled,
+    &_MTLCommandBuffer_commit_pooled,
+    &_MTLCommandBuffer_waitUntilCompleted_pooled,
+    &_MTLCommandBuffer_status_pooled,
+    &_MTLDevice_newSharedEvent_pooled,
+    &_MTLSharedEvent_signaledValue_pooled,
+    &_MTLCommandBuffer_encodeSignalEvent_pooled,
+    &_MTLDevice_newBuffer_pooled,
+    &_MTLDevice_newSamplerState_pooled,
+    &_MTLDevice_newDepthStencilState_pooled,
+    &_MTLDevice_newTexture_pooled,
+    &_MTLBuffer_newTexture_pooled,
+    &_MTLTexture_newTextureView_pooled,
+    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat_pooled,
+    &_MTLDevice_newLibrary_pooled,
+    &_MTLLibrary_newFunction_pooled,
+    &_NSString_lengthOfBytesUsingEncoding_pooled,
+    &_NSObject_description_pooled,
+    &_MTLDevice_newComputePipelineState_pooled,
+    &_MTLCommandBuffer_blitCommandEncoder_pooled,
+    &_MTLCommandBuffer_computeCommandEncoder_pooled,
+    &_MTLCommandBuffer_renderCommandEncoder_pooled,
+    &_MTLCommandEncoder_endEncoding_pooled,
+    &_MTLDevice_newRenderPipelineState_pooled,
+    &_MTLDevice_newMeshRenderPipelineState_pooled,
+    &_MTLBlitCommandEncoder_encodeCommands_pooled,
+    &_MTLComputeCommandEncoder_encodeCommands_pooled,
+    &_MTLRenderCommandEncoder_encodeCommands_pooled,
+    &_MTLTexture_pixelFormat_pooled,
+    &_MTLTexture_width_pooled,
+    &_MTLTexture_height_pooled,
+    &_MTLTexture_depth_pooled,
+    &_MTLTexture_arrayLength_pooled,
+    &_MTLTexture_mipmapLevelCount_pooled,
+    &_MTLTexture_replaceRegion_pooled,
+    &_MTLBuffer_didModifyRange_pooled,
+    &_MTLCommandBuffer_presentDrawable_pooled,
+    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration_pooled,
+    &_MTLDevice_supportsFamily_pooled,
+    &_MTLDevice_supportsBCTextureCompression_pooled,
+    &_MTLDevice_supportsTextureSampleCount_pooled,
+    &_MTLDevice_hasUnifiedMemory_pooled,
+    &_MTLCaptureManager_sharedCaptureManager_pooled,
+    &_MTLCaptureManager_startCapture_pooled,
+    &_MTLCaptureManager_stopCapture_pooled,
+    &_MTLDevice_newTemporalScaler_pooled,
+    &_MTLDevice_newSpatialScaler_pooled,
+    &_MTLCommandBuffer_encodeTemporalScale_pooled,
+    &_MTLCommandBuffer_encodeSpatialScale_pooled,
+    &_NSString_string_pooled,
+    &_NSString_alloc_init_pooled,
+    &_DeveloperHUDProperties_instance_pooled,
+    &_DeveloperHUDProperties_addLabel_pooled,
+    &_DeveloperHUDProperties_updateLabel_pooled,
+    &_DeveloperHUDProperties_remove_pooled,
+    &_MetalDrawable_texture_pooled,
+    &_MetalLayer_nextDrawable_pooled,
+    &_MTLDevice_supportsFXSpatialScaler_pooled,
+    &_MTLDevice_supportsFXTemporalScaler_pooled,
+    &_MetalLayer_setProps_pooled,
+    &_MetalLayer_getProps_pooled,
+    &_CreateMetalViewFromHWND_pooled,
+    &_ReleaseMetalView_pooled,
+    &thunk32_SM50Initialize_pooled,
+    &thunk_SM50Destroy_pooled,
+    &thunk32_SM50Compile_pooled,
+    &thunk32_SM50GetCompiledBitcode_pooled,
+    &thunk_SM50DestroyBitcode_pooled,
+    &thunk32_SM50GetErrorMessage_pooled,
+    &thunk_SM50FreeError_pooled,
+    &thunk32_SM50CompileGeometryPipelineVertex_pooled,
+    &thunk32_SM50CompileGeometryPipelineGeometry_pooled,
+    &_MTLTexture_usage_pooled,
+    &thunk32_SM50CompileTessellationPipelineHull_pooled,
+    &thunk32_SM50CompileTessellationPipelineDomain_pooled,
+    &_MTLCommandEncoder_setLabel_pooled,
+    &_MTLDevice_setShouldMaximizeConcurrentCompilation_pooled,
+    &thunk32_SM50GetArgumentsInfo_pooled,
+    &thunk32_AirconvUnsupportedInitialize_pooled,
+    &thunk_AirconvUnsupportedDestroy_pooled,
+    &thunk32_AirconvUnsupportedCompile_pooled,
+    &thunk32_AirconvUnsupportedGetArgumentsInfo_pooled,
+    &_MTLCommandBuffer_error_pooled,
+    &_MTLCommandBuffer_logs_pooled,
+    &_MTLLogContainer_enumerate_pooled,
+    &_CGColorSpace_checkColorSpaceSupported_pooled,
+    &_MetalLayer_setColorSpace_pooled,
+    &_WMTGetPrimaryDisplayId_pooled,
+    &_WMTGetSecondaryDisplayId_pooled,
+    &_WMTGetDisplayDescription_pooled,
+    &_MetalLayer_getEDRValue_pooled,
+    &_MTLLibrary_newFunctionWithConstants_pooled,
+    &_WMTQueryDisplaySetting_pooled,
+    &_WMTUpdateDisplaySetting_pooled,
+    &_WMTQueryDisplaySettingForLayer_pooled,
+    &_MTLCommandBuffer_encodeWaitForEvent_pooled,
+    &_MTLSharedEvent_signalValue_pooled,
+    &_MTLSharedEvent_setWin32EventAtValue_pooled,
+    &_MTLDevice_newFence_pooled,
+    &_MTLDevice_newEvent_pooled,
+    &_MTLBuffer_updateContents_pooled,
+    &_SharedEventListener_create_pooled,
+    &_SharedEventListener_start_pooled,
+    &_SharedEventListener_destroy_pooled,
+    &_WMTGetOSVersion_pooled,
+    &_MTLDevice_newBinaryArchive_pooled,
+    &_MTLBinaryArchive_serialize_pooled,
+    &_DispatchData_alloc_init_pooled,
+    &_CacheReader_alloc_init_pooled,
+    &_CacheReader_get_pooled,
+    &_CacheWriter_alloc_init_pooled,
+    &_CacheWriter_set_pooled,
+    &_WMTSetMetalShaderCachePath_pooled,
+    &_MTLDevice_newSharedTexture_pooled,
+    &_WMTBootstrapRegister_pooled,
+    &_WMTBootstrapLookUp_pooled,
+    &_MTLSharedEvent_createMachPort_pooled,
+    &_MTLDevice_newSharedEventWithMachPort_pooled,
+    &_MTLDevice_registryID_pooled,
+    &_MTLSharedEvent_waitUntilSignaledValue_pooled,
+    &_MTLCounterSampleBuffer_newTimestampBuffer_pooled,
+    &_MTLCounterSampleBuffer_resolveCounterRange_pooled,
+    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers_pooled,
+    &_MTLCommandBuffer_property_pooled,
+    &_MTLDevice_newTileRenderPipelineState_pooled,
     // Upstream apitrace block: indices 136..142, lock-step with the
     // 64-bit table above.
-    &_WMTApitraceSessionEnsureOpen,
-    &_WMTApitraceSessionClose,
-    &_WMTApitraceSetCurrentD3DSequence,
-    &_WMTApitraceCommandBufferBegin,
-    &_WMTApitraceCommandBufferCommit,
-    &_WMTApitracePresentDrawable,
-    &_WMTApitraceSessionSealCheckpoint,
-    &_MTLDevice_supportsPlacementSparse,
-    &_MTLDevice_sparseTileSize,
-    &_MTLDevice_newPlacementHeap,
-    &_MTLDevice_updateSparseTextureMappings,
-    &_WMTApitraceSessionFlush,
+    &_WMTApitraceSessionEnsureOpen_pooled,
+    &_WMTApitraceSessionClose_pooled,
+    &_WMTApitraceSetCurrentD3DSequence_pooled,
+    &_WMTApitraceCommandBufferBegin_pooled,
+    &_WMTApitraceCommandBufferCommit_pooled,
+    &_WMTApitracePresentDrawable_pooled,
+    &_WMTApitraceSessionSealCheckpoint_pooled,
+    &_MTLDevice_supportsPlacementSparse_pooled,
+    &_MTLDevice_sparseTileSize_pooled,
+    &_MTLDevice_newPlacementHeap_pooled,
+    &_MTLDevice_updateSparseTextureMappings_pooled,
+    &_WMTApitraceSessionFlush_pooled,
     // DXSO block: indices 148..152, lock-step with __wine_unix_call_funcs
     // above and with unix_dxso_* in airconv_thunks.h. Sits immediately
     // after the apitrace + sparse entries (136..147).
-    &thunk32_DXSOInitialize,
+    &thunk32_DXSOInitialize_pooled,
     /* dxso_destroy_params holds only sm50_ptr64_t (always 8 bytes), so
        the 64-bit thunk is byte-compatible: no thunk32 needed. */
-    &thunk_DXSODestroy,
-    &thunk32_DXSOCompile,
-    &thunk32_DXSOGetCompiledBitcode,
+    &thunk_DXSODestroy_pooled,
+    &thunk32_DXSOCompile_pooled,
+    &thunk32_DXSOGetCompiledBitcode_pooled,
     /* dxso_destroy_bitcode_params is sm50_ptr64_t-only, see DXSODestroy
        comment above. */
-    &thunk_DXSODestroyBitcode,
+    &thunk_DXSODestroyBitcode_pooled,
     /* d9mt additions: codes 153..156, lock-step in both tables.
        All param layouts are 8-byte/arch-invariant: shared thunks. */
-    &_MTLDevice_newRenderPipelineStateWithVertexDescriptor,
-    &thunk_D9MTAirVersion,
-    &thunk_D9MTAirCompile,
-    &thunk_D9MTAirFree,
+    &_MTLDevice_newRenderPipelineStateWithVertexDescriptor_pooled,
+    &thunk_D9MTAirVersion_pooled,
+    &thunk_D9MTAirCompile_pooled,
+    &thunk_D9MTAirFree_pooled,
     /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step with
        __wine_unix_call_funcs above. Params are 8-byte/arch-invariant, so the
        64-bit thunks are byte-compatible for wow64: shared, no thunk32 twins. */
-    &_MTLDevice_newMTL4CommandQueue,                        /* 157 */
-    &_MTLDevice_newCommandAllocator,                        /* 158 */
-    &_MTLDevice_newMTL4CommandBuffer,                       /* 159 */
-    &_MTLDevice_newArgumentTable,                           /* 160 */
-    &_MTLDevice_newMTL4Compiler,                            /* 161 */
-    &_MTLDevice_newResidencySet,                            /* 162 */
-    &_MTL4CommandAllocator_reset,                           /* 163 */
-    &_MTL4CommandBuffer_beginCommandBuffer,                 /* 164 */
-    &_MTL4CommandBuffer_endCommandBuffer,                   /* 165 */
-    &_MTL4CommandBuffer_useResidencySet,                    /* 166 */
-    &_MTL4CommandQueue_commit,                              /* 167 */
-    &_MTL4CommandQueue_waitForDrawable,                     /* 168 */
-    &_MTL4CommandQueue_signalDrawable,                      /* 169 */
-    &_MTL4CommandQueue_signalEvent,                         /* 170 */
-    &_MTL4CommandQueue_waitForEvent,                        /* 171 */
-    &_MTL4ArgumentTable_setAddress,                         /* 172 */
-    &_MTL4ArgumentTable_setAddressWithStride,               /* 173 */
-    &_MTL4ArgumentTable_setTexture,                         /* 174 */
-    &_MTL4ArgumentTable_setSamplerState,                    /* 175 */
-    &_MTL4CommandBuffer_renderCommandEncoder,               /* 176 */
-    &_MTL4RenderCommandEncoder_setArgumentTable,            /* 177 */
-    &_MTL4RenderCommandEncoder_setRenderPipelineState,      /* 178 */
-    &_MTL4RenderCommandEncoder_setViewport,                 /* 179 */
-    &_MTL4RenderCommandEncoder_setScissorRect,              /* 180 */
-    &_MTL4RenderCommandEncoder_setDepthStencilState,        /* 181 */
-    &_MTL4RenderCommandEncoder_setCullMode,                 /* 182 */
-    &_MTL4RenderCommandEncoder_setFrontFacingWinding,       /* 183 */
-    &_MTL4RenderCommandEncoder_setDepthBias,                /* 184 */
-    &_MTL4RenderCommandEncoder_setBlendColor,               /* 185 */
-    &_MTL4RenderCommandEncoder_setStencilReferenceValue,    /* 186 */
-    &_MTL4RenderCommandEncoder_drawPrimitives,              /* 187 */
-    &_MTL4RenderCommandEncoder_drawIndexedPrimitives,       /* 188 */
-    &_MTL4CommandBuffer_computeCommandEncoder,              /* 189 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer,     /* 190 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture,    /* 191 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture,   /* 192 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer,    /* 193 */
-    &_MTL4ComputeCommandEncoder_fillBuffer,                 /* 194 */
-    &_MTL4ComputeCommandEncoder_generateMipmaps,            /* 195 */
-    &_MTL4Compiler_newRenderPipelineState,                  /* 196 */
-    &_MTLResidencySet_addAllocation,                        /* 197 */
-    &_MTLResidencySet_commit,                               /* 198 */
-    &_MTLResidencySet_requestResidency,                     /* 199 */
-    &_MTLResidencySet_removeAllAllocations,                 /* 200 */
-    &_MetalDrawable_present,                                /* 201 */
-    &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
-    &_MTL4CommandEncoder_barrier,                           /* 203 */
-    &_MTLResidencySet_removeAllocation,                     /* 204 */
-    &_MetalLayer_residencySet,                              /* 205 */
-    &_MTL4CommandQueue_addResidencySet,                     /* 206 */
-    &_MTL4CommandQueue_removeResidencySet,                  /* 207 */
+    &_MTLDevice_newMTL4CommandQueue_pooled,                        /* 157 */
+    &_MTLDevice_newCommandAllocator_pooled,                        /* 158 */
+    &_MTLDevice_newMTL4CommandBuffer_pooled,                       /* 159 */
+    &_MTLDevice_newArgumentTable_pooled,                           /* 160 */
+    &_MTLDevice_newMTL4Compiler_pooled,                            /* 161 */
+    &_MTLDevice_newResidencySet_pooled,                            /* 162 */
+    &_MTL4CommandAllocator_reset_pooled,                           /* 163 */
+    &_MTL4CommandBuffer_beginCommandBuffer_pooled,                 /* 164 */
+    &_MTL4CommandBuffer_endCommandBuffer_pooled,                   /* 165 */
+    &_MTL4CommandBuffer_useResidencySet_pooled,                    /* 166 */
+    &_MTL4CommandQueue_commit_pooled,                              /* 167 */
+    &_MTL4CommandQueue_waitForDrawable_pooled,                     /* 168 */
+    &_MTL4CommandQueue_signalDrawable_pooled,                      /* 169 */
+    &_MTL4CommandQueue_signalEvent_pooled,                         /* 170 */
+    &_MTL4CommandQueue_waitForEvent_pooled,                        /* 171 */
+    &_MTL4ArgumentTable_setAddress_pooled,                         /* 172 */
+    &_MTL4ArgumentTable_setAddressWithStride_pooled,               /* 173 */
+    &_MTL4ArgumentTable_setTexture_pooled,                         /* 174 */
+    &_MTL4ArgumentTable_setSamplerState_pooled,                    /* 175 */
+    &_MTL4CommandBuffer_renderCommandEncoder_pooled,               /* 176 */
+    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,            /* 177 */
+    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,      /* 178 */
+    &_MTL4RenderCommandEncoder_setViewport_pooled,                 /* 179 */
+    &_MTL4RenderCommandEncoder_setScissorRect_pooled,              /* 180 */
+    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,        /* 181 */
+    &_MTL4RenderCommandEncoder_setCullMode_pooled,                 /* 182 */
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,       /* 183 */
+    &_MTL4RenderCommandEncoder_setDepthBias_pooled,                /* 184 */
+    &_MTL4RenderCommandEncoder_setBlendColor_pooled,               /* 185 */
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,    /* 186 */
+    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,              /* 187 */
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,       /* 188 */
+    &_MTL4CommandBuffer_computeCommandEncoder_pooled,              /* 189 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,     /* 190 */
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,    /* 191 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,   /* 192 */
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,    /* 193 */
+    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,                 /* 194 */
+    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,            /* 195 */
+    &_MTL4Compiler_newRenderPipelineState_pooled,                  /* 196 */
+    &_MTLResidencySet_addAllocation_pooled,                        /* 197 */
+    &_MTLResidencySet_commit_pooled,                               /* 198 */
+    &_MTLResidencySet_requestResidency_pooled,                     /* 199 */
+    &_MTLResidencySet_removeAllAllocations_pooled,                 /* 200 */
+    &_MetalDrawable_present_pooled,                                /* 201 */
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,     /* 202 */
+    &_MTL4CommandEncoder_barrier_pooled,                           /* 203 */
+    &_MTLResidencySet_removeAllocation_pooled,                     /* 204 */
+    &_MetalLayer_residencySet_pooled,                              /* 205 */
+    &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
+    &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
 };
 #endif

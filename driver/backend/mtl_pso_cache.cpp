@@ -150,8 +150,10 @@ namespace dxvk::backend {
       if (err) {
         char buf[512] = {};
         obj_handle_t desc = NSObject_description(err);
-        if (desc)
+        if (desc) {
           NSString_getCString(desc, buf, sizeof(buf) - 1u, WMTUTF8StringEncoding);
+          NSObject_release(desc);   /* description crosses the bridge as +1 */
+        }
         Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
         NSObject_release(err);
       } else {
