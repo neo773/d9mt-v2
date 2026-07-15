@@ -106,6 +106,15 @@ struct SamplerVar {
   std::string name;
 };
 
+/* Push-data block layout contract (mirrors upstream
+ * DxvkPushDataBlock::computeBlockOffsetForStage and the backend's
+ * MtlContextImpl::pushData, kPushSharedBlockSize): each stage's push buffer
+ * (buffer slot 20) starts with the multi-stage "shared" block at byte 0,
+ * reserving 32 bytes, followed by that stage's private block at byte 32.
+ * A DclPushData with an EMPTY stage mask is the shared block; a single-stage
+ * mask is the per-stage block and must be shifted past the reservation. */
+constexpr uint32_t kPushSharedBlockSize = 32u;
+
 } // namespace
 
 
@@ -434,7 +443,18 @@ struct AirBuilderImpl {
         } break;
 
         case ir::OpCode::eDclPushData: {
+          /* Operand 1 is the offset WITHIN the block; operand 2 (stage mask)
+           * selects the block: empty mask = shared block at byte 0,
+           * single-stage mask = the per-stage block past the shared
+           * reservation (kPushSharedBlockSize contract, see above). The
+           * frontend writes with the same rule (MtlContextImpl::pushData),
+           * so dropping the stage operand here aliased the per-stage block
+           * onto the shared one: a VS reading cFSize at byte 0 got the
+           * shared fogColor/alphaRef bytes instead (invisible skinned/
+           * palette-deformed meshes in GTA IV). */
           uint32_t off = uint32_t(op.getOperand(1u));
+          if (uint32_t(op.getOperand(2u)) != 0u)
+            off += kPushSharedBlockSize;
           Type* t = mapType(op.getType(), true);
           uint32_t bytes = off +
             uint32_t(mod->getDataLayout().getTypeAllocSize(t));
@@ -1648,18 +1668,36 @@ struct AirBuilderImpl {
     Type* i8ty = Type::getInt8Ty(ctx);
     Value* base = currentFn->getArg(it->second);   /* [N x i8] constant* */
     Value* i8base = b->CreateBitCast(base, PointerType::get(i8ty, kAsConstant));
-    Value* elem = b->CreateInBoundsGEP(i8ty, i8base, b->getInt64(off));
 
+    /* The address operand is a CONSTANT composite index into the declared
+     * ir type (struct member, then optional deeper indices), matching
+     * upstream SpirvBuilder::emitPushDataLoad. Resolve it to a byte offset
+     * through ir::Type::byteOffset — the ir layout is alignment-aware and
+     * heterogeneous (e.g. the shared block {u8x3, u8, f32, f32, f32} puts
+     * alphaRef at byte 3 and fogScale at byte 4), so scaling the member
+     * index by the LOAD size is wrong for anything but member 0. */
     Type* loadTy = mapType(op.getType(), false);
     ir::SsaDef addrDef = operandDef(op, 1u);
     if (addrDef) {
-      uint64_t sz = mod->getDataLayout().getTypeAllocSize(loadTy);
-      Value* a = b->CreateSExt(getValue(addrDef), b->getInt64Ty());
-      elem = b->CreateInBoundsGEP(i8ty, elem, b->CreateMul(a, b->getInt64(sz)));
+      const ir::Op& addrOp = this->ir.getOp(addrDef);
+      if (addrOp.getOpCode() != ir::OpCode::eConstant)
+        unsupported("non-constant push data address");
+      ir::Type curType = this->ir.getOp(declDef).getType();
+      for (uint32_t i = 0u; i < addrOp.getOperandCount(); i++) {
+        uint32_t index = uint32_t(addrOp.getOperand(i));
+        off += curType.byteOffset(index);
+        curType = curType.getSubType(index);
+      }
     }
+    Value* elem = b->CreateInBoundsGEP(i8ty, i8base, b->getInt64(off));
 
+    /* The push slice base is 256-aligned, so the largest power of two
+     * dividing the byte offset (capped at 4) is a safe load alignment;
+     * sub-word members (u8 alphaRef at byte 3, u16s at 2-byte offsets)
+     * must not claim align 4. */
+    uint64_t align = uint64_t(off | 4u) & -uint64_t(off | 4u);  /* lowest set bit, <= 4 */
     Value* typed = b->CreateBitCast(elem, PointerType::get(loadTy, kAsConstant));
-    Value* v = b->CreateAlignedLoad(loadTy, typed, MaybeAlign(4u));
+    Value* v = b->CreateAlignedLoad(loadTy, typed, MaybeAlign(align));
 
     const ir::Type& resType = op.getType();
     if (resType.isScalarType() &&
