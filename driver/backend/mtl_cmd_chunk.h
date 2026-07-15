@@ -54,6 +54,11 @@ public:
 
   bool empty() const { return m_head == nullptr; }
 
+  /* Bytes parked in the arena since the last reset. Callers cap per-flush
+   * memory with this — flushing at any command boundary is order-preserving
+   * (the stream replays in append order across flushes). */
+  size_t approxBytes() const { return m_activeBlock * BlockSize + m_blockUsed; }
+
   /* Recycle all memory; valid immediately after encodeCommands returns. */
   void reset() {
     m_head = nullptr;

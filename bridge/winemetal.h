@@ -2341,4 +2341,208 @@ WINEMETAL_API obj_handle_t MetalLayer_residencySet(obj_handle_t layer);
 WINEMETAL_API void MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
 WINEMETAL_API void MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_set);
 
+/* ===================================================================== *
+ * d9mt addition: MTL4 render command stream (208).
+ *
+ * The per-draw hot path (argument-table setAddress/setTexture/
+ * setSamplerState, dynamic state, the draw itself) runs 60..100 encoder
+ * operations per draw; at thousands of draws per frame one PE->unix
+ * crossing per call dominates the CPU frame (the per-call thunk tax the
+ * Metal-3 wmtcmd_* stream above exists to avoid). This is the Metal 4
+ * counterpart: wmtcmd_mtl4_* structs chained through `next` (built by
+ * driver/backend/mtl_cmd_chunk.h) and replayed natively into the
+ * MTL4RenderCommandEncoder by MTL4RenderCommandEncoder_encodeCommands in
+ * ONE crossing.
+ *
+ * Contract:
+ *  - MTL4ArgumentTable is not an encoder object, so table-write commands
+ *    carry their own table handle. Riding the same ordered stream as the
+ *    draws preserves the table-rotation contract: table N's slots are
+ *    written before the draw that binds table N, inside the same replay.
+ *  - Every payload is a record-time snapshot (GPU addresses, resource
+ *    IDs, object handles); nothing is re-resolved at replay time.
+ *  - The unix side consumes the chain synchronously during the call, so
+ *    the PE-side arena recycles immediately after it returns.
+ *  - Layouts are 8-byte / arch-invariant (64-bit fields, explicit padding
+ *    on 32-bit tails), so the 64-bit unix replay is wow64 byte-compatible
+ *    — shared thunk, no thunk32 twin, same as codes 157..207.
+ * ===================================================================== */
+
+enum WMTMtl4RenderCommandType : uint16_t {
+  WMTMtl4RenderCommandNop,
+  WMTMtl4RenderCommandSetPSO,
+  WMTMtl4RenderCommandSetArgumentTable,
+  WMTMtl4RenderCommandTableSetAddress,
+  WMTMtl4RenderCommandTableSetTexture,
+  WMTMtl4RenderCommandTableSetSamplerState,
+  WMTMtl4RenderCommandSetViewport,
+  WMTMtl4RenderCommandSetScissorRect,
+  WMTMtl4RenderCommandSetDepthStencilState,
+  WMTMtl4RenderCommandSetCullMode,
+  WMTMtl4RenderCommandSetFrontFacingWinding,
+  WMTMtl4RenderCommandSetDepthBias,
+  WMTMtl4RenderCommandSetBlendColor,
+  WMTMtl4RenderCommandSetStencilReferenceValue,
+  WMTMtl4RenderCommandSetVisibilityResultMode,
+  WMTMtl4RenderCommandDraw,
+  WMTMtl4RenderCommandDrawIndexed,
+  WMTMtl4RenderCommandBarrier,
+};
+
+struct wmtcmd_mtl4_nop {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+};
+
+struct wmtcmd_mtl4_setpso {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t pso;
+};
+
+/* setArgumentTable:atStages: — stages is the MTLRenderStages bitmask
+ * (vertex=1<<0, fragment=1<<1), same as code 177. */
+struct wmtcmd_mtl4_setargtable {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t table;
+  uint64_t stages;
+};
+
+/* MTL4ArgumentTable setAddress:atIndex: — gpu_address is a record-time
+ * MTLGPUAddress snapshot (MtlBufferSlice contract). */
+struct wmtcmd_mtl4_table_setaddress {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t table;
+  uint64_t gpu_address;
+  uint64_t index;
+};
+
+/* MTL4ArgumentTable setTexture:/setSamplerState:atIndex: — one shape for
+ * both (mirrors unixcall_mtl4_argtable_setresource); the command type
+ * disambiguates. gpu_resource_id 0 clears the slot. */
+struct wmtcmd_mtl4_table_setresource {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t table;
+  uint64_t gpu_resource_id;
+  uint64_t index;
+};
+
+struct wmtcmd_mtl4_setviewport {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  struct WMTViewport viewport;
+};
+
+struct wmtcmd_mtl4_setscissorrect {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  struct WMTScissorRect rect;
+};
+
+struct wmtcmd_mtl4_setdsso {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t dsso;
+};
+
+struct wmtcmd_mtl4_setcullmode {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t mode;      /* enum WMTCullMode */
+};
+
+struct wmtcmd_mtl4_setwinding {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t winding;   /* enum WMTWinding */
+};
+
+struct wmtcmd_mtl4_setdepthbias {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  float bias;
+  float slope_scale;
+  float clamp;
+  uint32_t padding;
+};
+
+struct wmtcmd_mtl4_setblendcolor {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  float red;
+  float green;
+  float blue;
+  float alpha;
+};
+
+struct wmtcmd_mtl4_setstencilref {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t reference;
+};
+
+struct wmtcmd_mtl4_setvisibilitymode {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t mode;      /* enum WMTVisibilityResultMode */
+  uint64_t offset;
+};
+
+struct wmtcmd_mtl4_draw {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t primitive; /* enum WMTPrimitiveType */
+  uint64_t vertex_start;
+  uint64_t vertex_count;
+  uint64_t instance_count;
+  uint64_t base_instance;
+};
+
+/* MTL4 indexed draw: index_buffer is an MTLGPUAddress (record-time
+ * snapshot), index_buffer_length the accessible byte range from it. */
+struct wmtcmd_mtl4_draw_indexed {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t primitive; /* enum WMTPrimitiveType */
+  uint64_t index_count;
+  uint64_t index_type; /* enum WMTIndexType */
+  uint64_t index_buffer;
+  uint64_t index_buffer_length;
+  uint64_t instance_count;
+  int64_t base_vertex;
+  uint64_t base_instance;
+};
+
+/* -[MTL4CommandEncoder barrierAfterStages:beforeQueueStages:
+ * visibilityOptions:] — same semantics as code 203. */
+struct wmtcmd_mtl4_barrier {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t after_stages;       /* enum WMTStages */
+  uint64_t before_stages;      /* enum WMTStages */
+  uint64_t visibility;         /* enum WMTVisibilityOptions */
+};
+
+WINEMETAL_API void MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head);
+
 #endif

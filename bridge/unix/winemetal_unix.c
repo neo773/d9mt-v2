@@ -6226,6 +6226,136 @@ _MTL4CommandQueue_removeResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- MTL4 render command stream (208) --------------------------------- *
+ * One crossing per batch: replays the PE-built wmtcmd_mtl4_* chain natively
+ * (the Metal-4 counterpart of _MTLRenderCommandEncoder_encodeCommands
+ * above). Argument-table commands carry their own table handle —
+ * MTL4ArgumentTable is not an encoder object — so table writes and the
+ * draws that read them stay in one ordered stream. Every payload is a
+ * record-time snapshot; nothing is resolved here. The pooled dispatch
+ * wrapper's autoreleasepool covers the whole replay. */
+static NTSTATUS
+_MTL4RenderCommandEncoder_encodeCommands(void *obj) {
+  struct unixcall_generic_obj_cmd_noret *params = obj;
+  const struct wmtcmd_base *next = params->cmd_head.ptr;
+  id<MTL4RenderCommandEncoder> encoder = (id<MTL4RenderCommandEncoder>)params->encoder;
+  while (next) {
+    switch ((enum WMTMtl4RenderCommandType)next->type) {
+    default:
+      assert(!next->type && "unhandled mtl4 render command type");
+      break;
+    case WMTMtl4RenderCommandNop:
+      break;
+    case WMTMtl4RenderCommandSetPSO: {
+      struct wmtcmd_mtl4_setpso *body = (struct wmtcmd_mtl4_setpso *)next;
+      [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)body->pso];
+      break;
+    }
+    case WMTMtl4RenderCommandSetArgumentTable: {
+      struct wmtcmd_mtl4_setargtable *body = (struct wmtcmd_mtl4_setargtable *)next;
+      [encoder setArgumentTable:(id<MTL4ArgumentTable>)body->table
+                       atStages:(MTLRenderStages)body->stages];
+      break;
+    }
+    case WMTMtl4RenderCommandTableSetAddress: {
+      struct wmtcmd_mtl4_table_setaddress *body = (struct wmtcmd_mtl4_table_setaddress *)next;
+      [(id<MTL4ArgumentTable>)body->table setAddress:(MTLGPUAddress)body->gpu_address
+                                             atIndex:(NSUInteger)body->index];
+      break;
+    }
+    case WMTMtl4RenderCommandTableSetTexture: {
+      struct wmtcmd_mtl4_table_setresource *body = (struct wmtcmd_mtl4_table_setresource *)next;
+      MTLResourceID rid = { body->gpu_resource_id };
+      [(id<MTL4ArgumentTable>)body->table setTexture:rid atIndex:(NSUInteger)body->index];
+      break;
+    }
+    case WMTMtl4RenderCommandTableSetSamplerState: {
+      struct wmtcmd_mtl4_table_setresource *body = (struct wmtcmd_mtl4_table_setresource *)next;
+      MTLResourceID rid = { body->gpu_resource_id };
+      [(id<MTL4ArgumentTable>)body->table setSamplerState:rid atIndex:(NSUInteger)body->index];
+      break;
+    }
+    case WMTMtl4RenderCommandSetViewport: {
+      struct wmtcmd_mtl4_setviewport *body = (struct wmtcmd_mtl4_setviewport *)next;
+      [encoder setViewport:*(MTLViewport *)&body->viewport];
+      break;
+    }
+    case WMTMtl4RenderCommandSetScissorRect: {
+      struct wmtcmd_mtl4_setscissorrect *body = (struct wmtcmd_mtl4_setscissorrect *)next;
+      [encoder setScissorRect:*(MTLScissorRect *)&body->rect];
+      break;
+    }
+    case WMTMtl4RenderCommandSetDepthStencilState: {
+      struct wmtcmd_mtl4_setdsso *body = (struct wmtcmd_mtl4_setdsso *)next;
+      [encoder setDepthStencilState:(id<MTLDepthStencilState>)body->dsso];
+      break;
+    }
+    case WMTMtl4RenderCommandSetCullMode: {
+      struct wmtcmd_mtl4_setcullmode *body = (struct wmtcmd_mtl4_setcullmode *)next;
+      [encoder setCullMode:(MTLCullMode)body->mode];
+      break;
+    }
+    case WMTMtl4RenderCommandSetFrontFacingWinding: {
+      struct wmtcmd_mtl4_setwinding *body = (struct wmtcmd_mtl4_setwinding *)next;
+      [encoder setFrontFacingWinding:(MTLWinding)body->winding];
+      break;
+    }
+    case WMTMtl4RenderCommandSetDepthBias: {
+      struct wmtcmd_mtl4_setdepthbias *body = (struct wmtcmd_mtl4_setdepthbias *)next;
+      [encoder setDepthBias:body->bias slopeScale:body->slope_scale clamp:body->clamp];
+      break;
+    }
+    case WMTMtl4RenderCommandSetBlendColor: {
+      struct wmtcmd_mtl4_setblendcolor *body = (struct wmtcmd_mtl4_setblendcolor *)next;
+      [encoder setBlendColorRed:body->red green:body->green blue:body->blue alpha:body->alpha];
+      break;
+    }
+    case WMTMtl4RenderCommandSetStencilReferenceValue: {
+      struct wmtcmd_mtl4_setstencilref *body = (struct wmtcmd_mtl4_setstencilref *)next;
+      [encoder setStencilReferenceValue:(uint32_t)body->reference];
+      break;
+    }
+    case WMTMtl4RenderCommandSetVisibilityResultMode: {
+      struct wmtcmd_mtl4_setvisibilitymode *body = (struct wmtcmd_mtl4_setvisibilitymode *)next;
+      [encoder setVisibilityResultMode:(MTLVisibilityResultMode)body->mode
+                                offset:(NSUInteger)body->offset];
+      break;
+    }
+    case WMTMtl4RenderCommandDraw: {
+      struct wmtcmd_mtl4_draw *body = (struct wmtcmd_mtl4_draw *)next;
+      [encoder drawPrimitives:(MTLPrimitiveType)body->primitive
+                  vertexStart:(NSUInteger)body->vertex_start
+                  vertexCount:(NSUInteger)body->vertex_count
+                instanceCount:(NSUInteger)body->instance_count
+                 baseInstance:(NSUInteger)body->base_instance];
+      break;
+    }
+    case WMTMtl4RenderCommandDrawIndexed: {
+      struct wmtcmd_mtl4_draw_indexed *body = (struct wmtcmd_mtl4_draw_indexed *)next;
+      [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive
+                          indexCount:(NSUInteger)body->index_count
+                           indexType:(MTLIndexType)body->index_type
+                         indexBuffer:(MTLGPUAddress)body->index_buffer
+                   indexBufferLength:(NSUInteger)body->index_buffer_length
+                       instanceCount:(NSUInteger)body->instance_count
+                          baseVertex:(NSInteger)body->base_vertex
+                        baseInstance:(NSUInteger)body->base_instance];
+      break;
+    }
+    case WMTMtl4RenderCommandBarrier: {
+      struct wmtcmd_mtl4_barrier *body = (struct wmtcmd_mtl4_barrier *)next;
+      [encoder barrierAfterStages:(MTLStages)body->after_stages
+                beforeQueueStages:(MTLStages)body->before_stages
+                visibilityOptions:(MTL4VisibilityOptions)body->visibility];
+      break;
+    }
+    }
+
+    next = next->next.ptr;
+  }
+  return STATUS_SUCCESS;
+}
+
 /* --- autorelease-pool dispatch wrappers --------------------------------- *
  * Wine threads have no NSAutoreleasePool, so every autoreleased object a
  * Metal/CA call produces on this side would leak for the process lifetime
@@ -6279,6 +6409,7 @@ D9MT_POOLED(_MTL4ComputeCommandEncoder_fillBuffer)
 D9MT_POOLED(_MTL4ComputeCommandEncoder_generateMipmaps)
 D9MT_POOLED(_MTL4RenderCommandEncoder_drawIndexedPrimitives)
 D9MT_POOLED(_MTL4RenderCommandEncoder_drawPrimitives)
+D9MT_POOLED(_MTL4RenderCommandEncoder_encodeCommands)
 D9MT_POOLED(_MTL4RenderCommandEncoder_setArgumentTable)
 D9MT_POOLED(_MTL4RenderCommandEncoder_setBlendColor)
 D9MT_POOLED(_MTL4RenderCommandEncoder_setCullMode)
@@ -6682,6 +6813,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MetalLayer_residencySet_pooled,                              /* 205 */
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
+    &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
 };
 
 #ifndef DXMT_NATIVE
@@ -6908,5 +7040,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalLayer_residencySet_pooled,                              /* 205 */
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
+    &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
 };
 #endif

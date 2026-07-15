@@ -537,15 +537,35 @@ namespace dxvk::backend {
 
   void MtlContextImpl::bindArgumentTables() {
     ArgTablePair& pair = m_argTables[m_currentArgTable];
-    MTL4RenderCommandEncoder_setArgumentTable(
-      m_pass.encoder, pair.table[0].handle(), uint64_t(WMTRenderStageVertex));
-    MTL4RenderCommandEncoder_setArgumentTable(
-      m_pass.encoder, pair.table[1].handle(), uint64_t(WMTRenderStageFragment));
+    auto* vs = m_cmdChunk.append<wmtcmd_mtl4_setargtable>(
+      uint16_t(WMTMtl4RenderCommandSetArgumentTable));
+    vs->table  = pair.table[0].handle();
+    vs->stages = uint64_t(WMTRenderStageVertex);
+    auto* fs = m_cmdChunk.append<wmtcmd_mtl4_setargtable>(
+      uint16_t(WMTMtl4RenderCommandSetArgumentTable));
+    fs->table  = pair.table[1].handle();
+    fs->stages = uint64_t(WMTRenderStageFragment);
+  }
+
+  void MtlContextImpl::flushCmdChunk() {
+    if (m_cmdChunk.empty())
+      return;
+    /* ONE crossing replays the whole batch natively (mtl_cmd_chunk.h /
+     * winemetal.h code 208). The unix side consumes the structs
+     * synchronously, so the arena recycles immediately — no GPU-lifetime
+     * tracking (unlike UploadRing memory, which the GPU reads later). */
+    MTL4RenderCommandEncoder_encodeCommands(m_pass.encoder, m_cmdChunk.head());
+    m_cmdChunk.reset();
   }
 
   void MtlContextImpl::closePass() {
     if (!m_pass.active)
       return;
+
+    /* Replay every batched wmtcmd for this pass before the encoder is
+     * barriered/ended — the chunk invariant (non-empty only while a pass is
+     * open) holds because appends happen only after materializePass. */
+    flushCmdChunk();
 
     /* §4c: order this pass's fragment (color/depth) writes ahead of every
      * later queue stage — a subsequent encoder that samples this RT as a
@@ -740,13 +760,13 @@ namespace dxvk::backend {
     if (!prepareDraw())
       return;
     for (uint32_t i = 0; i < count; i++) {
-      MTL4RenderCommandEncoder_drawPrimitives(
-        m_pass.encoder,
-        wmtPrimitive(m_topology),
-        args[i].firstVertex,
-        args[i].vertexCount,
-        args[i].instanceCount ? args[i].instanceCount : 1u,
-        args[i].firstInstance);
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw>(
+        uint16_t(WMTMtl4RenderCommandDraw));
+      cmd->primitive      = uint64_t(wmtPrimitive(m_topology));
+      cmd->vertex_start   = args[i].firstVertex;
+      cmd->vertex_count   = args[i].vertexCount;
+      cmd->instance_count = args[i].instanceCount ? args[i].instanceCount : 1u;
+      cmd->base_instance  = args[i].firstInstance;
     }
   }
 
@@ -767,16 +787,16 @@ namespace dxvk::backend {
       /* MTL4 rule: indexBufferLength is the accessible byte range from the
        * given GPU address (to the end of the backing allocation). */
       uint64_t accessible  = m_indexBuffer.addressableLength(indexOffset);
-      MTL4RenderCommandEncoder_drawIndexedPrimitives(
-        m_pass.encoder,
-        wmtPrimitive(m_topology),
-        args[i].indexCount,
-        idxType,
-        gpuAddr,
-        accessible,
-        args[i].instanceCount ? args[i].instanceCount : 1u,
-        int64_t(args[i].vertexOffset),
-        args[i].firstInstance);
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw_indexed>(
+        uint16_t(WMTMtl4RenderCommandDrawIndexed));
+      cmd->primitive           = uint64_t(wmtPrimitive(m_topology));
+      cmd->index_count         = args[i].indexCount;
+      cmd->index_type          = uint64_t(idxType);
+      cmd->index_buffer        = gpuAddr;
+      cmd->index_buffer_length = accessible;
+      cmd->instance_count      = args[i].instanceCount ? args[i].instanceCount : 1u;
+      cmd->base_vertex         = int64_t(args[i].vertexOffset);
+      cmd->base_instance       = args[i].firstInstance;
     }
   }
 
@@ -784,6 +804,13 @@ namespace dxvk::backend {
     if (!m_pass.pending && !m_pass.active)
       return false;                       /* no render targets bound */
     materializePass();
+
+    /* Arena cap: replay-and-recycle mid-pass once the batch crosses the cap.
+     * Any command boundary is a valid flush point — the stream replays in
+     * append order across flushes, and table rotation already guarantees no
+     * table is rewritten until its serial retires. */
+    if (m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
+      flushCmdChunk();
 
     if ((m_dirty & DirtyPso) && !resolvePso())
       return false;

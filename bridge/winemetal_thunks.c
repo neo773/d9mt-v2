@@ -1849,3 +1849,12 @@ MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_s
   params.arg = residency_set;
   UNIX_CALL(207, &params);
 }
+
+/* --- MTL4 render command stream (208) -------------------------------- */
+WINEMETAL_API void
+MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head) {
+  struct unixcall_generic_obj_cmd_noret params;
+  params.encoder = encoder;
+  WMT_MEMPTR_SET(params.cmd_head, cmd_head);
+  UNIX_CALL(208, &params);
+}

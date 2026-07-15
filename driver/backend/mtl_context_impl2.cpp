@@ -159,11 +159,41 @@ namespace dxvk::backend {
     if (!pso)
       return false;
 
-    MTL4RenderCommandEncoder_setRenderPipelineState(m_pass.encoder, pso);
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setpso>(
+      uint16_t(WMTMtl4RenderCommandSetPSO));
+    cmd->pso = pso;
     return true;
   }
 
   // --- argument-table flush (decision 3) -------------------------------------
+  // Every write below is APPENDED to m_cmdChunk, not thunked: the table
+  // handle rides in the command, so the replayed stream writes table N's
+  // slots strictly before the draw that binds table N — one PE->unix
+  // crossing per batch instead of ~90 per draw.
+
+  void MtlContextImpl::appendTableAddress(obj_handle_t table, uint64_t gpuAddress, uint32_t index) {
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setaddress>(
+      uint16_t(WMTMtl4RenderCommandTableSetAddress));
+    cmd->table       = table;
+    cmd->gpu_address = gpuAddress;
+    cmd->index       = index;
+  }
+
+  void MtlContextImpl::appendTableTexture(obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setresource>(
+      uint16_t(WMTMtl4RenderCommandTableSetTexture));
+    cmd->table           = table;
+    cmd->gpu_resource_id = gpuResourceId;
+    cmd->index           = index;
+  }
+
+  void MtlContextImpl::appendTableSampler(obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setresource>(
+      uint16_t(WMTMtl4RenderCommandTableSetSamplerState));
+    cmd->table           = table;
+    cmd->gpu_resource_id = gpuResourceId;
+    cmd->index           = index;
+  }
 
   void MtlContextImpl::flushVertexBuffers() {
     obj_handle_t table = m_argTables[m_currentArgTable].table[0].handle();
@@ -173,9 +203,10 @@ namespace dxvk::backend {
        * physical backing, NEVER the live buffer — an app-thread rename must
        * not retarget a draw recorded against the old backing. Renames reach
        * still-bound slices only via invalidateBuffer's refresh, in command
-       * order. */
+       * order. The gpuAddress is snapshotted into the command at append
+       * time; the replay resolves nothing. */
       if (!s.slice.defined() || s.slice.storage() == nullptr) {
-        MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
+        appendTableAddress(table, 0u, kVertexBufferBaseIndex + i);
         continue;
       }
       /* DIAG: with in-order flow the bound snapshot must equal the buffer's
@@ -183,8 +214,7 @@ namespace dxvk::backend {
        * divergence here is the recorded-vs-live retargeting bug class. */
       if (unlikely(s.slice.storage() != s.slice.buffer()->storage()))
         s_diagVbStale++;
-      MTL4ArgumentTable_setAddress(
-        table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
+      appendTableAddress(table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
     }
   }
 
@@ -216,13 +246,12 @@ namespace dxvk::backend {
          * Discard) retarget this binding via invalidateBuffer's refresh. */
         if (!cbv.slice.defined() || cbv.slice.storage() == nullptr
          || uintptr_t(cbv.slice.storage().ptr()) < 0x10000u) {
-          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
+          appendTableAddress(table, 0u, uint32_t(airSlot));
           continue;
         }
         if (unlikely(cbv.slice.storage() != cbv.slice.buffer()->storage()))
           s_diagCbvStale++;
-        MTL4ArgumentTable_setAddress(
-          table, cbv.slice.gpuAddress(cbv.rangeOffset),
+        appendTableAddress(table, cbv.slice.gpuAddress(cbv.rangeOffset),
           uint32_t(airSlot));
       }
 
@@ -234,22 +263,22 @@ namespace dxvk::backend {
       for (uint32_t slot = 0u; slot < b.textures.size(); slot++) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr) {
-          MTL4ArgumentTable_setTexture(table, 0u, slot);
+          appendTableTexture(table, 0u, slot);
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-        MTL4ArgumentTable_setTexture(table, tv->gpuResourceId, slot);
+        appendTableTexture(table, tv->gpuResourceId, slot);
       }
 
       /* samplers: setSamplerState by MTLResourceID. */
       for (uint32_t slot = 0u; slot < b.samplers.size(); slot++) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
         if (sampler == nullptr) {
-          MTL4ArgumentTable_setSamplerState(table, 0u, slot);
+          appendTableSampler(table, 0u, slot);
           continue;
         }
         auto* sp = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
-        MTL4ArgumentTable_setSamplerState(table, sp->gpuResourceId, slot);
+        appendTableSampler(table, sp->gpuResourceId, slot);
       }
 
       /* push data -> fresh UploadRing slice at the push slot (snapshot
@@ -268,23 +297,24 @@ namespace dxvk::backend {
         }
         b.pushDirtyLo = b.pushDirtyHi = 0u;
       }
-      MTL4ArgumentTable_setAddress(table, b.pushGpuAddress, kPushConstantIndex);
+      appendTableAddress(table, b.pushGpuAddress, kPushConstantIndex);
     }
   }
 
   void MtlContextImpl::flushDynamicState() {
-    obj_handle_t enc = m_pass.encoder;
+    /* Encoder dynamic state rides the same wmtcmd batch as the table writes
+     * and draws — values are snapshotted into the commands here. */
 
     /* viewport (RT-pixel coords; backing scale handled in the presenter) */
     {
-      WMTViewport vp = {};
-      vp.originX = m_viewport.originX;
-      vp.originY = m_viewport.originY;
-      vp.width   = m_viewport.width;
-      vp.height  = m_viewport.height;
-      vp.znear   = m_viewport.znear;
-      vp.zfar    = m_viewport.zfar;
-      MTL4RenderCommandEncoder_setViewport(enc, vp);
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setviewport>(
+        uint16_t(WMTMtl4RenderCommandSetViewport));
+      cmd->viewport.originX = m_viewport.originX;
+      cmd->viewport.originY = m_viewport.originY;
+      cmd->viewport.width   = m_viewport.width;
+      cmd->viewport.height  = m_viewport.height;
+      cmd->viewport.znear   = m_viewport.znear;
+      cmd->viewport.zfar    = m_viewport.zfar;
     }
 
     /* scissor — full render target when none is set */
@@ -303,31 +333,49 @@ namespace dxvk::backend {
         if (!w) { w = uint32_t(m_viewport.width); h = uint32_t(m_viewport.height); }
         sc = { 0u, 0u, w, h };
       }
-      WMTScissorRect rect = {};
-      rect.x      = sc.x;
-      rect.y      = sc.y;
-      rect.width  = sc.width;
-      rect.height = sc.height;
-      MTL4RenderCommandEncoder_setScissorRect(enc, rect);
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setscissorrect>(
+        uint16_t(WMTMtl4RenderCommandSetScissorRect));
+      cmd->rect.x      = sc.x;
+      cmd->rect.y      = sc.y;
+      cmd->rect.width  = sc.width;
+      cmd->rect.height = sc.height;
     }
 
     /* depth-stencil state object (cached in the device) + stencil ref */
     {
-      obj_handle_t dsso = m_device->getDepthStencilState(m_depthStencil);
-      MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
-      MTL4RenderCommandEncoder_setStencilReferenceValue(enc, m_stencilRef);
+      auto* dss = m_cmdChunk.append<wmtcmd_mtl4_setdsso>(
+        uint16_t(WMTMtl4RenderCommandSetDepthStencilState));
+      dss->dsso = m_device->getDepthStencilState(m_depthStencil);
+      auto* sref = m_cmdChunk.append<wmtcmd_mtl4_setstencilref>(
+        uint16_t(WMTMtl4RenderCommandSetStencilReferenceValue));
+      sref->reference = m_stencilRef;
     }
 
     /* blend constant */
-    MTL4RenderCommandEncoder_setBlendColor(
-      enc, m_blendColor.r, m_blendColor.g, m_blendColor.b, m_blendColor.a);
+    {
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setblendcolor>(
+        uint16_t(WMTMtl4RenderCommandSetBlendColor));
+      cmd->red   = m_blendColor.r;
+      cmd->green = m_blendColor.g;
+      cmd->blue  = m_blendColor.b;
+      cmd->alpha = m_blendColor.a;
+    }
 
     /* rasterizer: cull / winding / depth-bias (fill mode + depth-clip use the
      * Metal defaults — no MTL4 bridge setter, and D3D9 default is Fill/Clip). */
-    MTL4RenderCommandEncoder_setCullMode(enc, WMTCullMode(m_rasterizer.cullMode));
-    MTL4RenderCommandEncoder_setFrontFacingWinding(enc, WMTWinding(m_rasterizer.frontFace));
-    MTL4RenderCommandEncoder_setDepthBias(
-      enc, m_depthBias.constantFactor, m_depthBias.slopeFactor, m_depthBias.clamp);
+    {
+      auto* cull = m_cmdChunk.append<wmtcmd_mtl4_setcullmode>(
+        uint16_t(WMTMtl4RenderCommandSetCullMode));
+      cull->mode = uint64_t(WMTCullMode(m_rasterizer.cullMode));
+      auto* wind = m_cmdChunk.append<wmtcmd_mtl4_setwinding>(
+        uint16_t(WMTMtl4RenderCommandSetFrontFacingWinding));
+      wind->winding = uint64_t(WMTWinding(m_rasterizer.frontFace));
+      auto* bias = m_cmdChunk.append<wmtcmd_mtl4_setdepthbias>(
+        uint16_t(WMTMtl4RenderCommandSetDepthBias));
+      bias->bias        = m_depthBias.constantFactor;
+      bias->slope_scale = m_depthBias.slopeFactor;
+      bias->clamp       = m_depthBias.clamp;
+    }
   }
 
   // --- transfers / blits (decision 8: MTL4 compute-encoder copies) ------------
@@ -358,9 +406,13 @@ namespace dxvk::backend {
      * render/compute writes ahead of later reads across encoders; a same-
      * encoder RT->texture feedback loop is handled by re-materializing the
      * pass. If a pass is open, flush its fragment writes to device memory so
-     * an immediately following read in a fresh encoder is coherent. */
-    if (m_pass.active)
+     * an immediately following read in a fresh encoder is coherent. The
+     * batched wmtcmd stream must replay first: a DIRECT encoder call may not
+     * overtake draws still parked in the chunk. */
+    if (m_pass.active) {
+      flushCmdChunk();
       emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+    }
   }
 
   void MtlContextImpl::copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -984,9 +1036,14 @@ namespace dxvk::backend {
     if (m_visCpu)
       *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(m_visCpu) + q->slotOffset) = 0u;
 
-    if (m_pass.active)
-      MTL4RenderCommandEncoder_setVisibilityResultMode(
-        m_pass.encoder, uint32_t(WMTVisibilityResultModeCounting), q->slotOffset);
+    /* Rides the wmtcmd stream so it stays ordered against the batched draws
+     * it brackets (a direct call here would overtake them). */
+    if (m_pass.active) {
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
+        uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
+      cmd->mode   = uint64_t(WMTVisibilityResultModeCounting);
+      cmd->offset = q->slotOffset;
+    }
   }
 
   void MtlContextImpl::endQuery(const Rc<MtlQuery>& query) {
@@ -997,9 +1054,13 @@ namespace dxvk::backend {
     q->serial  = m_currentSerial;
     q->tracker = &m_device->submissions();
 
-    if (m_pass.active)
-      MTL4RenderCommandEncoder_setVisibilityResultMode(
-        m_pass.encoder, uint32_t(WMTVisibilityResultModeDisabled), 0u);
+    /* Same stream-ordering rule as beginQuery. */
+    if (m_pass.active) {
+      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
+        uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
+      cmd->mode   = uint64_t(WMTVisibilityResultModeDisabled);
+      cmd->offset = 0u;
+    }
   }
 
   void MtlContextImpl::writeTimestamp(const Rc<MtlQuery>& query) {

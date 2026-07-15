@@ -33,6 +33,13 @@
  *    later draw-state writes never mutate a table an earlier encoded draw may
  *    still read.
  *    Textures/samplers bind via setTexture(gpuResourceID)/setSamplerState.
+ *    ALL of these per-draw writes (table slots, dynamic state, the draw)
+ *    are appended as wmtcmd_mtl4_* structs into a CmdChunk and replayed
+ *    unix-side in ONE MTL4RenderCommandEncoder_encodeCommands crossing per
+ *    pass (or per arena cap) — never one thunk call per operation. Batching
+ *    only moves the writes into the stream; the rotation contract holds
+ *    because the replay writes table N's slots before the draw that binds
+ *    table N, and N is not reused until its serial retires.
  *
  * 4. Residency + keep-alive. Residency lives entirely in the device's
  *    MtlResidencyTracker (mtl_residency.h): every driver-created allocation
@@ -78,6 +85,7 @@
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_presenter.h"
 
+#include "mtl_cmd_chunk.h"
 #include "mtl_device_impl.h"
 #include "mtl_pso_cache.h"
 
@@ -229,6 +237,11 @@ namespace dxvk::backend {
      * D3D9SharedPushData block (matches DXVK MaxSharedPushDataSize). Per-stage
      * push blocks (vs/ffvs/ffps) start immediately after. */
     static constexpr uint32_t kPushSharedBlockSize = 32u;
+    /* Mid-pass wmtcmd flush cap: bounds the PE-side arena (CmdChunk blocks
+     * never shrink) at ~a few hundred draws per crossing. Flushing at a
+     * command boundary is order-preserving, so the cap is purely a memory
+     * knob, not a correctness one. */
+    static constexpr size_t kCmdChunkFlushBytes = 1u << 20;
 
     // --- per-stage bound state (flat D3D9 slot model) ----------------------
     struct StageBindings {
@@ -288,6 +301,15 @@ namespace dxvk::backend {
 
     WmtCommandBuffer   m_cmdbuf;       // open MTL4 command buffer (fresh/recording)
     PendingPass        m_pass;
+
+    /* Per-pass wmtcmd batch (mtl_cmd_chunk.h): the draw hot path appends
+     * wmtcmd_mtl4_* structs here instead of crossing the PE->unix boundary
+     * per encoder call; flushCmdChunk() replays the batch into m_pass.encoder
+     * in ONE MTL4RenderCommandEncoder_encodeCommands crossing. INVARIANT:
+     * non-empty only while a pass is open — flushed at closePass, at the
+     * arena cap (prepareDraw), and before any DIRECT call on the pass
+     * encoder (emitGraphicsBarrier), so stream and direct ops stay ordered. */
+    CmdChunk           m_cmdChunk;
 
     /* 3-deep MTL4CommandAllocator ring: rotate per frame, reset the slot we
      * are about to reuse (>= imageCount frames old, so GPU-idle). */
@@ -357,7 +379,15 @@ namespace dxvk::backend {
     void ensureCommandBuffer();        // begin MTL4 cmdbuf on the current allocator
     void materializePass();            // open MTL4 render encoder, fold clears
     void flushPendingClears();         // materialize folded clears with no draw
-    void closePass();                  // endEncoding + release encoder
+    void closePass();                  // flush wmtcmd batch, endEncoding + release
+    void flushCmdChunk();              // replay + recycle the batched wmtcmd stream
+
+    /* wmtcmd appenders for the argument-table hot path (one struct each;
+     * table handle rides in the command — MTL4ArgumentTable is not an
+     * encoder object, so table writes and draws share one ordered stream). */
+    void appendTableAddress(obj_handle_t table, uint64_t gpuAddress, uint32_t index);
+    void appendTableTexture(obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
+    void appendTableSampler(obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO
     ArgTablePair createArgumentTablePair() const;
