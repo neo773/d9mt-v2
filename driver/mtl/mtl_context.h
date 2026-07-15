@@ -156,6 +156,11 @@ namespace dxvk {
     // §6.4: stride is baked into the Metal vertex descriptor => part of the PSO
     //       memo key. A stride change marks the render PSO dirty; a binding change
     //       alone does not.
+    // Buffer binds take PHYSICAL references: the slice's storage snapshot
+    // (captured at record time) is what draws resolve — the live buffer is
+    // never consulted, so an app-thread Discard rename cannot retarget
+    // already-recorded draws. A rename reaches a still-bound slice only via
+    // invalidateBuffer's CS-time refresh, in command order.
     virtual void bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride);
     virtual void bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride);
     virtual void bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type);
@@ -203,7 +208,10 @@ namespace dxvk {
     // --- init / upload / discard (§1h, contracts 3a,3c,3g) -----------------
     virtual void initBuffer(const Rc<MtlBuffer>& buffer);                        // zero-fill
     virtual void initImage(const Rc<MtlTexture>& image);                        // clear-to-black
-    virtual void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice); // (!) discard/rename ring
+    // (!) Discard/rename commit point, ordered against draws by the command
+    // stream: retargets still-bound slices of `buffer` to its new storage and
+    // retires the OLD backing (recycle pool once its serial completes).
+    virtual void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice);
     virtual void uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                       const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size);
     virtual bool ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage);   // realloc+blit if needed

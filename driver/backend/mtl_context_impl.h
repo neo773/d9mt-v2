@@ -151,6 +151,7 @@ namespace dxvk::backend {
     void setDepthBounds(MtlDepthBounds bounds) override;
 
     void bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) override;
+    void bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride) override;
     void bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) override;
     void bindUniformBuffer(MtlStageMask stages, uint32_t slot, MtlBufferSlice&& slice) override;
     void bindUniformBufferRange(MtlStageMask stages, uint32_t slot,
@@ -283,6 +284,12 @@ namespace dxvk::backend {
      * multiple encoded draws races under Metal 4's overlapping execution. */
     std::vector<ArgTablePair> m_argTables;
     uint32_t                 m_argTableCursor = 0u;
+
+    /* DIAG (observers): draws whose bound slice snapshot diverged from the
+     * buffer's live storage at flush time — the recorded-vs-live retargeting
+     * bug class; must stay 0 with in-order renames + refresh. */
+    uint64_t s_diagVbStale  = 0u;
+    uint64_t s_diagCbvStale = 0u;
     uint32_t                 m_currentArgTable = 0u;
 
     uint32_t           m_dirty = DirtyEverything;

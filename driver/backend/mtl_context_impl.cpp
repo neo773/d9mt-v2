@@ -153,7 +153,11 @@ namespace dxvk::backend {
       if (v && std::strcmp(v, "trigger") == 0) {
         s_gpuCaptureTrigger = true;
         s_gpuCaptureRemaining = 0;
-        Logger::info("D9MT-GPUCAPTURE armed (touch C:\\d9mt-test\\GPUCAP)");
+        const char* n = std::getenv("D9MT_GPUCAPTURE_COMMITS");
+        if (n && *n && std::atoi(n) > 0)
+          s_gpuCaptureCommits = std::atoi(n);
+        Logger::info(str::format("D9MT-GPUCAPTURE armed (touch C:\\d9mt-test\\GPUCAP, ",
+          s_gpuCaptureCommits, " commits)"));
       } else {
         s_gpuCaptureRemaining = (v && *v) ? std::atoi(v) : -1;
         if (s_gpuCaptureRemaining > 0)
@@ -228,6 +232,15 @@ namespace dxvk::backend {
 
     m_cmdbuf.reset();
     m_dirty = DirtyEverything;
+
+    /* Reclaim completed work on every submission, not only at endFrame:
+     * load phases submit without presenting for long stretches, and memory
+     * (retired backings, ring chunks, residency entries) must retire on the
+     * submission cadence or it piles up until present resumes. */
+    const uint64_t completed = m_device->submissions().completedSerial();
+    m_device->submissions().processRetirements();
+    m_device->residency().serialRetired(completed);
+    m_device->uploadRing().onComplete(completed);
   }
 
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
@@ -254,7 +267,9 @@ namespace dxvk::backend {
     m_device->residency().serialRetired(completed);
     m_device->uploadRing().onComplete(completed);
 
-    /* DIAG: per-frame growth watch (leak instrumentation; observers only). */
+    /* DIAG: per-frame growth watch (leak instrumentation; observers only).
+     * bufNew/bufRename/bufRecycle/imgNew attribute residency churn to its
+     * creation source (cumulative device counters). */
     static uint64_t s_diagFrame = 0u;
     if ((++s_diagFrame & 0xFFu) == 0u) {
       Logger::info(str::format("DIAG frame=", s_diagFrame,
@@ -265,7 +280,13 @@ namespace dxvk::backend {
         " argTables=", m_argTables.size(),
         " retirements=", m_device->submissions().retirementCount(),
         " serial=", m_device->submissions().lastSubmittedSerial(),
-        " completed=", completed));
+        " completed=", completed,
+        " bufNew=", m_device->diagBuffersCreated(),
+        " bufRename=", m_device->diagBuffersRenamed(),
+        " bufRecycle=", m_device->diagBuffersRecycled(),
+        " imgNew=", m_device->diagImagesCreated(),
+        " vbStale=", s_diagVbStale,
+        " cbvStale=", s_diagCbvStale));
     }
   }
 
@@ -602,6 +623,23 @@ namespace dxvk::backend {
     m_dirty |= DirtyVertexBuffers;
   }
 
+  void MtlContextImpl::bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride) {
+    /* SetStreamSource fast path: same logical buffer, new offset/stride
+     * (D3D9 dynamic-VB append pattern — one bind, per-element offsets).
+     * Rebase within the slice's captured backing; a Discard rename between
+     * range updates retargets the binding through invalidateBuffer's
+     * CS-ordered refresh, same as the full-bind path. */
+    auto& stream = m_vertexStreams[binding];
+    if (!stream.slice.defined())
+      return;                            /* range update with nothing bound */
+    if (stream.stride != stride)
+      m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
+    stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
+                                  offset, length);
+    stream.stride = stride;
+    m_dirty |= DirtyVertexBuffers;
+  }
+
   void MtlContextImpl::bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) {
     m_indexBuffer = std::move(slice);
     m_indexType = type;
@@ -634,6 +672,13 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::bindTexture(MtlStageMask stages, uint32_t slot, Rc<MtlTextureView>&& view) {
+    /* Stage tables have 16 slots. Internal slot 16 (the FF DMAP sampler) has
+     * no Metal table slot — drop it rather than write past the array. */
+    if (unlikely(slot >= m_bindings[0].textures.size())) {
+      static bool warned = false;
+      if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped texture bind beyond stage table (DMAP?)"); }
+      return;
+    }
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s))
         m_bindings[s].textures[slot] = view;
@@ -642,6 +687,11 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) {
+    if (unlikely(slot >= m_bindings[0].samplers.size())) {
+      static bool warned = false;
+      if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped sampler bind beyond stage table (DMAP?)"); }
+      return;
+    }
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s))
         m_bindings[s].samplers[slot] = sampler;
@@ -689,19 +739,20 @@ namespace dxvk::backend {
   void MtlContextImpl::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
     if (!prepareDraw())
       return;
-    const Rc<MtlBuffer>& ib = m_indexBuffer.buffer();
-    if (ib == nullptr)
+    /* Record-time snapshot (MtlBufferSlice contract): index fetch resolves
+     * through the slice's captured backing, never the live buffer. */
+    if (m_indexBuffer.storage() == nullptr)
       return;
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
 
     for (uint32_t i = 0; i < count; i++) {
-      uint64_t byteOffset = m_indexBuffer.offset() + uint64_t(args[i].firstIndex) * idxSize;
-      uint64_t gpuAddr    = ib->gpuAddress(byteOffset);
+      uint64_t indexOffset = uint64_t(args[i].firstIndex) * idxSize;
+      uint64_t gpuAddr     = m_indexBuffer.gpuAddress(indexOffset);
       /* MTL4 rule: indexBufferLength is the accessible byte range from the
        * given GPU address (to the end of the backing allocation). */
-      uint64_t accessible = ib->size > byteOffset ? ib->size - byteOffset : 0u;
+      uint64_t accessible  = m_indexBuffer.addressableLength(indexOffset);
       MTL4RenderCommandEncoder_drawIndexedPrimitives(
         m_pass.encoder,
         wmtPrimitive(m_topology),
@@ -730,6 +781,20 @@ namespace dxvk::backend {
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();
     m_pass.encodedDraws++;
+
+    /* GPU-use stamp (MtlResource contract): every buffer this draw fetches
+     * is busy until the recording command buffer's serial completes. This
+     * is what makes D3D9DeviceEx::WaitForResource a serial compare instead
+     * of a full GPU drain. Stamped per draw, not per bind — bindings
+     * persist across submissions, so a bind-time stamp would go stale and
+     * let a Lock overwrite vertex memory a later cmdbuf still reads. */
+    for (auto& stream : m_vertexStreams) {
+      if (stream.slice.defined() && stream.slice.buffer() != nullptr)
+        stream.slice.buffer()->setTrackingSerial(m_currentSerial);
+    }
+    if (m_indexBuffer.defined() && m_indexBuffer.buffer() != nullptr)
+      m_indexBuffer.buffer()->setTrackingSerial(m_currentSerial);
+
     /* all folded state is now bound on the encoder / argument tables; the
      * next draw only re-flushes what changes (ring slices already snapshot). */
     m_dirty = 0u;
