@@ -1,0 +1,88 @@
+driver/d3d9/d3d9_shader_compiler.cpp
+  s_7dbe732fc82eb5::t_a813726b88049c 1302-1305,1310-1311
+  s_7dbe732fc82eb5::t_a3cc9a0627ab49 1362-1364,1372,1374-1404,1406,1408-1409
+airlib/unix.cpp
+  s_7dbe732fc82eb5::t_97c969fe4686b0 72-73,79,84-85,87-91,97-98,102-104,114-115
+  s_7dbe732fc82eb5::t_b0f58509327c5c 48
+docs/PERF_ROADMAP.md
+  s_7dbe732fc82eb5::t_21925f2e10366a 33-64
+air/air_builder.h
+  s_7dbe732fc82eb5::t_6b605da18c6d31 118-119,121
+  s_7dbe732fc82eb5::t_7a87ec4b15e2a0 91-98,101-103
+  s_7dbe732fc82eb5::t_3484f47502ebad 171
+  s_7dbe732fc82eb5::t_53710271efecef 64-69,73-74
+  s_7dbe732fc82eb5::t_36332d6f92b76d 75
+  s_7dbe732fc82eb5::t_118d10417092a5 104
+driver/backend/mtl_context_impl.cpp
+  s_7dbe732fc82eb5::t_c880d6c4602397 989,996-1002
+  s_7dbe732fc82eb5::t_530b458d79ca85 990-995
+  s_7dbe732fc82eb5::t_a43b49e84f0ec3 506,508-509
+  s_7dbe732fc82eb5::t_9e234d0b8ae39d 796-799,802-803,806,809-810,819,822-823,826,829-830
+  s_7dbe732fc82eb5::t_199a40d683a80f 628-633,635-638,645-648,655-656,662-666
+  s_7dbe732fc82eb5::t_c653d95964bfa0 880-884
+  s_7dbe732fc82eb5::t_b817c5c5375f8f 915-918
+  s_7dbe732fc82eb5::t_e229772b42e6da 671-672,678-679,685-686,692-696,701-702,708-709,715-716
+driver/mtl/mtl_context.h
+  s_7dbe732fc82eb5::t_ce936054a172d2 5
+  s_7dbe732fc82eb5::t_da8246a1b4d789 65-66,68-81
+driver/backend/mtl_context_impl.h
+  s_7dbe732fc82eb5::t_e08f12ec46271d 427
+  s_7dbe732fc82eb5::t_323a2d74d3451f 302-306
+  s_7dbe732fc82eb5::t_4bc657e47bc565 247-251
+  s_7dbe732fc82eb5::t_e97a6bb990b086 257-262
+  s_7dbe732fc82eb5::t_a4840e8ba8c5a4 307-312
+  s_7dbe732fc82eb5::t_21c963bedb26bb 410-426,428
+driver/d3d9/d3d9_shader.h
+  s_7dbe732fc82eb5::t_c6b5fc1f84da78 65-78
+airlib/d9mtair.h
+  s_7dbe732fc82eb5::t_ef8f499fb3bd99 98-99,103-105,108-109,113-117,119
+  s_7dbe732fc82eb5::t_1163f18f572e0e 19
+  s_7dbe732fc82eb5::t_993035f1c5b146 38-43
+air/air_builder.cpp
+  s_7dbe732fc82eb5::t_3993d301871820 734-736,745-771,794-824
+  s_7dbe732fc82eb5::t_0208ebc43aeea6 190
+  s_7dbe732fc82eb5::t_d1efb8e06bee98 963-979
+  s_7dbe732fc82eb5::t_399bf94ce1ea54 87,98,108
+  s_7dbe732fc82eb5::t_39049c25a53bd7 890,2175-2249
+  s_7dbe732fc82eb5::t_503ae7047a7c67 1461-1462,1466-1472
+  s_7dbe732fc82eb5::t_b6c7e201ffb36d 2557,2567,2572-2576
+  s_7dbe732fc82eb5::t_33247257809f81 167-177,179-180
+  s_7dbe732fc82eb5::t_f70733488d972f 651-691
+  s_7dbe732fc82eb5::t_1aa81abb5355b0 178
+  s_7dbe732fc82eb5::t_91008bce8ae1cf 531-545
+  s_7dbe732fc82eb5::t_0d72d0d6506304 1898-1920,1924-1939
+  s_7dbe732fc82eb5::t_30f9122e9fd8cb 2331-2348,2350-2382
+  s_7dbe732fc82eb5::t_005d0c0251bfcf 863-864,878-889
+  s_7dbe732fc82eb5::t_491f626001c8e4 920,936
+  s_7dbe732fc82eb5::t_3170a618910925 891
+air/tools/air_compiler.cpp
+  s_7dbe732fc82eb5::t_67af9dbfa4e070 295-296
+  s_7dbe732fc82eb5::t_491f5859875f17 55-56
+  s_7dbe732fc82eb5::t_6a48281f9adc18 387
+driver/backend/mtl_context_impl2.cpp
+  s_7dbe732fc82eb5::t_95764a0c3618b6 451-456,459-461,488-497,502-514,518-520
+  s_7dbe732fc82eb5::t_6ef5978e71f7c2 308
+  s_7dbe732fc82eb5::t_2bbf305aa023c6 166-172
+  s_7dbe732fc82eb5::t_ec02788a91edae 253-257
+  s_7dbe732fc82eb5::t_189913682f6206 291-299
+  s_7dbe732fc82eb5::t_cfc12c19adf164 300-307,309-372
+  s_7dbe732fc82eb5::t_eb5eade0cd8c35 373
+driver/d3d9/d3d9_shader.cpp
+  s_7dbe732fc82eb5::t_2f180cef349b19 23-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8432d36536c1ecb1a363083fe6e52d625430eae3",
+  "prompts": {},
+  "sessions": {
+    "s_7dbe732fc82eb5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0bd56eff-aee5-4574-9393-c28614ad25f2",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
