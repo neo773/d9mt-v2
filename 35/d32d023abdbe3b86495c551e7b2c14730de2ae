@@ -1,0 +1,43 @@
+driver/backend/mtl_context_impl2.cpp
+  s_4f41b3463432c4::t_564d13b3b0d7bc 9-13
+  s_4f41b3463432c4::t_9ec077aff48085 478-494,499-510,512-515,517-520,636-814
+  s_4f41b3463432c4::t_eb0f1e00330950 511,516,521-635
+  s_4f41b3463432c4::t_36148cb81e3bf4 495-498
+driver/backend/shaders/mtl_blit.metal
+  s_4f41b3463432c4::t_3ff44e2d65f041 39-46
+  s_4f41b3463432c4::t_92481c5a47140d 1-13,16-38
+  s_4f41b3463432c4::t_05cfea54f82f65 14-15
+driver/backend/mtl_context_impl.h
+  s_4f41b3463432c4::t_676f6548f149ed 168-169
+  s_4f41b3463432c4::t_9e0c8fbe318cd9 344
+  s_4f41b3463432c4::t_011348d8f99f8c 368-370
+  s_4f41b3463432c4::t_c7d09e6c2d57d3 258-266
+  s_4f41b3463432c4::t_fe2010eeca2bea 339-343,345-349
+driver/d3d9/d3d9_device.cpp
+  s_4f41b3463432c4::t_5add3526303351 1708-1713
+driver/backend/mtl_blit_metallib.h
+  s_4f41b3463432c4::t_16f7ee2a14b567 1-5,13-14,19-30,32-33,46-49,51-52,54-66,71-100,416-446,448,451,453,455-510,512-513,518-542,554,617,619,653-654,656-658,661,707-737,746-800,802-803,805,808-847,944-946
+  s_4f41b3463432c4::t_03ddb3dea6c56d 6-12,15-18,31,34-45,50,53,67-70,101-415,447,449-450,452,454,511,514-517,543-553,555-616,618,620-652,655,659-660,662-706,738-745,801,804,806-807,848-943
+driver/d3d9/d3d9_initializer.cpp
+  s_4f41b3463432c4::t_f0eef0d1bd83ae 54-62,64
+driver/backend/mtl_context_impl.cpp
+  s_4f41b3463432c4::t_28ce484d466604 329-336
+scripts/build-driver.sh
+  s_4f41b3463432c4::t_d8091e460ace2d 112-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "35d32d023abdbe3b86495c551e7b2c14730de2ae",
+  "prompts": {},
+  "sessions": {
+    "s_4f41b3463432c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7abdd841-8c23-402a-adbc-8997f62f0c9b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
