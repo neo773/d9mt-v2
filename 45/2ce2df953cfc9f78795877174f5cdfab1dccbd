@@ -1,0 +1,30 @@
+scripts/build-driver.sh
+  s_4f41b3463432c4::t_57c995d28a9538 217-218
+  s_4f41b3463432c4::t_0f9d36673042f9 282-283,286-288,290-292,295-296
+  s_4f41b3463432c4::t_f80cd73775132f 151-161,168
+  s_4f41b3463432c4::t_42b018e165d686 162-167
+  s_4f41b3463432c4::t_7b188a5d518ce9 289
+driver/backend/mtl_instrument.cpp
+  s_4f41b3463432c4::t_e5d601e69631b4 64-65
+  s_4f41b3463432c4::t_34fbfb7d19d3b7 1-63,66-103,105-136,138-161,163-228,237-238
+  s_4f41b3463432c4::t_f959b6f4327fa9 137
+  s_4f41b3463432c4::t_70faf9fb58ed1f 104
+  s_4f41b3463432c4::t_f262e99345a226 162
+  s_4f41b3463432c4::t_56f422255d895f 229-236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "452ce2df953cfc9f78795877174f5cdfab1dccbd",
+  "prompts": {},
+  "sessions": {
+    "s_4f41b3463432c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7abdd841-8c23-402a-adbc-8997f62f0c9b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
