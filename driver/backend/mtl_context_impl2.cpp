@@ -169,9 +169,17 @@ namespace dxvk::backend {
   // Every write below is APPENDED to m_cmdChunk, not thunked: the table
   // handle rides in the command, so the replayed stream writes table N's
   // slots strictly before the draw that binds table N — one PE->unix
-  // crossing per batch instead of ~90 per draw.
+  // crossing per batch instead of ~90 per draw. Each appender diffs the
+  // desired value against the table's shadow (ArgTableShadow, header) and
+  // appends only on change: a skipped write leaves the persistent table
+  // holding the exact value we would have written, so the draw reads the
+  // correct resource either way. GTA-shaped streams (one texture rebound,
+  // everything else stable) collapse from ~90 structs/draw to a handful.
 
-  void MtlContextImpl::appendTableAddress(obj_handle_t table, uint64_t gpuAddress, uint32_t index) {
+  void MtlContextImpl::appendTableAddress(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuAddress, uint32_t index) {
+    if (shadow.bufferGpuAddress[index] == gpuAddress)
+      return;                     /* table already holds this address (incl. null==null) */
+    shadow.bufferGpuAddress[index] = gpuAddress;
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setaddress>(
       uint16_t(WMTMtl4RenderCommandTableSetAddress));
     cmd->table       = table;
@@ -179,7 +187,10 @@ namespace dxvk::backend {
     cmd->index       = index;
   }
 
-  void MtlContextImpl::appendTableTexture(obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+  void MtlContextImpl::appendTableTexture(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+    if (shadow.textureId[index] == gpuResourceId)
+      return;
+    shadow.textureId[index] = gpuResourceId;
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setresource>(
       uint16_t(WMTMtl4RenderCommandTableSetTexture));
     cmd->table           = table;
@@ -187,7 +198,10 @@ namespace dxvk::backend {
     cmd->index           = index;
   }
 
-  void MtlContextImpl::appendTableSampler(obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+  void MtlContextImpl::appendTableSampler(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index) {
+    if (shadow.samplerId[index] == gpuResourceId)
+      return;
+    shadow.samplerId[index] = gpuResourceId;
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_table_setresource>(
       uint16_t(WMTMtl4RenderCommandTableSetSamplerState));
     cmd->table           = table;
@@ -196,7 +210,9 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushVertexBuffers() {
-    obj_handle_t table = m_argTables[m_currentArgTable].table[0].handle();
+    ArgTablePair&   pair   = m_argTables[m_currentArgTable];
+    obj_handle_t    table  = pair.table[0].handle();
+    ArgTableShadow& shadow = pair.shadow[0];
     for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
       VertexStream& s = m_vertexStreams[i];
       /* Record-time snapshot (MtlBufferSlice contract): the slice's captured
@@ -206,7 +222,7 @@ namespace dxvk::backend {
        * order. The gpuAddress is snapshotted into the command at append
        * time; the replay resolves nothing. */
       if (!s.slice.defined() || s.slice.storage() == nullptr) {
-        appendTableAddress(table, 0u, kVertexBufferBaseIndex + i);
+        appendTableAddress(shadow, table, 0u, kVertexBufferBaseIndex + i);
         continue;
       }
       /* DIAG: with in-order flow the bound snapshot must equal the buffer's
@@ -214,14 +230,16 @@ namespace dxvk::backend {
        * divergence here is the recorded-vs-live retargeting bug class. */
       if (unlikely(s.slice.storage() != s.slice.buffer()->storage()))
         s_diagVbStale++;
-      appendTableAddress(table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
+      appendTableAddress(shadow, table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
     }
   }
 
   void MtlContextImpl::flushResources() {
+    ArgTablePair& pair = m_argTables[m_currentArgTable];
     for (uint32_t st = 0u; st < 2u; st++) {
-      StageBindings& b = m_bindings[st];
-      obj_handle_t table = m_argTables[m_currentArgTable].table[st].handle();
+      StageBindings&  b      = m_bindings[st];
+      obj_handle_t    table  = pair.table[st].handle();
+      ArgTableShadow& shadow = pair.shadow[st];
 
       /* The bound shader for this stage carries the CbvIndex -> AIR Metal
        * buffer-slot map (reflection-derived, SOURCE_OF_TRUTH §4b bug 1). The
@@ -246,12 +264,12 @@ namespace dxvk::backend {
          * Discard) retarget this binding via invalidateBuffer's refresh. */
         if (!cbv.slice.defined() || cbv.slice.storage() == nullptr
          || uintptr_t(cbv.slice.storage().ptr()) < 0x10000u) {
-          appendTableAddress(table, 0u, uint32_t(airSlot));
+          appendTableAddress(shadow, table, 0u, uint32_t(airSlot));
           continue;
         }
         if (unlikely(cbv.slice.storage() != cbv.slice.buffer()->storage()))
           s_diagCbvStale++;
-        appendTableAddress(table, cbv.slice.gpuAddress(cbv.rangeOffset),
+        appendTableAddress(shadow, table, cbv.slice.gpuAddress(cbv.rangeOffset),
           uint32_t(airSlot));
       }
 
@@ -259,26 +277,30 @@ namespace dxvk::backend {
        * unbound slot must be CLEARED, not skipped — the argument table persists
        * across draws, so a stale binding (often a recycled dynamic/UP buffer)
        * would leak into a later draw that samples that slot -> flicker/ghosting
-       * in multi-draw scenes (single-draw static tests never expose it). */
+       * in multi-draw scenes (single-draw static tests never expose it). The
+       * clear is a 0-write diffed like any other: the shadow mirrors the
+       * table's actual contents, so a slot that is already null (the common
+       * case — most of the 16 slots are never bound) appends nothing, while a
+       * newly-unbound slot still gets its clear. */
       for (uint32_t slot = 0u; slot < b.textures.size(); slot++) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr) {
-          appendTableTexture(table, 0u, slot);
+          appendTableTexture(shadow, table, 0u, slot);
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-        appendTableTexture(table, tv->gpuResourceId, slot);
+        appendTableTexture(shadow, table, tv->gpuResourceId, slot);
       }
 
       /* samplers: setSamplerState by MTLResourceID. */
       for (uint32_t slot = 0u; slot < b.samplers.size(); slot++) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
         if (sampler == nullptr) {
-          appendTableSampler(table, 0u, slot);
+          appendTableSampler(shadow, table, 0u, slot);
           continue;
         }
         auto* sp = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
-        appendTableSampler(table, sp->gpuResourceId, slot);
+        appendTableSampler(shadow, table, sp->gpuResourceId, slot);
       }
 
       /* push data -> fresh UploadRing slice at the push slot (snapshot
@@ -297,7 +319,7 @@ namespace dxvk::backend {
         }
         b.pushDirtyLo = b.pushDirtyHi = 0u;
       }
-      appendTableAddress(table, b.pushGpuAddress, kPushConstantIndex);
+      appendTableAddress(shadow, table, b.pushGpuAddress, kPushConstantIndex);
     }
   }
 
@@ -978,16 +1000,25 @@ namespace dxvk::backend {
       return;
     ensureCommandBuffer();
 
+    /* The retargeted gpuAddress must reach the NEXT draw's table writes: the
+     * per-draw binding flush is gated on these dirty bits (prepareDraw), so a
+     * silent refresh without them would leave the old backing bound. (The
+     * index buffer needs no bit — its address is read live per drawIndexed,
+     * not through an argument table.) */
     for (auto& stream : m_vertexStreams) {
-      if (stream.slice.buffer() == buffer)
+      if (stream.slice.buffer() == buffer) {
         stream.slice.refreshStorage();
+        m_dirty |= DirtyVertexBuffers;
+      }
     }
     if (m_indexBuffer.buffer() == buffer)
       m_indexBuffer.refreshStorage();
     for (uint32_t st = 0u; st < 2u; st++) {
       for (auto& cbv : m_bindings[st].cbvs) {
-        if (cbv.slice.buffer() == buffer)
+        if (cbv.slice.buffer() == buffer) {
           cbv.slice.refreshStorage();
+          m_dirty |= DirtyResources;
+        }
       }
     }
 

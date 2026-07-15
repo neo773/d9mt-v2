@@ -197,6 +197,16 @@ namespace dxvk::backend {
      * (batched in the tracker; commits only when dirty). */
     m_device->residency().beforeSubmit();
 
+    /* One commit per command buffer, DELIBERATELY unbatched (the bridge
+     * signature takes an array). Every intra-frame submit is driven by
+     * D3D9DeviceEx::ExecuteFlush, which signals the submission and
+     * staging-buffer fences under this cmdbuf's serial immediately before
+     * flushing — app threads block on those fences (flush throttle, staging
+     * budget) and on query polls (MtlBackendQuery::getData) keyed to this
+     * serial. Deferring the commit to a later flush point would turn each of
+     * those waits into a stall bounded only by whoever eventually flushes
+     * (the retirement pump has no commit hook), a mid-frame latency
+     * regression that dwarfs the few saved queue crossings per frame. */
     obj_handle_t cb = m_cmdbuf.handle();
     gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), &cb, 1u);
@@ -814,10 +824,25 @@ namespace dxvk::backend {
 
     if ((m_dirty & DirtyPso) && !resolvePso())
       return false;
-    selectArgumentTablesForDraw();
-    bindArgumentTables();
-    flushVertexBuffers();
-    flushResources();
+
+    /* Binding flush, gated per draw: when NO binding-shaped state changed
+     * since the previous draw (every mutation funnels into these bits —
+     * the bind and pushData setters set them, invalidateBuffer's retarget
+     * sets them, and
+     * pass/cmdbuf/blit boundaries set DirtyEverything), the argument tables
+     * bound on the encoder still hold exactly the current logical bindings:
+     * skip rotation and every table write. Safe against in-flight readers
+     * because skipping writes nothing — tables are only ever written right
+     * after selectArgumentTablesForDraw hands out a retired (or fresh) one.
+     * DirtyPso participates because the CBV AIR-slot map is shader-derived
+     * (flushResources translates through fn->cbvSlotMap). On the dirty path
+     * the rotated-in table is diff-written per slot (ArgTableShadow). */
+    if (m_dirty & (DirtyPso | DirtyVertexBuffers | DirtyResources | DirtyPush)) {
+      selectArgumentTablesForDraw();
+      bindArgumentTables();
+      flushVertexBuffers();
+      flushResources();
+    }
     if (m_dirty & (DirtyViewport | DirtyDepthStencil | DirtyBlendColor
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();

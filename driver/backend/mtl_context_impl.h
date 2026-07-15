@@ -40,6 +40,13 @@
  *    only moves the writes into the stream; the rotation contract holds
  *    because the replay writes table N's slots before the draw that binds
  *    table N, and N is not reused until its serial retires.
+ *    Table writes are per-slot dirty-diffed: argument tables are persistent
+ *    objects, so a rotated-in table still holds whatever was last written to
+ *    it — each pair carries a shadow of its contents (ArgTableShadow) and
+ *    only slots whose value differs are re-appended. Draws with NO
+ *    binding-shaped dirty state skip rotation and table writes entirely
+ *    (prepareDraw gate): the currently bound tables already hold the exact
+ *    logical bindings and, being unwritten, cannot race in-flight readers.
  *
  * 4. Residency + keep-alive. Residency lives entirely in the device's
  *    MtlResidencyTracker (mtl_residency.h): every driver-created allocation
@@ -264,8 +271,37 @@ namespace dxvk::backend {
       uint64_t pushGpuAddress = 0u;
     };
 
+    /* Shadow of one argument table's PERSISTENT contents — the value the
+     * replayed stream last wrote to each slot. Tables are created with
+     * initialize_bindings=1, so a zero-initialized shadow exactly mirrors a
+     * fresh table. flushVertexBuffers/flushResources diff each desired slot
+     * value against this and append ONLY slots that differ.
+     *
+     * Correctness is value-based: the table stores raw gpuAddress /
+     * MTLResourceID values, and a skipped write leaves the table holding the
+     * exact value we would have written — the GPU dereferences the same
+     * address/id either way, so a slot the shader reads always holds the
+     * correct resource at draw time, whether written this draw or surviving
+     * from a prior write to this same physical table. This also subsumes the
+     * unbound-slot clear invariant (a stale binding must never leak into a
+     * later draw that reads that slot): null is a value like any other — a
+     * slot that WAS non-null and is now unbound diffs to a 0-write; a slot
+     * that is already null is not re-cleared.
+     *
+     * The shadow is exact only because (a) these tables are written
+     * EXCLUSIVELY through the appendTable* helpers (the blit path has its own
+     * pool), and (b) every appended write is replayed (flushCmdChunk) before
+     * any draw that follows it in the stream — the chunk is never dropped
+     * unreplayed. */
+    struct ArgTableShadow {
+      std::array<uint64_t, 31> bufferGpuAddress = { };
+      std::array<uint64_t, 16> textureId = { };
+      std::array<uint64_t, 16> samplerId = { };
+    };
+
     struct ArgTablePair {
-      std::array<WmtArgTable, 2> table;
+      std::array<WmtArgTable, 2>    table;
+      std::array<ArgTableShadow, 2> shadow;  // [vertex, fragment] table contents
       uint64_t serial = 0u;   // submission serial of this pair's last use
     };
 
@@ -384,10 +420,14 @@ namespace dxvk::backend {
 
     /* wmtcmd appenders for the argument-table hot path (one struct each;
      * table handle rides in the command — MTL4ArgumentTable is not an
-     * encoder object, so table writes and draws share one ordered stream). */
-    void appendTableAddress(obj_handle_t table, uint64_t gpuAddress, uint32_t index);
-    void appendTableTexture(obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
-    void appendTableSampler(obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
+     * encoder object, so table writes and draws share one ordered stream).
+     * Each diffs against the table's shadow and appends only on change; the
+     * shadow is updated at append time, which matches table contents at draw
+     * time because the stream replays writes before the draws that follow
+     * them (ArgTableShadow contract). */
+    void appendTableAddress(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuAddress, uint32_t index);
+    void appendTableTexture(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
+    void appendTableSampler(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO
     ArgTablePair createArgumentTablePair() const;
