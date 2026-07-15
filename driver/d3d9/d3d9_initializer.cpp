@@ -51,8 +51,17 @@ namespace dxvk {
   void D3D9Initializer::InitTexture(
           D3D9CommonTexture* pTexture,
           void*              pInitialData) {
-    if (pTexture->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_NONE)
+    if (pTexture->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_NONE) {
+      /* GPU-only texture (render target / depth-stencil): no mapping buffer,
+       * but the Metal allocation comes up as uninitialized memory. WDDM
+       * zero-inits new video memory and D3D9 games rely on it — GTA IV's
+       * post-process accumulation targets are sampled before their first
+       * write and poison the whole frame with garbage otherwise. Zero it
+       * GPU-side (initImage clears renderable textures via a Clear pass). */
+      if (pTexture->GetImage() != nullptr)
+        InitDeviceLocalTexture(pTexture);
       return;
+    }
 
     void* mapPtr = nullptr;
 

@@ -165,6 +165,8 @@ namespace dxvk::backend {
                              MtlStageMask dstStages, MtlBarrierScope dstScope) override;
     void clearRenderTarget(const Rc<MtlTextureView>& view, MtlAspectMask clear,
                            MtlClearValue value, MtlAspectMask discard) override;
+    void clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset, MtlSize extent,
+                        MtlAspectMask aspects, MtlClearValue value) override;
 
     void draw(uint32_t count, const MtlDrawArgs* args) override;
     void drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) override;
@@ -253,6 +255,15 @@ namespace dxvk::backend {
       uint32_t stride = 0;
     };
 
+    /* Meta-blit argument table (blitTextureView): one buffer (BlitParams) +
+     * one texture + one sampler, in a DEDICATED ring so a blit never advances
+     * or rewrites the per-draw D3D9 table pool under its in-flight draws.
+     * Same retire-by-serial discipline as ArgTablePair. */
+    struct BlitArgTable {
+      WmtArgTable table;
+      uint64_t serial = 0u;   // submission serial of this table's last use
+    };
+
     struct PendingPass {
       MtlRenderTargets targets;
       bool active = false;             // encoder currently open
@@ -325,6 +336,17 @@ namespace dxvk::backend {
     void*     m_visCpu   = nullptr;
     uint64_t  m_visSlot  = 0u;         // next free 8-byte counter slot
 
+    /* Meta-blit pipeline (decision 8 / §6.6): build-time metallib
+     * (mtl_blit_metallib.h), lazily wrapped at first blitTextureView. PSOs
+     * ride m_psoCache (keyed by the blit library cookies + dst format);
+     * samplers ride the device sampler cache ([0]=Nearest, [1]=Linear). */
+    Rc<MtlShaderFunction>      m_blitVs, m_blitFs;
+    Rc<MtlShaderFunction>      m_fillFs;   /* solid-color variant (clearImageView) */
+    std::array<Rc<MtlSamplerState>, 2> m_blitSamplers;
+    bool                       m_blitInitFailed = false;
+    std::vector<BlitArgTable>  m_blitArgTables;
+    uint32_t                   m_blitArgCursor = 0u;
+
     // --- core internal flow -------------------------------------------------
     void ensureCommandBuffer();        // begin MTL4 cmdbuf on the current allocator
     void materializePass();            // open MTL4 render encoder, fold clears
@@ -342,6 +364,9 @@ namespace dxvk::backend {
 
     obj_handle_t computeEncoder();     // close pass, open a one-shot MTL4 compute encoder
     void         ensureVisBuffer();
+
+    bool         ensureBlitPipeline(); // lazy meta-blit shader/sampler init
+    obj_handle_t selectBlitArgTable(); // retired-or-fresh table from the blit ring
 
     /* Metal 4 has no driver hazard tracking (SOURCE_OF_TRUTH §4c). Emit a
      * PRODUCER queue barrier on the OUTGOING encoder before endEncoding: its

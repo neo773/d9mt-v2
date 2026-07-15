@@ -1705,22 +1705,12 @@ namespace dxvk {
         texInfo->SetNeedsMipGen(true);
     }
 
-    // D3D9 forbids a texture being sampled and used as a render target at the
-    // same time. If the surface we just bound as RT belongs to a texture that
-    // is still bound to a sampler (e.g. an RT sampled in the previous frame's
-    // composite pass), unbind it. Otherwise the feedback-loop hazard path
-    // recreates the RT image and re-dirties the framebuffer AFTER a pending
-    // Clear was folded into the pass, silently dropping the clear — the RT is
-    // then loaded, not cleared, and every frame's draw accumulates (RT
-    // feedback garbage; the GTA-shaped black/garbage-world failure).
-    if (texInfo != nullptr) {
-      if (IDirect3DBaseTexture9* rtBase = rt->GetBaseTexture()) {
-        for (uint32_t i = 0; i < m_state.textures->size(); i++) {
-          if (m_state.textures[i] == rtBase)
-            SetStateTexture(i, nullptr);
-        }
-      }
-    }
+    // NOTE: no sampler auto-unbind here. D3D9 sampler bindings persist across
+    // SetRenderTarget (apps bind a composite source once and rely on it —
+    // GTA IV's tonemap input); the RT-feedback clear-drop this once papered
+    // over is fixed at its root in the backend (bindRenderTargets flushes
+    // folded clears instead of discarding them). The read-while-bound hazard
+    // itself is expressed via the bindRenderTargets feedback mask.
 
     // Update hazards now that the RT has changed
     UpdateActiveHazardsRT(std::numeric_limits<uint32_t>::max());

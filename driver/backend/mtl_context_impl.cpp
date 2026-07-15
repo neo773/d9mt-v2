@@ -326,6 +326,14 @@ namespace dxvk::backend {
   void MtlContextImpl::bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) {
     if (m_pass.active)
       closePass();
+    else
+      flushPendingClears();
+    /* A folded, not-yet-drawn clear must EXECUTE before the pending pass is
+     * replaced — silently discarding it turned "Clear; (framebuffer
+     * re-dirtied); draw" into load=Load on stale content: every frame's draws
+     * accumulated on the previous frame's (the RT-feedback clear-drop bug,
+     * formerly papered over by unbinding sampled RTs in SetRenderTarget,
+     * which broke D3D9 sampler-state persistence instead). */
 
     m_pass = PendingPass();
     m_pass.targets = std::move(targets);

@@ -6,6 +6,11 @@
 
 #include "../util/log/log.h"
 
+// Build-time-generated: g_blitMetallib[] (backend/shaders/mtl_blit.metal
+// compiled to a .metallib by scripts/build-driver.sh) — the meta-blit
+// fullscreen-triangle pipeline behind blitTextureView.
+#include "mtl_blit_metallib.h"
+
 /*
  * mtl_context_impl2.cpp — part 2 of the METAL 4 MtlContextImpl (see
  * mtl_context_impl.h for the 9 architecture decisions). Sections: PSO resolve,
@@ -52,11 +57,6 @@ namespace dxvk::backend {
         case MtlFormat::RGB10A2Unorm: return WMTAttributeFormatUInt1010102Normalized;
         default:                      return WMTAttributeFormatFloat4;
       }
-    }
-
-    void logOnce(const char* what) {
-      static bool s_logged = false;
-      if (!s_logged) { s_logged = true; Logger::warn(what); }
     }
 
   }
@@ -475,9 +475,343 @@ namespace dxvk::backend {
     NSObject_release(enc);
   }
 
-  void MtlContextImpl::blitTextureView(const Rc<MtlTextureView>&, const MtlOffset3D[2],
-                                       const Rc<MtlTextureView>&, const MtlOffset3D[2], MtlSamplerFilter) {
-    logOnce("MtlContextImpl::blitTextureView — meta-blit pipeline unimplemented (LOW priority)");
+  bool MtlContextImpl::ensureBlitPipeline() {
+    if (m_blitVs != nullptr && m_blitFs != nullptr)
+      return true;
+    if (m_blitInitFailed)
+      return false;
+
+    /* Both entry points live in the one embedded metallib; each stage wraps
+     * its own library handle so the render-PSO cache's vs/fs cookies stay
+     * per-stage (matching every other MtlShaderFunction). */
+    m_blitVs = m_device->createShaderFunction(
+      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize));
+    if (m_blitVs != nullptr)
+      m_blitVs->entryName = "blitVsMain";
+    m_blitFs = m_device->createShaderFunction(
+      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize));
+    if (m_blitFs != nullptr)
+      m_blitFs->entryName = "blitFsMain";
+    m_fillFs = m_device->createShaderFunction(
+      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize));
+    if (m_fillFs != nullptr)
+      m_fillFs->entryName = "fillFsMain";
+
+    /* ClampToEdge: a stretched blit's edge texels must not bleed from the
+     * opposite border; no mip filtering (blit views are single-mip). Both
+     * ride the device sampler cache, alive for the device lifetime. */
+    MtlSamplerKey key = {};
+    key.addressU = key.addressV = key.addressW = MtlSamplerAddressMode::ClampToEdge;
+    key.mipMode  = MtlSamplerMipMode::None;
+    key.minFilter = key.magFilter = MtlSamplerFilter::Nearest;
+    m_blitSamplers[0] = m_device->createSampler(key);
+    key.minFilter = key.magFilter = MtlSamplerFilter::Linear;
+    m_blitSamplers[1] = m_device->createSampler(key);
+
+    if (m_blitVs == nullptr || m_blitFs == nullptr || m_fillFs == nullptr
+     || m_blitSamplers[0] == nullptr || m_blitSamplers[1] == nullptr) {
+      Logger::err("MtlContextImpl: meta-blit pipeline init failed");
+      m_blitVs = nullptr;
+      m_blitFs = nullptr;
+      m_fillFs = nullptr;
+      m_blitInitFailed = true;   /* don't retry (and re-log) per blit */
+      return false;
+    }
+    return true;
+  }
+
+  void MtlContextImpl::clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset,
+                                      MtlSize extent, MtlAspectMask aspects,
+                                      MtlClearValue value) {
+    /* D3D9 ColorFill. Color aspect only — the frontend never routes depth
+     * fills here (StretchRect/Clear own those paths). */
+    if (view == nullptr || view->image == nullptr)
+      return;
+    if (unlikely(!(aspects & MtlAspectColor))) {
+      Logger::err("MtlContextImpl::clearImageView: non-color aspect unsupported");
+      return;
+    }
+
+    const MtlExtent3D mipExtent = view->image->mipLevelExtent(view->key.baseMip);
+    const bool fullRect = offset.x == 0u && offset.y == 0u
+                       && extent.width  >= mipExtent.width
+                       && extent.height >= mipExtent.height;
+
+    if (fullRect) {
+      /* Whole subresource: a load=Clear/store=Store mini-pass (free on TBDR,
+       * and works for every renderable format) — the standalone-clear shape
+       * from clearRenderTarget, targeting the caller's view and value. */
+      PendingPass saved = std::move(m_pass);
+      m_pass = PendingPass();
+      m_pass.targets.color[0] = view;
+      m_pass.clearColor[0]    = true;
+      m_pass.clearValues[0]   = value;
+      m_pass.pending          = true;
+      materializePass();
+      closePass();
+      m_pass = std::move(saved);
+      return;
+    }
+
+    /* Partial rect: Metal load-action clears are scissor-blind, so a sub-rect
+     * fill must be a scissored solid-color draw (fillFsMain via the meta-blit
+     * table/triangle; no texture). */
+    if (!ensureBlitPipeline())
+      return;
+
+    uint32_t x1 = std::min(offset.x + extent.width,  mipExtent.width);
+    uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
+    if (offset.x >= x1 || offset.y >= y1)
+      return;
+
+    RenderPsoKey key = {};
+    key.vsCookie              = uint64_t(m_blitVs->library);
+    key.fsCookie              = uint64_t(m_fillFs->library);
+    key.colors[0].pixelFormat = uint32_t(view->key.format);
+    key.colorCount            = 1u;
+    key.sampleCount           = uint8_t(std::max(view->image->info().sampleCount, 1u));
+    key.topologyClass         = uint8_t(WMTPrimitiveTopologyClassTriangle);
+    obj_handle_t pso = m_psoCache.get(
+      key, m_blitVs->library, m_fillFs->library,
+      m_blitVs->entryName, m_fillFs->entryName);
+    if (!pso)
+      return;
+
+    if (m_pass.active)
+      closePass();
+    else
+      flushPendingClears();
+    ensureCommandBuffer();
+
+    auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+    view->image->setTrackingSerial(m_currentSerial);
+    m_keepAlive.push_back(view);
+
+    WMTRenderPassInfo info = {};
+    info.colors[0].texture      = tv->owned.handle();
+    info.colors[0].load_action  = WMTLoadActionLoad;
+    info.colors[0].store_action = WMTStoreActionStore;
+    info.render_target_width    = mipExtent.width;
+    info.render_target_height   = mipExtent.height;
+    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+
+    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+
+    WMTViewport vp = {};
+    vp.originX = double(offset.x);
+    vp.originY = double(offset.y);
+    vp.width   = double(x1 - offset.x);
+    vp.height  = double(y1 - offset.y);
+    vp.znear   = 0.0;
+    vp.zfar    = 1.0;
+    MTL4RenderCommandEncoder_setViewport(enc, vp);
+    WMTScissorRect sc = {};
+    sc.x      = offset.x;
+    sc.y      = offset.y;
+    sc.width  = x1 - offset.x;
+    sc.height = y1 - offset.y;
+    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+
+    /* BlitParams: uvRect unused by fillFsMain; fillColor carries the value. */
+    float params[8] = {
+      0.f, 0.f, 0.f, 0.f,
+      value.color.r, value.color.g, value.color.b, value.color.a,
+    };
+    RingSlice rs = m_device->uploadRing().allocate(sizeof(params), 256u);
+    if (rs.cpuPtr)
+      std::memcpy(rs.cpuPtr, params, sizeof(params));
+
+    obj_handle_t table = selectBlitArgTable();
+    MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
+    MTL4RenderCommandEncoder_setArgumentTable(
+      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+
+    MTL4RenderCommandEncoder_drawPrimitives(
+      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+    m_dirty = DirtyEverything;
+  }
+
+  obj_handle_t MtlContextImpl::selectBlitArgTable() {
+    /* Same retire-by-serial ring discipline as selectArgumentTablesForDraw
+     * (a table must not be rewritten while an earlier blit that reads it is
+     * in flight), but a DEDICATED pool: the blit must never advance the
+     * per-draw D3D9 table cursor or rewrite a table a queued draw reads.
+     * Bounded by construction: grows only while every table is in flight. */
+    const uint64_t completed = m_device->submissions().completedSerial();
+    const size_t   n         = m_blitArgTables.size();
+
+    for (size_t scan = 0u; scan < n; ++scan) {
+      const size_t idx = (m_blitArgCursor + scan) % n;
+      if (m_blitArgTables[idx].serial <= completed) {
+        m_blitArgCursor              = uint32_t(idx + 1u);
+        m_blitArgTables[idx].serial  = m_currentSerial;
+        return m_blitArgTables[idx].table.handle();
+      }
+    }
+
+    WMTArgTableInfo ati = {};
+    ati.max_buffers         = 1u;   /* buffer(0) = BlitParams */
+    ati.max_textures        = 1u;   /* texture(0) = source */
+    ati.max_samplers        = 1u;   /* sampler(0) */
+    ati.initialize_bindings = 1u;
+    BlitArgTable entry;
+    entry.table  = WmtArgTable::adopt(
+      MTLDevice_newArgumentTable(m_device->wmtDevice(), &ati));
+    entry.serial = m_currentSerial;
+    m_blitArgTables.push_back(std::move(entry));
+    m_blitArgCursor = uint32_t(m_blitArgTables.size());
+    return m_blitArgTables.back().table.handle();
+  }
+
+  void MtlContextImpl::blitTextureView(const Rc<MtlTextureView>& dstView, const MtlOffset3D dstOffsets[2],
+                                       const Rc<MtlTextureView>& srcView, const MtlOffset3D srcOffsets[2],
+                                       MtlSamplerFilter filter) {
+    /* §6.6 meta-blit: sampled fullscreen-triangle draw into the dst rect.
+     * load=Load/store=Store — a rect blit preserves the rest of the target. */
+    if (dstView == nullptr || srcView == nullptr
+     || dstView->image == nullptr || srcView->image == nullptr)
+      return;
+
+    /* Depth-format destinations never reach this seam (the frontend rejects
+     * stretched DS blits); a color pipeline cannot write one. */
+    const MtlFormatInfo* dstFi = lookupFormatInfo(dstView->key.format);
+    if (unlikely(dstFi->flags & (MtlFormatFlagDepth | MtlFormatFlagStencil))) {
+      Logger::err("MtlContextImpl::blitTextureView: depth-stencil destination unsupported");
+      return;
+    }
+
+    /* The fragment shader samples texture2d; multi-layer sources would need
+     * an array variant. The frontend sends layerCount==1 views (e2D) in
+     * practice — sample slice 0 of whatever arrives and say so once. */
+    if (unlikely(srcView->key.viewType != MtlTextureViewType::e2D)) {
+      static bool warned = false;
+      if (!warned) { warned = true; Logger::warn("MtlContextImpl::blitTextureView: non-2D source view, sampling as 2D"); }
+    }
+
+    if (!ensureBlitPipeline())
+      return;
+
+    /* Normalize the rects: a reversed DST rect is the same blit with both
+     * rects flipped on that axis; a reversed SRC rect then mirrors via the
+     * UV direction (uv0 > uv1 interpolates backwards). */
+    int32_t dx0 = dstOffsets[0].x, dy0 = dstOffsets[0].y;
+    int32_t dx1 = dstOffsets[1].x, dy1 = dstOffsets[1].y;
+    float   sx0 = float(srcOffsets[0].x), sy0 = float(srcOffsets[0].y);
+    float   sx1 = float(srcOffsets[1].x), sy1 = float(srcOffsets[1].y);
+    if (dx0 > dx1) { std::swap(dx0, dx1); std::swap(sx0, sx1); }
+    if (dy0 > dy1) { std::swap(dy0, dy1); std::swap(sy0, sy1); }
+    if (dx0 == dx1 || dy0 == dy1)
+      return;                                    /* empty dst rect */
+
+    const MtlExtent3D srcExtent = srcView->image->mipLevelExtent(srcView->key.baseMip);
+    const MtlExtent3D dstExtent = dstView->image->mipLevelExtent(dstView->key.baseMip);
+    if (!srcExtent.width || !srcExtent.height)
+      return;
+
+    /* Frontend-validated to lie within the dst mip; clamp anyway — an
+     * out-of-bounds scissor is a Metal validation fault, not a bad pixel. */
+    dx0 = std::max(dx0, 0);
+    dy0 = std::max(dy0, 0);
+    dx1 = std::min(dx1, int32_t(dstExtent.width));
+    dy1 = std::min(dy1, int32_t(dstExtent.height));
+    if (dx0 >= dx1 || dy0 >= dy1)
+      return;
+
+    /* PSO through the shared render-PSO cache: blit library cookies + dst
+     * format + sample count; no vertex descriptor, no blend, write all. */
+    RenderPsoKey key = {};
+    key.vsCookie             = uint64_t(m_blitVs->library);
+    key.fsCookie             = uint64_t(m_blitFs->library);
+    key.colors[0].pixelFormat = uint32_t(dstView->key.format);
+    key.colorCount           = 1u;
+    key.sampleCount          = uint8_t(std::max(dstView->image->info().sampleCount, 1u));
+    key.topologyClass        = uint8_t(WMTPrimitiveTopologyClassTriangle);
+    obj_handle_t pso = m_psoCache.get(
+      key, m_blitVs->library, m_blitFs->library,
+      m_blitVs->entryName, m_blitFs->entryName);
+    if (!pso)
+      return;                                    /* build failure already logged */
+
+    /* A blit must observe folded, not-yet-drawn clears (computeEncoder
+     * precedent); an open pass flushes its fragment writes via closePass. */
+    if (m_pass.active)
+      closePass();
+    else
+      flushPendingClears();
+    ensureCommandBuffer();
+
+    auto* dstTv = static_cast<MtlTextureViewImpl*>(dstView.ptr());
+    auto* srcTv = static_cast<MtlTextureViewImpl*>(srcView.ptr());
+    dstView->image->setTrackingSerial(m_currentSerial);
+    srcView->image->setTrackingSerial(m_currentSerial);
+    /* The view objects are typically owned only by the recorded CS lambda;
+     * their Metal resource IDs must outlive this submission. */
+    m_keepAlive.push_back(dstView);
+    m_keepAlive.push_back(srcView);
+
+    WMTRenderPassInfo info = {};
+    info.colors[0].texture      = dstTv->owned.handle();
+    info.colors[0].load_action  = WMTLoadActionLoad;
+    info.colors[0].store_action = WMTStoreActionStore;
+    info.render_target_width    = dstExtent.width;
+    info.render_target_height   = dstExtent.height;
+    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+
+    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+
+    /* Viewport = dst rect: the fullscreen triangle's t [0,1] spans exactly
+     * the rect, so uv interpolates uv0 -> uv1 across it (dst pixel centers
+     * land at the D3D9 (x+0.5)/w source positions — box-correct for the
+     * downsample chains this path serves). Scissor clips the overhang. */
+    WMTViewport vp = {};
+    vp.originX = double(dx0);
+    vp.originY = double(dy0);
+    vp.width   = double(dx1 - dx0);
+    vp.height  = double(dy1 - dy0);
+    vp.znear   = 0.0;
+    vp.zfar    = 1.0;
+    MTL4RenderCommandEncoder_setViewport(enc, vp);
+    WMTScissorRect sc = {};
+    sc.x      = uint32_t(dx0);
+    sc.y      = uint32_t(dy0);
+    sc.width  = uint32_t(dx1 - dx0);
+    sc.height = uint32_t(dy1 - dy0);
+    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+
+    /* BlitParams via a fresh UploadRing slice (snapshot semantics: never
+     * rewritten under this queued blit), through the dedicated blit table. */
+    float params[4] = {
+      sx0 / float(srcExtent.width), sy0 / float(srcExtent.height),
+      sx1 / float(srcExtent.width), sy1 / float(srcExtent.height),
+    };
+    RingSlice rs = m_device->uploadRing().allocate(sizeof(params), 256u);
+    if (rs.cpuPtr)
+      std::memcpy(rs.cpuPtr, params, sizeof(params));
+
+    obj_handle_t table = selectBlitArgTable();
+    MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
+    MTL4ArgumentTable_setTexture(table, srcTv->gpuResourceId, 0u);
+    auto* smp = static_cast<MtlSamplerStateImpl*>(
+      m_blitSamplers[filter == MtlSamplerFilter::Linear ? 1u : 0u].ptr());
+    MTL4ArgumentTable_setSamplerState(table, smp->gpuResourceId, 0u);
+    MTL4RenderCommandEncoder_setArgumentTable(
+      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+
+    MTL4RenderCommandEncoder_drawPrimitives(
+      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+
+    /* §4c: order the blit's fragment write ahead of a later sample/copy of
+     * the dst (same contract as closePass/clearImage). */
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+
+    /* The next D3D9 draw rebinds its own encoder state from scratch. */
+    m_dirty = DirtyEverything;
   }
 
   void MtlContextImpl::generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter) {
