@@ -28,10 +28,13 @@
  *    table reads the address at the draw snapshot, so ring memory is never
  *    rewritten under a queued draw (exactly the Metal-3 chunk semantics).
  *    D3D9's separate VS/PS constant namespaces map to TWO argument tables
- *    per draw (vertex, fragment), each bound at its own stage via
- *    setArgumentTable:atStages:. The table objects themselves are rotated so
- *    later draw-state writes never mutate a table an earlier encoded draw may
- *    still read.
+ *    (vertex, fragment), each bound at its own stage via
+ *    setArgumentTable:atStages:. Metal snapshots an argument table's contents
+ *    at each ENCODED draw (MTL4RenderCommandEncoder.h, setArgumentTable:
+ *    atStages:), so one table pair is safely mutated between draws within an
+ *    encoder; the pair rotates once per materialized pass (retire-by-serial
+ *    ring), NOT per draw — rotation only protects a pair from being rewritten
+ *    while an earlier submission may still be encoding against it.
  *    Textures/samplers bind via setTexture(gpuResourceID)/setSamplerState.
  *    ALL of these per-draw writes (table slots, dynamic state, the draw)
  *    are appended as wmtcmd_mtl4_* structs into a CmdChunk and replayed
@@ -43,10 +46,11 @@
  *    Table writes are per-slot dirty-diffed: argument tables are persistent
  *    objects, so a rotated-in table still holds whatever was last written to
  *    it — each pair carries a shadow of its contents (ArgTableShadow) and
- *    only slots whose value differs are re-appended. Draws with NO
- *    binding-shaped dirty state skip rotation and table writes entirely
- *    (prepareDraw gate): the currently bound tables already hold the exact
- *    logical bindings and, being unwritten, cannot race in-flight readers.
+ *    only slots whose value differs are re-appended. Because the pair stays
+ *    bound for the whole pass, the shadow carries forward across draws and
+ *    the diff writes only the slots that actually changed since the previous
+ *    draw. Draws with NO binding-shaped dirty state skip table writes
+ *    entirely (prepareDraw gate).
  *
  * 4. Residency + keep-alive. Residency lives entirely in the device's
  *    MtlResidencyTracker (mtl_residency.h): every driver-created allocation
@@ -269,6 +273,25 @@ namespace dxvk::backend {
        * would leave the shader's cFSize/pointSize reads past the slice end. */
       uint32_t pushExtent = 0;
       uint64_t pushGpuAddress = 0u;
+      /* Per-slot dirty bitmasks (bit i = slot i touched since the last
+       * flushResources). The coarse DirtyResources bit says "walk the
+       * bindings"; these say WHICH slots to visit — the frontend touches
+       * ~1-2 slots per draw, so visiting all 16+16+8 slots per stage per
+       * draw was the dominant CPU cost (appendTable* ~97k calls/frame).
+       * Set by bindTexture/bindSampler/bindUniformBuffer(Range) and by
+       * invalidateBuffer's CBV retarget; consumed (cleared) by
+       * flushResources. Iterating only set bits is correct ONLY while the
+       * bound argument-table pair persists (its ArgTableShadow mirrors the
+       * table, and untouched slots already hold their correct value from a
+       * prior write to that same physical table). Whenever a DIFFERENT
+       * physical pair rotates in (prepareDraw's !m_argTablesBound branch)
+       * every mask is forced to ~0 so the fresh pair is fully reconciled;
+       * a PSO change forces the CBV walk wide (shader-derived cbvSlotMap
+       * remaps d3d9 slot -> AIR slot, so an untouched CBV may need a write
+       * at a NEW table index). Start ~0: first flush reconciles everything. */
+      uint32_t dirtyTextures = ~0u;   // 16 texture slots
+      uint32_t dirtySamplers = ~0u;   // 16 sampler slots
+      uint32_t dirtyCbvs     = ~0u;   // 8 CBV slots
     };
 
     /* Shadow of one argument table's PERSISTENT contents — the value the
@@ -355,8 +378,14 @@ namespace dxvk::backend {
     uint32_t     m_allocatorSlot = 0u; // ring slot of m_allocator
     obj_handle_t m_allocator    = 0u;  // current frame's allocator (borrowed)
 
-    /* Per-draw argument tables. Reusing one mutable MTL4ArgumentTable across
-     * multiple encoded draws races under Metal 4's overlapping execution. */
+    /* Per-PASS argument tables. Metal snapshots an argument table's contents
+     * at each encoded draw (MTL4RenderCommandEncoder.h), so mutating ONE pair
+     * between draws on the same encoder is well-defined. The ring's
+     * retire-by-serial discipline protects the real hazard: a pair must not
+     * be rewritten while an earlier SUBMISSION'S encoding may still reference
+     * it. Rotated once per materialized pass, never per draw — the pair's
+     * ArgTableShadow then persists across the pass's draws so the per-slot
+     * diff (appendTable*) writes only slots that actually change. */
     std::vector<ArgTablePair> m_argTables;
     uint32_t                 m_argTableCursor = 0u;
 
@@ -366,6 +395,11 @@ namespace dxvk::backend {
     uint64_t s_diagVbStale  = 0u;
     uint64_t s_diagCbvStale = 0u;
     uint32_t                 m_currentArgTable = 0u;
+    /* setArgumentTable has been encoded on the CURRENT pass encoder for
+     * m_currentArgTable and the pair's serial is stamped for the current
+     * cmdbuf. Cleared whenever a fresh encoder opens (materializePass) so
+     * the first draw of each pass rotates + binds exactly once. */
+    bool                     m_argTablesBound = false;
 
     uint32_t           m_dirty = DirtyEverything;
 
@@ -385,6 +419,10 @@ namespace dxvk::backend {
 
     std::array<StageBindings, 2> m_bindings;   // [vertex, fragment]
     std::array<VertexStream, 16> m_vertexStreams;
+    /* Per-stream dirty bitmask, same contract as StageBindings::dirty*:
+     * set by bindVertexBuffer(Range) / invalidateBuffer's stream retarget,
+     * consumed by flushVertexBuffers, forced ~0 on table rotation. */
+    uint32_t                     m_dirtyVertexStreams = ~0u;
     MtlBufferSlice m_indexBuffer;
     MtlIndexType   m_indexType = { };
 
@@ -431,7 +469,7 @@ namespace dxvk::backend {
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO
     ArgTablePair createArgumentTablePair() const;
-    void selectArgumentTablesForDraw();
+    void selectArgumentTablesForPass();
     void bindArgumentTables();         // setArgumentTable per stage on the encoder
     void flushVertexBuffers();         // setAddress vertex streams into VS table
     void flushResources();             // CBVs/textures/samplers/push -> arg tables + ring

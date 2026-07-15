@@ -85,7 +85,7 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::BeginRecording);
     m_dirty = DirtyEverything;
     /* NOTE: do NOT reset m_argTableCursor here. The argument-table pool is a
-     * cross-frame ring (selectArgumentTablesForDraw); resetting the cursor per
+     * cross-frame ring (selectArgumentTablesForPass); resetting the cursor per
      * recording broke reuse and ratcheted the pool. It wraps mod size itself. */
 
     /* Rotate to a >= ring-depth-old allocator and reset it. MTL4CommandAllocator
@@ -501,6 +501,10 @@ namespace dxvk::backend {
     m_pass.active = true;
     m_pass.pending = false;
     m_dirty = DirtyEverything;
+    /* Fresh encoder: encoder-level state (incl. setArgumentTable) is gone —
+     * the first draw of this pass must rotate in a retired pair and re-bind
+     * it (prepareDraw). */
+    m_argTablesBound = false;
 
   }
 
@@ -518,20 +522,28 @@ namespace dxvk::backend {
     return pair;
   }
 
-  void MtlContextImpl::selectArgumentTablesForDraw() {
-    /* Per-draw argument tables: a table's bindings must not be mutated while an
-     * earlier encoded draw that still reads it is in flight (Metal 4 overlapping
-     * execution). Round-robin a pool, reusing a slot only once its last-use
-     * submission serial has RETIRED (the same retire-after-serial discipline as
-     * the command-allocator ring / upload ring). If the slot we'd wrap onto is
-     * still in flight, the pool is too small for the current in-flight draw
-     * depth, so grow it right here. This self-limits: once the pool covers the
-     * peak concurrent in-flight draws it stops growing — bounded by construction.
+  void MtlContextImpl::selectArgumentTablesForPass() {
+    /* Once per materialized pass, NOT per draw: Metal snapshots an argument
+     * table's contents at each encoded draw (MTL4RenderCommandEncoder.h,
+     * setArgumentTable:atStages: — "Metal takes a snapshot of the resources
+     * in the argument table when you encode a draw"), so mutate-draw-mutate-
+     * draw on the ONE selected pair is well-defined for the whole encoder.
+     * The old per-draw rotation neutered the ArgTableShadow diff: every draw
+     * rotated onto a cold pair and re-wrote all ~48x2 slots (argRotate ==
+     * draws, prepareDraw ~11ms/frame in GTA). Keeping the pair for the pass
+     * makes the diff write only the slots that actually change per draw.
      *
-     * The prior version incremented a cursor that was only ever reset in
-     * beginRecording(), which runs ONCE at device creation (not per frame), so
-     * the pool grew ~1 table/draw forever and exhausted the 32-bit address space
-     * after ~30s. */
+     * Rotation still matters at the pass boundary: round-robin the pool,
+     * reusing a slot only once its last-use submission serial has RETIRED
+     * (the same retire-after-serial discipline as the command-allocator ring
+     * / upload ring) so a pair is never rewritten while an earlier
+     * submission's GPU work is still in flight against it. Within one cmdbuf
+     * two passes can never share a pair either: the pass-start stamp below
+     * uses the UNSUBMITTED m_currentSerial, which cannot compare <= completed.
+     * If every slot is still in flight, the pool is too small for the current
+     * in-flight pass depth, so grow it right here. This self-limits: once the
+     * pool covers the peak concurrent in-flight passes it stops growing —
+     * bounded by construction. */
     prof::bump(prof::CntArgRotate);
     const uint64_t completed = m_device->submissions().completedSerial();
     const size_t   n         = m_argTables.size();
@@ -604,6 +616,7 @@ namespace dxvk::backend {
     m_pass.encoder = 0;
     m_pass.active = false;
     m_pass.pending = true;   /* same targets stay bound until rebound */
+    m_argTablesBound = false; /* encoder gone; next pass rotates + re-binds */
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
   }
@@ -680,6 +693,7 @@ namespace dxvk::backend {
       m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
     stream.slice = std::move(slice);
     stream.stride = stride;
+    m_dirtyVertexStreams |= 1u << binding;
     m_dirty |= DirtyVertexBuffers;
   }
 
@@ -697,6 +711,7 @@ namespace dxvk::backend {
     stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
                                   offset, length);
     stream.stride = stride;
+    m_dirtyVertexStreams |= 1u << binding;
     m_dirty |= DirtyVertexBuffers;
   }
 
@@ -713,6 +728,7 @@ namespace dxvk::backend {
         cbv.slice = slice;
         cbv.rangeOffset = 0;
         cbv.rangeLength = slice.length();
+        m_bindings[s].dirtyCbvs |= 1u << slot;
       }
     }
     m_dirty |= DirtyResources;
@@ -726,6 +742,7 @@ namespace dxvk::backend {
         auto& cbv = m_bindings[s].cbvs[slot];
         cbv.rangeOffset = offset;
         cbv.rangeLength = length;
+        m_bindings[s].dirtyCbvs |= 1u << slot;
       }
     }
     m_dirty |= DirtyResources;
@@ -740,8 +757,10 @@ namespace dxvk::backend {
       return;
     }
     for (uint32_t s = 0; s < 2; s++) {
-      if (stages & (1u << s))
+      if (stages & (1u << s)) {
         m_bindings[s].textures[slot] = view;
+        m_bindings[s].dirtyTextures |= 1u << slot;
+      }
     }
     m_dirty |= DirtyResources;
   }
@@ -753,8 +772,10 @@ namespace dxvk::backend {
       return;
     }
     for (uint32_t s = 0; s < 2; s++) {
-      if (stages & (1u << s))
+      if (stages & (1u << s)) {
         m_bindings[s].samplers[slot] = sampler;
+        m_bindings[s].dirtySamplers |= 1u << slot;
+      }
     }
     m_dirty |= DirtyResources;
   }
@@ -840,32 +861,63 @@ namespace dxvk::backend {
 
     /* Arena cap: replay-and-recycle mid-pass once the batch crosses the cap.
      * Any command boundary is a valid flush point — the stream replays in
-     * append order across flushes, and table rotation already guarantees no
-     * table is rewritten until its serial retires. */
+     * append order across flushes, and Metal snapshots the argument table at
+     * each encoded draw, so table writes replayed in a later flush can never
+     * retroactively affect a draw encoded in an earlier one. */
     if (m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
       flushCmdChunk();
 
     if ((m_dirty & DirtyPso) && !resolvePso())
       return false;
 
+    /* Argument tables rotate once per PASS, not per draw (see
+     * selectArgumentTablesForPass): the first draw after materializePass
+     * rotates in a retired pair, binds it, and stamps its serial for this
+     * cmdbuf; every later draw of the pass mutates that same pair, which is
+     * well-defined because the encoder snapshots table contents at each
+     * encoded draw. materializePass sets DirtyEverything, so the rotation
+     * draw always performs the full-walk flush that reconciles the rotated-in
+     * pair's persistent contents (ArgTableShadow diff) with the current
+     * logical bindings; the OR below is belt-and-braces for any future path
+     * that clears m_argTablesBound without dirtying bindings. */
+    if (!m_argTablesBound) {
+      selectArgumentTablesForPass();
+      bindArgumentTables();
+      m_argTablesBound = true;
+      m_dirty |= DirtyVertexBuffers | DirtyResources | DirtyPush;
+      /* ROTATION = FULL REWRITE. The rotated-in pair is a DIFFERENT physical
+       * table whose shadow mirrors ITS OWN last contents, not the current
+       * logical bindings — the per-slot dirty masks (which only say "touched
+       * since the last flush") are meaningless against it. Force every mask
+       * wide so the flush below visits ALL slots and reconciles the fresh
+       * pair via the shadow diff (slots that happen to match still skip the
+       * Metal write). Missing this would leave a rotated-in table with
+       * stale/missing slots = silent wrong-texture corruption. This is the
+       * ONLY place m_currentArgTable changes, so it is the only point where
+       * mask-vs-shadow coherence can break. */
+      m_dirtyVertexStreams = ~0u;
+      for (auto& b : m_bindings) {
+        b.dirtyTextures = ~0u;
+        b.dirtySamplers = ~0u;
+        b.dirtyCbvs     = ~0u;
+      }
+    }
+
     /* Binding flush, gated per draw: when NO binding-shaped state changed
      * since the previous draw (every mutation funnels into these bits —
      * the bind and pushData setters set them, invalidateBuffer's retarget
-     * sets them, and
-     * pass/cmdbuf/blit boundaries set DirtyEverything), the argument tables
-     * bound on the encoder still hold exactly the current logical bindings:
-     * skip rotation and every table write. Safe against in-flight readers
-     * because skipping writes nothing — tables are only ever written right
-     * after selectArgumentTablesForDraw hands out a retired (or fresh) one.
-     * DirtyPso participates because the CBV AIR-slot map is shader-derived
-     * (flushResources translates through fn->cbvSlotMap). On the dirty path
-     * the rotated-in table is diff-written per slot (ArgTableShadow). */
-    if (m_dirty & (DirtyPso | DirtyVertexBuffers | DirtyResources | DirtyPush)) {
-      selectArgumentTablesForDraw();
-      bindArgumentTables();
+     * sets them, and pass/cmdbuf/blit boundaries set DirtyEverything), the
+     * bound tables already hold exactly the current logical bindings: skip
+     * the walk entirely. On the dirty path the per-slot ArgTableShadow diff
+     * appends only slots whose value changed. Vertex streams live at fixed
+     * indices (kVertexBufferBaseIndex+) independent of the bound shader, so
+     * only DirtyVertexBuffers gates them; DirtyPso participates in the
+     * resource walk because the CBV AIR-slot map is shader-derived
+     * (flushResources translates through fn->cbvSlotMap). */
+    if (m_dirty & DirtyVertexBuffers)
       flushVertexBuffers();
+    if (m_dirty & (DirtyPso | DirtyResources | DirtyPush))
       flushResources();
-    }
     if (m_dirty & (DirtyViewport | DirtyDepthStencil | DirtyBlendColor
                  | DirtyStencilRef | DirtyDepthBias | DirtyRasterizer))
       flushDynamicState();

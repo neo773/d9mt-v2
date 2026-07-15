@@ -1,4 +1,5 @@
 #include "mtl_context_impl.h"
+#include "../util/util_bit.h"
 #include "../util/util_string.h"
 
 #include <algorithm>
@@ -217,7 +218,15 @@ namespace dxvk::backend {
     ArgTablePair&   pair   = m_argTables[m_currentArgTable];
     obj_handle_t    table  = pair.table[0].handle();
     ArgTableShadow& shadow = pair.shadow[0];
-    for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
+    /* Visit only streams touched since the last flush (m_dirtyVertexStreams,
+     * consumed here). Untouched streams already hold their correct address in
+     * the bound table: either written earlier this pass (shadow carries
+     * forward on the persistent pair) or covered by the rotation full-mask
+     * (prepareDraw forces ~0 whenever a different physical pair rotates in). */
+    const uint32_t streamMask = m_dirtyVertexStreams
+      & ((1u << m_vertexStreams.size()) - 1u);
+    m_dirtyVertexStreams = 0u;
+    for (uint32_t i : bit::BitMask(streamMask)) {
       VertexStream& s = m_vertexStreams[i];
       /* Record-time snapshot (MtlBufferSlice contract): the slice's captured
        * physical backing, NEVER the live buffer — an app-thread rename must
@@ -241,10 +250,31 @@ namespace dxvk::backend {
   void MtlContextImpl::flushResources() {
     prof::Scope profScope(prof::FlushResources);
     ArgTablePair& pair = m_argTables[m_currentArgTable];
+    /* Per-slot dirty-mask walk: visit ONLY slots touched since the last
+     * flush (StageBindings::dirty*, consumed below). An untouched slot needs
+     * no visit because the bound pair persists across the pass's draws — the
+     * slot already holds its correct value, written either earlier this pass
+     * or during the rotation full-mask reconcile (prepareDraw forces every
+     * mask to ~0 whenever a different physical pair rotates in, since that
+     * pair's shadow reflects ITS last contents, not the current bindings).
+     *
+     * CBVs additionally go wide on a PSO change: the d3d9-slot -> AIR-slot
+     * map (fn->cbvSlotMap) is shader-derived, so a new shader can move an
+     * UNTOUCHED CBV to a different table index (or newly declare one) — its
+     * dirty bit alone would miss that. 8 slots x 2 stages, cheap. */
+    const bool psoChanged = (m_dirty & DirtyPso) != 0u;
     for (uint32_t st = 0u; st < 2u; st++) {
       StageBindings&  b      = m_bindings[st];
       obj_handle_t    table  = pair.table[st].handle();
       ArgTableShadow& shadow = pair.shadow[st];
+
+      const uint32_t cbvMask = (psoChanged ? ~0u : b.dirtyCbvs)
+        & ((1u << b.cbvs.size()) - 1u);
+      const uint32_t texMask = b.dirtyTextures
+        & ((1u << b.textures.size()) - 1u);
+      const uint32_t smpMask = b.dirtySamplers
+        & ((1u << b.samplers.size()) - 1u);
+      b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
 
       /* The bound shader for this stage carries the CbvIndex -> AIR Metal
        * buffer-slot map (reflection-derived, SOURCE_OF_TRUTH §4b bug 1). The
@@ -256,7 +286,7 @@ namespace dxvk::backend {
 
       /* constant buffers at their AIR slots, with the discard/range offset
        * folded in (bindUniformBufferRange snapshot). */
-      for (uint32_t slot = 0u; slot < b.cbvs.size(); slot++) {
+      for (uint32_t slot : bit::BitMask(cbvMask)) {
         StageBindings::CbvBinding& cbv = b.cbvs[slot];
         /* Only bind CBVs the shader actually declares, at their AIR slot. */
         int32_t airSlot = (fn != nullptr && slot < fn->cbvSlotMap.size())
@@ -287,7 +317,7 @@ namespace dxvk::backend {
        * table's actual contents, so a slot that is already null (the common
        * case — most of the 16 slots are never bound) appends nothing, while a
        * newly-unbound slot still gets its clear. */
-      for (uint32_t slot = 0u; slot < b.textures.size(); slot++) {
+      for (uint32_t slot : bit::BitMask(texMask)) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr) {
           appendTableTexture(shadow, table, 0u, slot);
@@ -298,7 +328,7 @@ namespace dxvk::backend {
       }
 
       /* samplers: setSamplerState by MTLResourceID. */
-      for (uint32_t slot = 0u; slot < b.samplers.size(); slot++) {
+      for (uint32_t slot : bit::BitMask(smpMask)) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
         if (sampler == nullptr) {
           appendTableSampler(shadow, table, 0u, slot);
@@ -720,7 +750,7 @@ namespace dxvk::backend {
   }
 
   obj_handle_t MtlContextImpl::selectBlitArgTable() {
-    /* Same retire-by-serial ring discipline as selectArgumentTablesForDraw
+    /* Same retire-by-serial ring discipline as selectArgumentTablesForPass
      * (a table must not be rewritten while an earlier blit that reads it is
      * in flight), but a DEDICATED pool: the blit must never advance the
      * per-draw D3D9 table cursor or rewrite a table a queued draw reads.
@@ -1011,18 +1041,22 @@ namespace dxvk::backend {
      * silent refresh without them would leave the old backing bound. (The
      * index buffer needs no bit — its address is read live per drawIndexed,
      * not through an argument table.) */
-    for (auto& stream : m_vertexStreams) {
+    for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
+      auto& stream = m_vertexStreams[i];
       if (stream.slice.buffer() == buffer) {
         stream.slice.refreshStorage();
+        m_dirtyVertexStreams |= 1u << i;
         m_dirty |= DirtyVertexBuffers;
       }
     }
     if (m_indexBuffer.buffer() == buffer)
       m_indexBuffer.refreshStorage();
     for (uint32_t st = 0u; st < 2u; st++) {
-      for (auto& cbv : m_bindings[st].cbvs) {
+      for (uint32_t slot = 0u; slot < m_bindings[st].cbvs.size(); slot++) {
+        auto& cbv = m_bindings[st].cbvs[slot];
         if (cbv.slice.buffer() == buffer) {
           cbv.slice.refreshStorage();
+          m_bindings[st].dirtyCbvs |= 1u << slot;
           m_dirty |= DirtyResources;
         }
       }
