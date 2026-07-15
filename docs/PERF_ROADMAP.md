@@ -30,6 +30,38 @@ After 353ebf9 the append cluster collapsed. Remaining top self-time:
 - `flushVertexBuffers`, `materializePass` (~1 call/draw each), `flushCmdChunk` (the
   PE→unix crossing, ~43/frame @ 17µs)
 
+## Status update (2026-07-16)
+
+DONE since the table above:
+- **Argument-buffer binding swap** (v1's technique on Metal 4): translated
+  shaders read textures/samplers/CBVs as 8-byte handle words from ONE buffer
+  at [[buffer(21)]]; flushResources writes the words into a ring slice and
+  binds one address per stage per draw. Correct (user-verified), but fps was
+  FLAT — release-build profile shows binding was NOT the dominant cost (the
+  instrumented profiler had inflated its loop-heavy code). Keep: fewer
+  structs/replay calls, scales with draw count. `D9MT_NO_AB=1` reverts.
+- **Per-draw trims + redundant-state guards**: setters (shader/layout/
+  topology/viewport/raster/msaa/ds/blend/texture/sampler/etc.) early-out on
+  no-change; GPU-use stamps moved into the dirty-stream walk (+serial-change
+  full walk); setPSO append skipped when unchanged; dynamic state
+  shadow-diffed per encoder; chunk cap 1->4MiB.
+
+MEASURED (release build, D9MT_PROFILE buckets, ~2100-2500 draws/f, 2996x):
+CPU ~11-13ms/f on dxvk-cs; **GPU 10-11ms/f (Metal HUD) — CO-BOUND.**
+Remaining CPU: prepareDraw-self ~2-3ms, resolvePso ~1.3ms (key build+hash
+per DirtyPso), flushRes ~1ms, flushChunk ~0.8ms. beginRecording ~1-1.8ms is
+mostly allocator-pacing WAIT on the GPU (a GPU-bound symptom, not CPU work).
+
+NEXT (120fps needs BOTH sides; GPU first — TBDR pass count is king):
+1. **Render-pass count: 66-80 passes/frame** (argRotate == pass rotations).
+   Every pass = full tile load+store of all attachments at 2996x. Causes:
+   RT switches (deferred+post), mid-frame texture uploads splitting passes
+   (computeEncoder closes the render pass), barriers. Merge/eliminate.
+2. **Store/load actions**: everything is Store+Load today; transient
+   depth/gbuffer nothing samples later should be DontCare (pure bandwidth).
+3. resolvePso key-build caching (sections rebuilt only on their dirty bits).
+4. MetalFX spatial upscale in the presenter (render lower, present native).
+
 ## Ranked next levers
 
 ### 1. CBV / push-constant dirty-tracking (cheap, ~next few fps)

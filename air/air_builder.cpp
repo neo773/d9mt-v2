@@ -84,6 +84,7 @@ struct BufferVar {
   uint32_t regIndex = 0u;    /* DclCbv register index */
   uint32_t bufferIndex = 0u;
   uint32_t argIndex = 0u;
+  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
   Type* type = nullptr;      /* pointee */
   std::string name;
 };
@@ -94,6 +95,7 @@ struct TextureVar {
   ir::ResourceKind kind = ir::ResourceKind::eImage2D;
   uint32_t slot = 0u;        /* Metal [[texture(slot)]] */
   uint32_t argIndex = 0u;
+  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
   Type* handleType = nullptr; /* opaque %struct._texture_*_t */
   std::string name;
 };
@@ -103,6 +105,7 @@ struct SamplerVar {
   ir::SsaDef def = {};
   uint32_t slot = 0u;        /* Metal [[sampler(slot)]] */
   uint32_t argIndex = 0u;
+  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
   std::string name;
 };
 
@@ -161,6 +164,20 @@ struct AirBuilderImpl {
   std::vector<SamplerVar> samplers;
   std::vector<SpecVar>    specs;
 
+  /* Argument-buffer binding model (Options::useArgumentBuffer): every
+   * texture, sampler and non-push buffer becomes one 8-byte handle word in
+   * abStruct, bound as a single constant pointer at
+   * [[buffer(AirBuilder::kAbTableIndex)]]. Word order: buffers (decl scan
+   * order, push excluded), textures, samplers — the reflection blob reports
+   * each word so the driver writes handles CPU-side with no per-slot
+   * argument-table calls. Helpers thread ONE hidden AB pointer under the
+   * kAbDeclId sentinel instead of one hidden param per resource. */
+  bool useAB = false;
+  StructType* abStruct = nullptr;
+  uint32_t abWordCount = 0u;
+  uint32_t entryAbArgIndex = ~0u;
+  static constexpr uint32_t kAbDeclId = 0xFFFFFFFEu;
+
   /* air intrinsic declarations, cached by name */
   std::unordered_map<std::string, Function*> airIntrinsics;
 
@@ -170,7 +187,7 @@ struct AirBuilderImpl {
   Function* discardFn = nullptr;
 
   AirBuilderImpl(const ir::Builder& irBuilder, const AirBuilder::Options& opt)
-  : ir(irBuilder), options(opt) {
+  : ir(irBuilder), options(opt), useAB(opt.useArgumentBuffer) {
     ctx.setOpaquePointers(false); /* AIR is pre-opaque-pointer LLVM */
     mod = std::make_unique<Module>("air_shader", ctx);
     mod->setDataLayout(kDataLayout);
@@ -511,6 +528,21 @@ struct AirBuilderImpl {
       else
         buf.bufferIndex = nextIndex++;
     }
+
+    /* AB mode: assign handle-word indices — non-push buffers in scan order,
+     * then textures, then samplers. Push data keeps its own buffer slot. */
+    if (useAB) {
+      uint32_t word = 0u;
+      for (auto& buf : buffers) {
+        if (!buf.isPushData)
+          buf.abWord = int32_t(word++);
+      }
+      for (auto& tex : textures)
+        tex.abWord = int32_t(word++);
+      for (auto& smp : samplers)
+        smp.abWord = int32_t(word++);
+      abWordCount = word;
+    }
   }
 
   /* DebugName attached to a declaration, or the fallback */
@@ -616,6 +648,47 @@ struct AirBuilderImpl {
     return PointerType::get(getOpaqueStruct("struct._sampler_t"), kAsSampler);
   }
 
+  /* Golden-dump AB member types: MSL wraps each handle in a one-member
+   * struct (metal::texture2d = { %struct._texture_2d_t addrspace(1)* }).
+   * Mirror that so the AB struct layout matches what metalfe emits. */
+  StructType* wrapperStruct(const std::string& name, Type* inner) {
+    if (StructType* existing = StructType::getTypeByName(ctx, name))
+      return existing;
+    return StructType::create(ctx, { inner }, name);
+  }
+
+  StructType* textureWrapperType(ir::ResourceKind kind) {
+    const char* suffix = textureKindSuffix(kind, false);
+    if (!suffix)
+      unsupported("texture kind #" + std::to_string(uint32_t(kind)));
+    /* struct._texture_2d_t -> struct.metal::texture2d etc. */
+    std::string msl = suffix;                       /* "texture_2d" */
+    msl.erase(std::remove(msl.begin(), msl.end(), '_'), msl.end());
+    return wrapperStruct("struct.metal::" + msl,
+      textureHandleType(kind, false));
+  }
+
+  StructType* samplerWrapperType() {
+    return wrapperStruct("struct.metal::sampler", samplerHandleType());
+  }
+
+  /* The AB struct: one 8-byte member per handle word, in abWord order. */
+  StructType* argumentBufferType() {
+    if (abStruct)
+      return abStruct;
+    SmallVector<Type*, 32> members(abWordCount, nullptr);
+    for (const auto& buf : buffers) {
+      if (buf.abWord >= 0)
+        members[buf.abWord] = PointerType::get(buf.type, kAsConstant);
+    }
+    for (const auto& tex : textures)
+      members[tex.abWord] = textureWrapperType(tex.kind);
+    for (const auto& smp : samplers)
+      members[smp.abWord] = samplerWrapperType();
+    abStruct = StructType::create(ctx, members, "struct.d9mt_ab");
+    return abStruct;
+  }
+
   const TextureVar* findTexture(ir::SsaDef def) const {
     for (const auto& tex : textures) {
       if (tex.def == def)
@@ -658,7 +731,9 @@ struct AirBuilderImpl {
   /* ---- function creation ---- */
 
   /* Entry signature: [stage-in inputs..., constant buffers...] ->
-   * packed struct of outputs (or single value). */
+   * packed struct of outputs (or single value). AB mode: [stage-in
+   * inputs..., push buffer?, AB pointer?] — every other resource is a
+   * handle word inside the AB struct. */
   void createEntryFunction() {
     SmallVector<Type*, 8> params;
 
@@ -667,17 +742,33 @@ struct AirBuilderImpl {
       in.argIndex = argIndex++;
       params.push_back(in.type);
     }
-    for (auto& buf : buffers) {
-      buf.argIndex = argIndex++;
-      params.push_back(PointerType::get(buf.type, kAsConstant));
-    }
-    for (auto& tex : textures) {
-      tex.argIndex = argIndex++;
-      params.push_back(tex.handleType);
-    }
-    for (auto& smp : samplers) {
-      smp.argIndex = argIndex++;
-      params.push_back(samplerHandleType());
+
+    int32_t abArgIndex = -1;
+    if (useAB) {
+      /* push data keeps its own [[buffer(20)]] argument */
+      for (auto& buf : buffers) {
+        if (!buf.isPushData)
+          continue;
+        buf.argIndex = argIndex++;
+        params.push_back(PointerType::get(buf.type, kAsConstant));
+      }
+      if (abWordCount > 0u) {
+        abArgIndex = int32_t(argIndex++);
+        params.push_back(PointerType::get(argumentBufferType(), kAsConstant));
+      }
+    } else {
+      for (auto& buf : buffers) {
+        buf.argIndex = argIndex++;
+        params.push_back(PointerType::get(buf.type, kAsConstant));
+      }
+      for (auto& tex : textures) {
+        tex.argIndex = argIndex++;
+        params.push_back(tex.handleType);
+      }
+      for (auto& smp : samplers) {
+        smp.argIndex = argIndex++;
+        params.push_back(samplerHandleType());
+      }
     }
 
     SmallVector<Type*, 4> retMembers;
@@ -700,17 +791,37 @@ struct AirBuilderImpl {
       GlobalValue::ExternalLinkage, options.entryName, *mod);
     addShaderFnAttrs(entryFn);
 
-    for (auto& buf : buffers) {
-      entryFn->getArg(buf.argIndex)->addAttr(Attribute::NoCapture);
-      entryFn->getArg(buf.argIndex)->addAttr(Attribute::ReadOnly);
-    }
-    for (auto& tex : textures) {
-      entryFn->getArg(tex.argIndex)->addAttr(Attribute::NoCapture);
-      entryFn->getArg(tex.argIndex)->addAttr(Attribute::ReadOnly);
-    }
-    for (auto& smp : samplers) {
-      entryFn->getArg(smp.argIndex)->addAttr(Attribute::NoCapture);
-      entryFn->getArg(smp.argIndex)->addAttr(Attribute::ReadOnly);
+    if (useAB) {
+      for (auto& buf : buffers) {
+        if (!buf.isPushData)
+          continue;
+        entryFn->getArg(buf.argIndex)->addAttr(Attribute::NoCapture);
+        entryFn->getArg(buf.argIndex)->addAttr(Attribute::ReadOnly);
+      }
+      if (abArgIndex >= 0) {
+        Argument* ab = entryFn->getArg(uint32_t(abArgIndex));
+        ab->addAttr(Attribute::NoCapture);
+        ab->addAttr(Attribute::ReadOnly);
+        ab->addAttr(Attribute::NoUndef);
+        ab->addAttr(Attribute::getWithAlignment(ctx, Align(8u)));
+        ab->addAttr(Attribute::getWithDereferenceableBytes(
+          ctx, uint64_t(abWordCount) * 8u));
+        ab->addAttr(Attribute::get(ctx, "air-buffer-no-alias"));
+        entryAbArgIndex = uint32_t(abArgIndex);
+      }
+    } else {
+      for (auto& buf : buffers) {
+        entryFn->getArg(buf.argIndex)->addAttr(Attribute::NoCapture);
+        entryFn->getArg(buf.argIndex)->addAttr(Attribute::ReadOnly);
+      }
+      for (auto& tex : textures) {
+        entryFn->getArg(tex.argIndex)->addAttr(Attribute::NoCapture);
+        entryFn->getArg(tex.argIndex)->addAttr(Attribute::ReadOnly);
+      }
+      for (auto& smp : samplers) {
+        entryFn->getArg(smp.argIndex)->addAttr(Attribute::NoCapture);
+        entryFn->getArg(smp.argIndex)->addAttr(Attribute::ReadOnly);
+      }
     }
 
     functions.emplace(entryDef.getId(), entryFn);
@@ -749,6 +860,8 @@ struct AirBuilderImpl {
 
   /* LLVM type of the hidden trailing param forwarding this declaration */
   Type* hiddenParamType(ir::SsaDef declDef) {
+    if (useAB && declDef.getId() == kAbDeclId)
+      return PointerType::get(argumentBufferType(), kAsConstant);
     if (const BufferVar* buf = findBuffer(declDef))
       return PointerType::get(buf->type, kAsConstant);
     if (const TextureVar* tex = findTexture(declDef))
@@ -760,6 +873,20 @@ struct AirBuilderImpl {
     if (const InputVar* in = findInput(declDef))
       return in->type; /* stage-in input threaded by value */
     unsupported("hidden param for unknown declaration");
+  }
+
+  /* Hidden-param id a resource declaration threads under: AB members all
+   * collapse onto the single kAbDeclId pointer in AB mode. */
+  uint32_t hiddenIdForDecl(ir::SsaDef declDef) {
+    if (!useAB)
+      return declDef.getId();
+    if (const BufferVar* buf = findBuffer(declDef)) {
+      if (!buf->isPushData)
+        return kAbDeclId;
+    } else if (findTexture(declDef) || findSampler(declDef)) {
+      return kAbDeclId;
+    }
+    return declDef.getId();
   }
 
   /* Fixpoint over the call graph: which buffer decls does each
@@ -790,7 +917,7 @@ struct AirBuilderImpl {
 
         if (op.getOpCode() == ir::OpCode::eInputLoad) {
           if (const BufferVar* buf = findBuffer(operandDef(op, 0u)))
-            addUse(buf->def.getId());
+            addUse(hiddenIdForDecl(buf->def));
           /* Stage-in inputs (air.position, fog, user interpolants) live as
            * entry-point arguments. A helper (dxbc-spirv fog/clip functions load
            * these directly) cannot reach the entry's args, so thread the loaded
@@ -806,7 +933,7 @@ struct AirBuilderImpl {
         } else if (op.getOpCode() == ir::OpCode::eDescriptorLoad) {
           ir::SsaDef decl = operandDef(op, 0u);
           if (findTexture(decl) || findSampler(decl) || findBuffer(decl))
-            addUse(decl.getId());
+            addUse(hiddenIdForDecl(decl));
         } else if (op.getOpCode() == ir::OpCode::ePushDataLoad) {
           if (m_havePush)
             addUse(m_pushDef.getId());
@@ -833,12 +960,23 @@ struct AirBuilderImpl {
         createEntryFunction();
         /* entry accesses resources (and stage-in inputs) through its own args */
         auto& argMap = fnBufferArgs[entryDef.getId()];
-        for (const auto& buf : buffers)
-          argMap.emplace(buf.def.getId(), buf.argIndex);
-        for (const auto& tex : textures)
-          argMap.emplace(tex.def.getId(), tex.argIndex);
-        for (const auto& smp : samplers)
-          argMap.emplace(smp.def.getId(), smp.argIndex);
+        if (useAB) {
+          /* AB members are reached through the single AB pointer arg;
+           * only push data keeps a direct argument. */
+          for (const auto& buf : buffers) {
+            if (buf.isPushData)
+              argMap.emplace(buf.def.getId(), buf.argIndex);
+          }
+          if (abWordCount > 0u)
+            argMap.emplace(kAbDeclId, entryAbArgIndex);
+        } else {
+          for (const auto& buf : buffers)
+            argMap.emplace(buf.def.getId(), buf.argIndex);
+          for (const auto& tex : textures)
+            argMap.emplace(tex.def.getId(), tex.argIndex);
+          for (const auto& smp : samplers)
+            argMap.emplace(smp.def.getId(), smp.argIndex);
+        }
         for (const auto& in : inputs)
           argMap.emplace(in.def.getId(), in.argIndex);
         continue;
@@ -1320,12 +1458,18 @@ struct AirBuilderImpl {
       return;
     }
 
-    /* buffer-backed builtin, via the current function's buffer argument */
+    /* buffer-backed builtin, via the current function's buffer argument
+     * (AB mode: via its handle word in the argument buffer) */
     for (const auto& buf : buffers) {
       if (buf.def != decl)
         continue;
-      const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
-      Value* base = currentFn->getArg(argMap.at(buf.def.getId()));
+      Value* base = nullptr;
+      if (useAB && !buf.isPushData) {
+        base = loadAbHandle(buf.abWord, false);
+      } else {
+        const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
+        base = currentFn->getArg(argMap.at(buf.def.getId()));
+      }
       Value* v = nullptr;
 
       if (!addrDef) {
@@ -1751,10 +1895,48 @@ struct AirBuilderImpl {
     return *tex;
   }
 
+  /* AB pointer in the current function (entry arg or hidden param) */
+  Value* abBasePointer() {
+    const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
+    auto it = argMap.find(kAbDeclId);
+    if (it == argMap.end())
+      unsupported("argument-buffer access outside AB arg map");
+    return currentFn->getArg(it->second);
+  }
+
+  /* Load one handle word out of the AB struct. Texture/sampler members are
+   * golden-dump wrapper structs ({handle*}); buffers are plain pointers. */
+  Value* loadAbHandle(int32_t word, bool wrapped) {
+    Value* base = abBasePointer();
+    SmallVector<Value*, 3> idx;
+    idx.push_back(b->getInt64(0));
+    idx.push_back(b->getInt32(uint32_t(word)));
+    if (wrapped)
+      idx.push_back(b->getInt32(0u));
+    Value* ptr = b->CreateInBoundsGEP(argumentBufferType(), base, idx);
+    return b->CreateAlignedLoad(
+      cast<GEPOperator>(ptr)->getResultElementType(), ptr, MaybeAlign(8u));
+  }
+
   void emitDescriptorLoad(const ir::Op& op) {
     ir::SsaDef decl = operandDef(op, 0u);
-    const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
 
+    if (useAB) {
+      if (const TextureVar* tex = findTexture(decl)) {
+        setValue(op, loadAbHandle(tex->abWord, true));
+        return;
+      }
+      if (const SamplerVar* smp = findSampler(decl)) {
+        setValue(op, loadAbHandle(smp->abWord, true));
+        return;
+      }
+      if (const BufferVar* buf = findBuffer(decl); buf && !buf->isPushData) {
+        setValue(op, loadAbHandle(buf->abWord, false));
+        return;
+      }
+    }
+
+    const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
     auto it = argMap.find(decl.getId());
     if (it == argMap.end())
       unsupported("DescriptorLoad outside resource arg map");
@@ -1990,6 +2172,81 @@ struct AirBuilderImpl {
     return "generated(loc" + std::to_string(location) + "_user)";
   }
 
+  /* AB argument metadata (golden metalfe form): air.indirect_buffer with an
+   * air.struct_type_info tuple describing each 8-byte handle member, each
+   * pointing at an ordinary air.texture/air.sampler/air.buffer sub-tuple
+   * whose location_index is the member's [[id(n)]] == its word index. */
+  MDNode* buildAbMetadata() {
+    struct MemberDesc {
+      uint32_t    word;
+      std::string typeName;
+      std::string name;
+      Metadata*   sub;
+    };
+    std::vector<MemberDesc> members(abWordCount);
+
+    for (const auto& buf : buffers) {
+      if (buf.abWord < 0)
+        continue;
+      uint32_t byteSize =
+        uint32_t(mod->getDataLayout().getTypeAllocSize(buf.type));
+      members[buf.abWord] = { uint32_t(buf.abWord), buf.name, buf.name,
+        mdTuple({
+          mdI32(uint32_t(buf.abWord)), mdString("air.buffer"),
+          mdString("air.location_index"), mdI32(uint32_t(buf.abWord)), mdI32(1u),
+          mdString("air.read"),
+          mdString("air.address_space"), mdI32(kAsConstant),
+          mdString("air.arg_type_size"), mdI32(byteSize),
+          mdString("air.arg_type_align_size"), mdI32(16u),
+          mdString("air.arg_type_name"), mdString(buf.name),
+          mdString("air.arg_name"), mdString(buf.name) }) };
+    }
+    for (const auto& tex : textures) {
+      members[tex.abWord] = { uint32_t(tex.abWord),
+        textureMslTypeName(tex.kind), tex.name,
+        mdTuple({
+          mdI32(uint32_t(tex.abWord)), mdString("air.texture"),
+          mdString("air.location_index"), mdI32(uint32_t(tex.abWord)), mdI32(1u),
+          mdString("air.sample"),
+          mdString("air.arg_type_name"), mdString(textureMslTypeName(tex.kind)),
+          mdString("air.arg_name"), mdString(tex.name) }) };
+    }
+    for (const auto& smp : samplers) {
+      members[smp.abWord] = { uint32_t(smp.abWord), "sampler", smp.name,
+        mdTuple({
+          mdI32(uint32_t(smp.abWord)), mdString("air.sampler"),
+          mdString("air.location_index"), mdI32(uint32_t(smp.abWord)), mdI32(1u),
+          mdString("air.arg_type_name"), mdString("sampler"),
+          mdString("air.arg_name"), mdString(smp.name) }) };
+    }
+
+    /* flat struct_type_info: {offset, size, 0, typeName, memberName,
+     * "air.indirect_argument", sub}* */
+    SmallVector<Metadata*, 64> info;
+    for (const auto& m : members) {
+      info.push_back(mdI32(m.word * 8u));
+      info.push_back(mdI32(8u));
+      info.push_back(mdI32(0u));
+      info.push_back(mdString(m.typeName));
+      info.push_back(mdString(m.name));
+      info.push_back(mdString("air.indirect_argument"));
+      info.push_back(m.sub);
+    }
+
+    uint32_t abSize = abWordCount * 8u;
+    return mdTuple({
+      mdI32(entryAbArgIndex), mdString("air.indirect_buffer"),
+      mdString("air.buffer_size"), mdI32(abSize),
+      mdString("air.location_index"), mdI32(AirBuilder::kAbTableIndex), mdI32(1u),
+      mdString("air.read"),
+      mdString("air.address_space"), mdI32(kAsConstant),
+      mdString("air.struct_type_info"), mdTuple(info),
+      mdString("air.arg_type_size"), mdI32(abSize),
+      mdString("air.arg_type_align_size"), mdI32(8u),
+      mdString("air.arg_type_name"), mdString("d9mt_ab"),
+      mdString("air.arg_name"), mdString("ab") });
+  }
+
   void buildMetadata() {
     /* entry outputs */
     SmallVector<Metadata*, 4> outputMd;
@@ -2071,35 +2328,58 @@ struct AirBuilderImpl {
       }
     }
 
-    for (const auto& buf : buffers) {
-      uint32_t byteSize =
-        uint32_t(mod->getDataLayout().getTypeAllocSize(buf.type));
-      inputMd.push_back(mdTuple({
-        mdI32(buf.argIndex), mdString("air.buffer"),
-        mdString("air.buffer_size"), mdI32(byteSize),
-        mdString("air.location_index"), mdI32(buf.bufferIndex), mdI32(1u),
-        mdString("air.read"),
-        mdString("air.address_space"), mdI32(kAsConstant),
-        mdString("air.arg_type_size"), mdI32(byteSize),
-        mdString("air.arg_type_align_size"), mdI32(16u),
-        mdString("air.arg_type_name"), mdString(buf.name),
-        mdString("air.arg_name"), mdString(buf.name) }));
-    }
+    if (useAB) {
+      /* push data keeps its own top-level buffer argument */
+      for (const auto& buf : buffers) {
+        if (!buf.isPushData)
+          continue;
+        uint32_t byteSize =
+          uint32_t(mod->getDataLayout().getTypeAllocSize(buf.type));
+        inputMd.push_back(mdTuple({
+          mdI32(buf.argIndex), mdString("air.buffer"),
+          mdString("air.buffer_size"), mdI32(byteSize),
+          mdString("air.location_index"), mdI32(buf.bufferIndex), mdI32(1u),
+          mdString("air.read"),
+          mdString("air.address_space"), mdI32(kAsConstant),
+          mdString("air.arg_type_size"), mdI32(byteSize),
+          mdString("air.arg_type_align_size"), mdI32(16u),
+          mdString("air.arg_type_name"), mdString(buf.name),
+          mdString("air.arg_name"), mdString(buf.name) }));
+      }
 
-    for (const auto& tex : textures) {
-      inputMd.push_back(mdTuple({
-        mdI32(tex.argIndex), mdString("air.texture"),
-        mdString("air.location_index"), mdI32(tex.slot), mdI32(1u),
-        mdString("air.sample"),
-        mdString("air.arg_type_name"), mdString(textureMslTypeName(tex.kind)),
-        mdString("air.arg_name"), mdString(tex.name) }));
-    }
-    for (const auto& smp : samplers) {
-      inputMd.push_back(mdTuple({
-        mdI32(smp.argIndex), mdString("air.sampler"),
-        mdString("air.location_index"), mdI32(smp.slot), mdI32(1u),
-        mdString("air.arg_type_name"), mdString("sampler"),
-        mdString("air.arg_name"), mdString(smp.name) }));
+      if (abWordCount > 0u)
+        inputMd.push_back(buildAbMetadata());
+    } else {
+      for (const auto& buf : buffers) {
+        uint32_t byteSize =
+          uint32_t(mod->getDataLayout().getTypeAllocSize(buf.type));
+        inputMd.push_back(mdTuple({
+          mdI32(buf.argIndex), mdString("air.buffer"),
+          mdString("air.buffer_size"), mdI32(byteSize),
+          mdString("air.location_index"), mdI32(buf.bufferIndex), mdI32(1u),
+          mdString("air.read"),
+          mdString("air.address_space"), mdI32(kAsConstant),
+          mdString("air.arg_type_size"), mdI32(byteSize),
+          mdString("air.arg_type_align_size"), mdI32(16u),
+          mdString("air.arg_type_name"), mdString(buf.name),
+          mdString("air.arg_name"), mdString(buf.name) }));
+      }
+
+      for (const auto& tex : textures) {
+        inputMd.push_back(mdTuple({
+          mdI32(tex.argIndex), mdString("air.texture"),
+          mdString("air.location_index"), mdI32(tex.slot), mdI32(1u),
+          mdString("air.sample"),
+          mdString("air.arg_type_name"), mdString(textureMslTypeName(tex.kind)),
+          mdString("air.arg_name"), mdString(tex.name) }));
+      }
+      for (const auto& smp : samplers) {
+        inputMd.push_back(mdTuple({
+          mdI32(smp.argIndex), mdString("air.sampler"),
+          mdString("air.location_index"), mdI32(smp.slot), mdI32(1u),
+          mdString("air.arg_type_name"), mdString("sampler"),
+          mdString("air.arg_name"), mdString(smp.name) }));
+      }
     }
 
     const char* stageList =
@@ -2274,6 +2554,7 @@ std::vector<uint8_t> AirBuilder::buildMetallib() {
     binding.index = buf.bufferIndex;
     binding.isCbv = buf.isCbv;
     binding.regIndex = buf.regIndex;
+    binding.abWord = buf.abWord;
     binding.byteSize = buf.type
       ? impl.mod->getDataLayout().getTypeAllocSize(buf.type).getFixedSize()
       : 0u;
@@ -2283,12 +2564,16 @@ std::vector<uint8_t> AirBuilder::buildMetallib() {
   m_textureBindings.clear();
   for (const auto& tex : impl.textures) {
     m_textureBindings.push_back({ tex.name, tex.slot,
-      AirBuilderImpl::textureManifestKind(tex.kind) });
+      AirBuilderImpl::textureManifestKind(tex.kind), tex.abWord });
   }
 
   m_samplerBindings.clear();
   for (const auto& smp : impl.samplers)
-    m_samplerBindings.push_back({ smp.name, smp.slot, "" });
+    m_samplerBindings.push_back({ smp.name, smp.slot, "", smp.abWord });
+
+  m_abInfo = AbInfo();
+  m_abInfo.used = impl.useAB && impl.abWordCount > 0u;
+  m_abInfo.sizeBytes = impl.abWordCount * 8u;
 
   m_specBindings.clear();
   if (!m_options.foldSpecConstants) {

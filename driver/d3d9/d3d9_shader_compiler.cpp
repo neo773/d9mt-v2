@@ -1299,11 +1299,16 @@ namespace dxvk {
       std::vector<uint8_t> metallib(512u * 1024u);
       std::vector<uint8_t> reflection(64u * 1024u);
 
+      // Argument-buffer binding model (default ON; D9MT_NO_AB=1 reverts to
+      // per-slot argument-table binding for A/B debugging).
+      static const bool noAb = env::getEnvVar("D9MT_NO_AB") == "1";
+
       d9mt_air_compile_params params = { };
       params.ir_data     = uint64_t(uintptr_t(irBuf.data()));
       params.ir_size     = irBuf.size();
       params.entry_name  = uint64_t(uintptr_t(entry.c_str()));
-      params.flags       = D9MT_AIR_FLAG_FOLD_SPEC;
+      params.flags       = D9MT_AIR_FLAG_FOLD_SPEC
+                         | (noAb ? 0u : D9MT_AIR_FLAG_ARG_BUFFER);
       params.spec_count  = 0u;
       params.spec_data   = 0u;
       params.pe_metallib_buffer     = uint64_t(uintptr_t(metallib.data()));
@@ -1354,6 +1359,9 @@ namespace dxvk {
       d9mt_air_reflection_header hdr = { };
       std::memcpy(&hdr, blob.data(), sizeof(hdr));
 
+      map.abUsed = hdr.uses_arg_buffer != 0u;
+      map.abTableIndex = hdr.arg_buffer_index;
+
       size_t off = sizeof(hdr);
       for (uint32_t i = 0u; i < hdr.entry_count; i++) {
         if (off + sizeof(d9mt_air_reflection_entry) > blob.size())
@@ -1361,11 +1369,44 @@ namespace dxvk {
         d9mt_air_reflection_entry e = { };
         std::memcpy(&e, blob.data() + off, sizeof(e));
         off += sizeof(e);
+        e.name[sizeof(e.name) - 1u] = '\0';
+
+        // Argument-buffer member: e.index is the handle-word index; the word
+        // list tells the backend flush what to write at each word.
+        if (e.flags & D9MT_AIR_ENTRY_IN_AB) {
+          if (map.abWords.size() <= e.index)
+            map.abWords.resize(e.index + 1u, { uint8_t(0xFFu), 0u });
+
+          D3D9CbvSlotMap::AbWord w = { uint8_t(0xFFu), 0u };
+          if (e.kind == D9MT_AIR_BIND_BUFFER) {
+            w.kind = 0u; /* MtlShaderFunction::AbWordKind::Cbv */
+            // Legacy-builtin buffers (cF/cI/cB/...) also carry a CbvIndex-
+            // shaped reg via the frontend's CBV binding; DclCbv entries
+            // report it directly.
+            w.reg = e.reg_index != D9MT_AIR_NO_REG_INDEX
+              ? uint8_t(e.reg_index) : uint8_t(0xFFu);
+            if (e.reg_index != D9MT_AIR_NO_REG_INDEX
+             && e.reg_index < uint32_t(Cbv::Count))
+              map.slot[e.reg_index] = int8_t(e.index);
+          } else if (e.kind == D9MT_AIR_BIND_SAMPLER) {
+            w.kind = 2u; /* Sampler */
+            w.reg = uint8_t(e.reg_index);
+          } else if (e.kind == D9MT_AIR_BIND_TEXTURE_2D
+                  || e.kind == D9MT_AIR_BIND_TEXTURE_CUBE
+                  || e.kind == D9MT_AIR_BIND_TEXTURE_3D) {
+            w.kind = 1u; /* Texture */
+            w.reg = uint8_t(e.reg_index);
+          }
+          map.abWords[e.index] = w;
+
+          Logger::debug(str::format("D3D9 AIR reflect ", m_name, ": AB word ",
+            e.index, " kind=", e.kind, " reg=", int32_t(e.reg_index),
+            " name='", e.name, "'"));
+          continue;
+        }
 
         if (e.kind != D9MT_AIR_BIND_BUFFER)
           continue;
-
-        e.name[sizeof(e.name) - 1u] = '\0';
 
         // Only DclCbv-backed buffers carry a valid reg_index (== CbvIndex).
         if (e.reg_index != D9MT_AIR_NO_REG_INDEX && e.reg_index < uint32_t(Cbv::Count))

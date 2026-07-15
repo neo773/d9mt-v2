@@ -163,6 +163,13 @@ namespace dxvk::backend {
     if (!pso)
       return false;
 
+    /* DirtyPso often re-resolves to the PSO already encoded (state rewritten
+     * with the same values, or A->B->A shader flips within a pass) — skip
+     * the redundant setPSO append. m_lastEncodedPso resets per encoder. */
+    if (pso == m_lastEncodedPso)
+      return true;
+    m_lastEncodedPso = pso;
+
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setpso>(
       uint16_t(WMTMtl4RenderCommandSetPSO));
     cmd->pso = pso;
@@ -243,6 +250,11 @@ namespace dxvk::backend {
        * divergence here is the recorded-vs-live retargeting bug class. */
       if (unlikely(s.slice.storage() != s.slice.buffer()->storage()))
         s_diagVbStale++;
+      /* GPU-use stamp for the (re)bound stream — this walk visits exactly
+       * the streams that changed, so stamping here replaces the former
+       * per-draw 16-slot walk in prepareDraw; unchanged-but-bound streams
+       * are covered by prepareDraw's serial-change full re-stamp. */
+      s.slice.buffer()->setTrackingSerial(m_currentSerial);
       appendTableAddress(shadow, table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
     }
   }
@@ -268,14 +280,6 @@ namespace dxvk::backend {
       obj_handle_t    table  = pair.table[st].handle();
       ArgTableShadow& shadow = pair.shadow[st];
 
-      const uint32_t cbvMask = (psoChanged ? ~0u : b.dirtyCbvs)
-        & ((1u << b.cbvs.size()) - 1u);
-      const uint32_t texMask = b.dirtyTextures
-        & ((1u << b.textures.size()) - 1u);
-      const uint32_t smpMask = b.dirtySamplers
-        & ((1u << b.samplers.size()) - 1u);
-      b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
-
       /* The bound shader for this stage carries the CbvIndex -> AIR Metal
        * buffer-slot map (reflection-derived, SOURCE_OF_TRUTH §4b bug 1). The
        * frontend binds CBVs at raw CbvIndex; we translate to the slot the AIR
@@ -283,6 +287,89 @@ namespace dxvk::backend {
        * put them) and never collide with vertex streams (kVertexBufferBaseIndex)
        * or push data (kPushConstantIndex). */
       const Rc<MtlShaderFunction>& fn = (st == 0u) ? m_vs : m_fs;
+
+      /* Binding-model switch (FF per-slot <-> translated AB): both paths
+       * consume the same dirty masks, so the incoming model must reconcile
+       * everything the outgoing one may have swallowed. */
+      const bool abShader = fn != nullptr && !fn->abWords.empty();
+      if (abShader != (b.abActive != 0u)) {
+        b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = ~0u;
+        b.abActive = abShader ? 1u : 0u;
+      }
+
+      /* --- argument-buffer path (fn->abWords) ------------------------------
+       * The shader reads every texture/sampler/CBV as an 8-byte handle word
+       * from ONE buffer at kAbIndex. Rebuild the word slice when any binding
+       * changed or the PSO did (the word layout is shader-derived); otherwise
+       * the previous slice is still exact — either way binding is ONE
+       * shadow-diffed setAddress instead of per-slot table calls. Slice
+       * memory is never rewritten once bound (snapshot semantics): a rebuild
+       * allocates fresh ring bytes. */
+      if (abShader) {
+        const bool rebuild = psoChanged || b.abGpuAddress == 0u
+          || (b.dirtyCbvs | b.dirtyTextures | b.dirtySamplers) != 0u;
+        b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
+
+        if (rebuild) {
+          const uint32_t words = uint32_t(fn->abWords.size());
+          RingSlice rs = m_device->uploadRing().allocate(
+            uint64_t(words) * 8u, 16u);
+          if (rs.cpuPtr) {
+            uint64_t* w = reinterpret_cast<uint64_t*>(rs.cpuPtr);
+            for (uint32_t i = 0u; i < words; i++) {
+              const MtlShaderFunction::AbWord& e = fn->abWords[i];
+              uint64_t v = 0u;
+              switch (e.kind) {
+                case MtlShaderFunction::AbWordKind::Cbv: {
+                  if (e.reg < b.cbvs.size()) {
+                    StageBindings::CbvBinding& cbv = b.cbvs[e.reg];
+                    /* Record-time snapshot (MtlBufferSlice contract) with the
+                     * discard/range offset folded in. */
+                    if (cbv.slice.defined() && cbv.slice.storage() != nullptr
+                     && uintptr_t(cbv.slice.storage().ptr()) >= 0x10000u)
+                      v = cbv.slice.gpuAddress(cbv.rangeOffset);
+                  }
+                } break;
+                case MtlShaderFunction::AbWordKind::Texture: {
+                  if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr)
+                    v = static_cast<MtlTextureViewImpl*>(
+                      b.textures[e.reg].ptr())->gpuResourceId;
+                } break;
+                case MtlShaderFunction::AbWordKind::Sampler: {
+                  if (e.reg < b.samplers.size() && b.samplers[e.reg] != nullptr)
+                    v = static_cast<MtlSamplerStateImpl*>(
+                      b.samplers[e.reg].ptr())->gpuResourceId;
+                } break;
+                default: break;
+              }
+              w[i] = v;
+            }
+            b.abGpuAddress = rs.gpuAddress;
+          }
+        }
+        appendTableAddress(shadow, table, b.abGpuAddress, kAbIndex);
+
+        /* push data still rides its own slot (below) */
+        if (b.pushDirtyHi > 0u) {
+          uint64_t sz = b.pushExtent;
+          RingSlice prs = m_device->uploadRing().allocate(sz, 256u);
+          if (prs.cpuPtr) {
+            std::memcpy(prs.cpuPtr, b.pushData.data(), sz);
+            b.pushGpuAddress = prs.gpuAddress;
+          }
+          b.pushDirtyLo = b.pushDirtyHi = 0u;
+        }
+        appendTableAddress(shadow, table, b.pushGpuAddress, kPushConstantIndex);
+        continue;
+      }
+
+      const uint32_t cbvMask = (psoChanged ? ~0u : b.dirtyCbvs)
+        & ((1u << b.cbvs.size()) - 1u);
+      const uint32_t texMask = b.dirtyTextures
+        & ((1u << b.textures.size()) - 1u);
+      const uint32_t smpMask = b.dirtySamplers
+        & ((1u << b.samplers.size()) - 1u);
+      b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
 
       /* constant buffers at their AIR slots, with the discard/range offset
        * folded in (bindUniformBufferRange snapshot). */
@@ -361,10 +448,17 @@ namespace dxvk::backend {
   void MtlContextImpl::flushDynamicState() {
     prof::Scope profScope(prof::FlushDynamicState);
     /* Encoder dynamic state rides the same wmtcmd batch as the table writes
-     * and draws — values are snapshotted into the commands here. */
+     * and draws — values are snapshotted into the commands here. Each piece
+     * is diffed against the encoder-scoped shadow (reset per encoder in
+     * materializePass): fresh encoders append everything, later flushes only
+     * what changed. */
+    const bool first = !m_dynValid;
+    m_dynValid = true;
 
     /* viewport (RT-pixel coords; backing scale handled in the presenter) */
-    {
+    if (first
+     || std::memcmp(&m_lastViewport, &m_viewport, sizeof(MtlViewport)) != 0) {
+      m_lastViewport = m_viewport;
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setviewport>(
         uint16_t(WMTMtl4RenderCommandSetViewport));
       cmd->viewport.originX = m_viewport.originX;
@@ -391,26 +485,39 @@ namespace dxvk::backend {
         if (!w) { w = uint32_t(m_viewport.width); h = uint32_t(m_viewport.height); }
         sc = { 0u, 0u, w, h };
       }
-      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setscissorrect>(
-        uint16_t(WMTMtl4RenderCommandSetScissorRect));
-      cmd->rect.x      = sc.x;
-      cmd->rect.y      = sc.y;
-      cmd->rect.width  = sc.width;
-      cmd->rect.height = sc.height;
+      if (first
+       || std::memcmp(&m_lastScissor, &sc, sizeof(MtlRect)) != 0) {
+        m_lastScissor = sc;
+        auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setscissorrect>(
+          uint16_t(WMTMtl4RenderCommandSetScissorRect));
+        cmd->rect.x      = sc.x;
+        cmd->rect.y      = sc.y;
+        cmd->rect.width  = sc.width;
+        cmd->rect.height = sc.height;
+      }
     }
 
     /* depth-stencil state object (cached in the device) + stencil ref */
     {
-      auto* dss = m_cmdChunk.append<wmtcmd_mtl4_setdsso>(
-        uint16_t(WMTMtl4RenderCommandSetDepthStencilState));
-      dss->dsso = m_device->getDepthStencilState(m_depthStencil);
-      auto* sref = m_cmdChunk.append<wmtcmd_mtl4_setstencilref>(
-        uint16_t(WMTMtl4RenderCommandSetStencilReferenceValue));
-      sref->reference = m_stencilRef;
+      obj_handle_t dsso = m_device->getDepthStencilState(m_depthStencil);
+      if (first || dsso != m_lastDsso) {
+        m_lastDsso = dsso;
+        auto* dss = m_cmdChunk.append<wmtcmd_mtl4_setdsso>(
+          uint16_t(WMTMtl4RenderCommandSetDepthStencilState));
+        dss->dsso = dsso;
+      }
+      if (first || m_stencilRef != m_lastStencilRef) {
+        m_lastStencilRef = m_stencilRef;
+        auto* sref = m_cmdChunk.append<wmtcmd_mtl4_setstencilref>(
+          uint16_t(WMTMtl4RenderCommandSetStencilReferenceValue));
+        sref->reference = m_stencilRef;
+      }
     }
 
     /* blend constant */
-    {
+    if (first
+     || std::memcmp(&m_lastBlendColor, &m_blendColor, sizeof(MtlColor4)) != 0) {
+      m_lastBlendColor = m_blendColor;
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setblendcolor>(
         uint16_t(WMTMtl4RenderCommandSetBlendColor));
       cmd->red   = m_blendColor.r;

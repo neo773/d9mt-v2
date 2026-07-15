@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <array>
+#include <vector>
 
 #include "mtl_types.h"
 #include "mtl_resource.h"
@@ -61,7 +62,23 @@ namespace dxvk {
     // frontend binds constant buffers at raw CbvIndex; the AIR shader reads them
     // at these Metal [[buffer(n)]] slots. -1 = the shader does not declare that
     // buffer. Index by D3D9 CbvIndex (0..7); consumed by the arg-table flush.
+    // Argument-buffer shaders (abWords non-empty): the values are AB WORD
+    // indices instead of Metal buffer slots.
     std::array<int8_t, 8> cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };
+
+    // Argument-buffer binding model: the shader reads its resources as 8-byte
+    // handle words (gpuAddress for CBVs, gpuResourceID for textures/samplers)
+    // from ONE buffer bound at abTableIndex. abWords[i] describes word i; the
+    // backend flush writes the words into an UploadRing slice and appends a
+    // single table setAddress per stage per draw instead of per-slot calls.
+    // Empty = classic per-slot binding (FF ubershaders until converted).
+    enum class AbWordKind : uint8_t { Cbv = 0, Texture = 1, Sampler = 2 };
+    struct AbWord {
+      AbWordKind kind;
+      uint8_t    reg;   /* D3D9 register: CbvIndex / t# / s# */
+    };
+    uint8_t             abTableIndex = 21u;
+    std::vector<AbWord> abWords;
   };
 
   class MtlCommandBuffer : public RcObject { };   // MTL4CommandBuffer

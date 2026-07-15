@@ -52,6 +52,8 @@ struct Args {
    * too (the reference path always lowers; this exercises DclCbv /
    * DescriptorLoad / BufferLoad in AirBuilder) */
   bool lowerLegacy = false;
+  /* argument-buffer binding model (Options::useArgumentBuffer) */
+  bool argBuffer = false;
   /* hand-built spec-constant IR module instead of SM3 input (spec
    * constants are driver-generated, not sm3-reachable) */
   bool testSpec = false;
@@ -290,6 +292,8 @@ bool parseArgs(int argc, char** argv, Args& args) {
       args.dumpAir = true;
     } else if (a == "--lower-legacy") {
       args.lowerLegacy = true;
+    } else if (a == "--arg-buffer") {
+      args.argBuffer = true;
     } else if (a == "--test-spec") {
       args.testSpec = true;
     } else if (a == "-o" && i + 1 < argc) {
@@ -380,6 +384,7 @@ int main(int argc, char** argv) {
   try {
     dxbc_spv::air::AirBuilder::Options airOptions = {};
     airOptions.entryName = args.name.c_str();
+    airOptions.useArgumentBuffer = args.argBuffer;
 
     dxbc_spv::air::AirBuilder airBuilder(builder, airOptions);
     std::vector<uint8_t> metallib = airBuilder.buildMetallib();

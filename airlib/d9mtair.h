@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define D9MT_AIR_ABI_VERSION 1u
+#define D9MT_AIR_ABI_VERSION 2u
 
 enum d9mt_air_func {
   D9MT_AIR_FUNC_VERSION = 0,
@@ -35,6 +35,12 @@ enum d9mt_air_status {
 
 /* compile flags */
 #define D9MT_AIR_FLAG_FOLD_SPEC (1u << 0)
+/* Argument-buffer binding model: textures/samplers/CBVs become 8-byte
+ * handle words in ONE struct bound at [[buffer(21)]]; the driver writes
+ * gpuResourceID/gpuAddress words CPU-side instead of per-slot argument-
+ * table calls. Reflection entries for AB members set
+ * D9MT_AIR_ENTRY_IN_AB with index = the word index. */
+#define D9MT_AIR_FLAG_ARG_BUFFER (1u << 1)
 
 struct d9mt_air_version_params {
   uint32_t abi_version;   /* out: D9MT_AIR_ABI_VERSION of the unix side */
@@ -89,22 +95,28 @@ struct d9mt_air_reflection_header {
   uint32_t render_target_count;
   uint8_t  writes_depth;
   uint8_t  writes_point_size;
-  uint8_t  reserved0[2];
+  uint8_t  uses_arg_buffer;   /* 1 = AB binding model (ABI v2)             */
+  uint8_t  arg_buffer_index;  /* AB [[buffer(n)]] table slot (21)          */
   uint32_t entry_count;
 };
 
+/* entry flags (ABI v2; 0 in v1 blobs via the old `reserved` field) */
+#define D9MT_AIR_ENTRY_IN_AB (1u << 0) /* index = word in the argument buffer */
+
 struct d9mt_air_reflection_entry {
   uint32_t kind;              /* d9mt_air_binding_kind                     */
-  uint32_t index;             /* [[buffer/texture/sampler(index)]] or spec id */
+  uint32_t index;             /* [[buffer/texture/sampler(index)]], spec id,
+                               * or (D9MT_AIR_ENTRY_IN_AB) the AB word index */
   uint64_t byte_size;         /* buffers only                              */
   char     name[40];          /* NUL-terminated, truncated                 */
   /* For BUFFER entries that came from a DclCbv, reg_index is the DclCbv
-   * register index (== the D3D9 frontend CbvIndex). D9MT_AIR_NO_REG_INDEX for
-   * legacy-builtin / push-data buffers and all non-buffer entries. Lets the
-   * driver map a bound constant buffer to the Metal slot the shader declares
-   * WITHOUT relying on data-derived debug names (SOURCE_OF_TRUTH §4b bug 1). */
+   * register index (== the D3D9 frontend CbvIndex). For TEXTURE/SAMPLER
+   * entries it is the D3D9 register (t#/s#). D9MT_AIR_NO_REG_INDEX for
+   * legacy-builtin / push-data buffers and spec entries. Lets the driver
+   * map a bound resource to where the shader reads it WITHOUT relying on
+   * data-derived debug names (SOURCE_OF_TRUTH §4b bug 1). */
   uint32_t reg_index;
-  uint32_t reserved;
+  uint32_t flags;             /* D9MT_AIR_ENTRY_*                          */
 };
 
 #define D9MT_AIR_NO_REG_INDEX 0xFFFFFFFFu

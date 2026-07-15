@@ -503,8 +503,10 @@ namespace dxvk::backend {
     m_dirty = DirtyEverything;
     /* Fresh encoder: encoder-level state (incl. setArgumentTable) is gone —
      * the first draw of this pass must rotate in a retired pair and re-bind
-     * it (prepareDraw). */
+     * it (prepareDraw). Encoder-scoped trim shadows reset with it. */
     m_argTablesBound = false;
+    m_lastEncodedPso = 0u;
+    m_dynValid       = false;
 
   }
 
@@ -623,60 +625,95 @@ namespace dxvk::backend {
 
   // --- state setters (fold + dirty) ------------------------------------------
 
+  /* Redundant-state guards (perf): D3D9 titles re-set identical state
+   * constantly; an unguarded setter turns each into a dirty bit and a
+   * per-draw resolve/flush cascade downstream (resolvePso key rebuilds were
+   * ~per draw in GTA). Skipping the no-change case here kills the whole
+   * chain at the cheapest point. */
+
   void MtlContextImpl::bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) {
-    (stage == MtlShaderStage::Vertex ? m_vs : m_fs) = std::move(fn);
+    Rc<MtlShaderFunction>& slot = (stage == MtlShaderStage::Vertex ? m_vs : m_fs);
+    if (slot == fn)
+      return;
+    slot = std::move(fn);
     m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setVertexLayout(
     uint32_t nAttr, const MtlVertexAttr* attrs,
     uint32_t nLayout, const MtlVertexLayout* layouts) {
+    if (m_vertexAttrs.size() == nAttr && m_vertexLayouts.size() == nLayout
+     && std::memcmp(m_vertexAttrs.data(), attrs, nAttr * sizeof(MtlVertexAttr)) == 0
+     && std::memcmp(m_vertexLayouts.data(), layouts, nLayout * sizeof(MtlVertexLayout)) == 0)
+      return;
     m_vertexAttrs.assign(attrs, attrs + nAttr);
     m_vertexLayouts.assign(layouts, layouts + nLayout);
     m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setPrimitiveTopology(MtlPrimitiveTopology topology) {
+    if (m_topology == topology)
+      return;
     m_topology = topology;   /* PSO topology CLASS only changes across point/line/tri */
     m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setViewports(uint32_t n, const MtlViewport* viewports) {
-    if (n) m_viewport = viewports[0];
+    if (!n)
+      return;
+    if (std::memcmp(&m_viewport, &viewports[0], sizeof(MtlViewport)) == 0)
+      return;
+    m_viewport = viewports[0];
     m_dirty |= DirtyViewport;
   }
 
   void MtlContextImpl::setRasterizerState(const MtlRasterizerState& rs) {
+    if (std::memcmp(&m_rasterizer, &rs, sizeof(rs)) == 0)
+      return;
     m_rasterizer = rs;
     m_dirty |= DirtyRasterizer;
   }
 
   void MtlContextImpl::setMultisampleState(const MtlMultisampleState& ms) {
+    if (std::memcmp(&m_msaa, &ms, sizeof(ms)) == 0)
+      return;
     m_msaa = ms;
     m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setDepthStencilState(const MtlDepthStencilState& ds) {
+    if (std::memcmp(&m_depthStencil, &ds, sizeof(ds)) == 0)
+      return;
     m_depthStencil = ds;
     m_dirty |= DirtyDepthStencil;
   }
 
   void MtlContextImpl::setBlendMode(uint32_t rt, const MtlBlendMode& blend) {
-    if (rt < 4) m_blend[rt] = blend;
+    if (rt >= 4)
+      return;
+    if (std::memcmp(&m_blend[rt], &blend, sizeof(blend)) == 0)
+      return;
+    m_blend[rt] = blend;
     m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setBlendColor(MtlColor4 color) {
+    if (std::memcmp(&m_blendColor, &color, sizeof(color)) == 0)
+      return;
     m_blendColor = color;
     m_dirty |= DirtyBlendColor;
   }
 
   void MtlContextImpl::setStencilReference(uint32_t reference) {
+    if (m_stencilRef == reference)
+      return;
     m_stencilRef = reference;
     m_dirty |= DirtyStencilRef;
   }
 
   void MtlContextImpl::setDepthBias(MtlDepthBias bias) {
+    if (std::memcmp(&m_depthBias, &bias, sizeof(bias)) == 0)
+      return;
     m_depthBias = bias;
     m_dirty |= DirtyDepthBias;
   }
@@ -756,13 +793,21 @@ namespace dxvk::backend {
       if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped texture bind beyond stage table (DMAP?)"); }
       return;
     }
+    /* No-change guard: D3D9 titles re-SetTexture the bound texture per draw;
+     * an accepted redundant bind dirties the slot and (AB path) rebuilds the
+     * stage's whole handle slice downstream. */
+    bool changed = false;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
+        if (m_bindings[s].textures[slot] == view)
+          continue;
         m_bindings[s].textures[slot] = view;
         m_bindings[s].dirtyTextures |= 1u << slot;
+        changed = true;
       }
     }
-    m_dirty |= DirtyResources;
+    if (changed)
+      m_dirty |= DirtyResources;
   }
 
   void MtlContextImpl::bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) {
@@ -771,13 +816,18 @@ namespace dxvk::backend {
       if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped sampler bind beyond stage table (DMAP?)"); }
       return;
     }
+    bool changed = false;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
+        if (m_bindings[s].samplers[slot] == sampler)
+          continue;
         m_bindings[s].samplers[slot] = sampler;
         m_bindings[s].dirtySamplers |= 1u << slot;
+        changed = true;
       }
     }
-    m_dirty |= DirtyResources;
+    if (changed)
+      m_dirty |= DirtyResources;
   }
 
   void MtlContextImpl::pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) {
@@ -827,6 +877,11 @@ namespace dxvk::backend {
     if (m_indexBuffer.storage() == nullptr)
       return;
     prof::Scope profScope(prof::EncodeDraw);
+    /* GPU-use stamp, compare-guarded (atomic store only when stale) —
+     * replaces the per-draw stamp walk in prepareDraw for the index buffer. */
+    if (m_indexBuffer.buffer() != nullptr
+     && m_indexBuffer.buffer()->trackingSerial() != m_currentSerial)
+      m_indexBuffer.buffer()->setTrackingSerial(m_currentSerial);
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
@@ -857,7 +912,10 @@ namespace dxvk::backend {
      * FlushVertexBuffers/FlushResources/FlushDynamicState (and an arena-cap
      * FlushCmdChunk) nest inside it. */
     prof::Scope profScope(prof::PrepareDraw);
-    materializePass();
+    /* Inline the common case: the pass is already materialized for every
+     * draw but the first — skip the call (x86-emulated prologue per draw). */
+    if (unlikely(!m_pass.active))
+      materializePass();
 
     /* Arena cap: replay-and-recycle mid-pass once the batch crosses the cap.
      * Any command boundary is a valid flush point — the stream replays in
@@ -928,13 +986,21 @@ namespace dxvk::backend {
      * is what makes D3D9DeviceEx::WaitForResource a serial compare instead
      * of a full GPU drain. Stamped per draw, not per bind — bindings
      * persist across submissions, so a bind-time stamp would go stale and
-     * let a Lock overwrite vertex memory a later cmdbuf still reads. */
-    for (auto& stream : m_vertexStreams) {
-      if (stream.slice.defined() && stream.slice.buffer() != nullptr)
-        stream.slice.buffer()->setTrackingSerial(m_currentSerial);
+     * let a Lock overwrite vertex memory a later cmdbuf still reads.
+     * TRIM: (re)bound streams are stamped by flushVertexBuffers' dirty-mask
+     * walk (it visits exactly the changed slots), and the index buffer by
+     * drawIndexed's compare-guarded stamp. The full walk below only runs
+     * when the SERIAL moves (new cmdbuf): that is the one case where an
+     * unchanged-but-still-bound binding carries a stale stamp. */
+    if (unlikely(m_currentSerial != m_lastStampSerial)) {
+      for (auto& stream : m_vertexStreams) {
+        if (stream.slice.defined() && stream.slice.buffer() != nullptr)
+          stream.slice.buffer()->setTrackingSerial(m_currentSerial);
+      }
+      if (m_indexBuffer.defined() && m_indexBuffer.buffer() != nullptr)
+        m_indexBuffer.buffer()->setTrackingSerial(m_currentSerial);
+      m_lastStampSerial = m_currentSerial;
     }
-    if (m_indexBuffer.defined() && m_indexBuffer.buffer() != nullptr)
-      m_indexBuffer.buffer()->setTrackingSerial(m_currentSerial);
 
     /* all folded state is now bound on the encoder / argument tables; the
      * next draw only re-flushes what changes (ring slices already snapshot). */

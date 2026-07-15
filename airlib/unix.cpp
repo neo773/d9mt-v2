@@ -45,6 +45,7 @@ int compileImpl(d9mt_air_compile_params* p) {
     ? reinterpret_cast<const char*>(uintptr_t(p->entry_name))
     : "main";
   options.foldSpecConstants = (p->flags & D9MT_AIR_FLAG_FOLD_SPEC) != 0u;
+  options.useArgumentBuffer = (p->flags & D9MT_AIR_FLAG_ARG_BUFFER) != 0u;
 
   const uint32_t* spec =
     reinterpret_cast<const uint32_t*>(uintptr_t(p->spec_data));
@@ -68,29 +69,39 @@ int compileImpl(d9mt_air_compile_params* p) {
 
   auto addEntry = [&entries](uint32_t kind, uint32_t index,
                              uint64_t byteSize, const std::string& name,
-                             uint32_t regIndex = D9MT_AIR_NO_REG_INDEX) {
+                             uint32_t regIndex = D9MT_AIR_NO_REG_INDEX,
+                             uint32_t flags = 0u) {
     d9mt_air_reflection_entry entry = {};
     entry.kind = kind;
     entry.index = index;
     entry.byte_size = byteSize;
     entry.reg_index = regIndex;
+    entry.flags = flags;
     std::strncpy(entry.name, name.c_str(), sizeof(entry.name) - 1u);
     entries.push_back(entry);
   };
 
+  /* AB members report their handle-word index in `index` (flagged IN_AB);
+   * everything else keeps its argument-table slot there. */
   for (const auto& b : airBuilder.getBufferBindings())
-    addEntry(D9MT_AIR_BIND_BUFFER, b.index, b.byteSize, b.name,
-             b.isCbv ? b.regIndex : D9MT_AIR_NO_REG_INDEX);
+    addEntry(D9MT_AIR_BIND_BUFFER,
+             b.abWord >= 0 ? uint32_t(b.abWord) : b.index,
+             b.byteSize, b.name,
+             b.isCbv ? b.regIndex : D9MT_AIR_NO_REG_INDEX,
+             b.abWord >= 0 ? D9MT_AIR_ENTRY_IN_AB : 0u);
 
   for (const auto& t : airBuilder.getTextureBindings()) {
     uint32_t kind = D9MT_AIR_BIND_TEXTURE_2D;
     if (t.kind == "cube") kind = D9MT_AIR_BIND_TEXTURE_CUBE;
     if (t.kind == "3d")   kind = D9MT_AIR_BIND_TEXTURE_3D;
-    addEntry(kind, t.index, 0u, t.name);
+    addEntry(kind, t.abWord >= 0 ? uint32_t(t.abWord) : t.index, 0u, t.name,
+             t.index, t.abWord >= 0 ? D9MT_AIR_ENTRY_IN_AB : 0u);
   }
 
   for (const auto& s : airBuilder.getSamplerBindings())
-    addEntry(D9MT_AIR_BIND_SAMPLER, s.index, 0u, s.name);
+    addEntry(D9MT_AIR_BIND_SAMPLER,
+             s.abWord >= 0 ? uint32_t(s.abWord) : s.index, 0u, s.name,
+             s.index, s.abWord >= 0 ? D9MT_AIR_ENTRY_IN_AB : 0u);
 
   for (const auto& s : airBuilder.getSpecBindings())
     addEntry(D9MT_AIR_BIND_SPEC_CONSTANT, s.index, 0u, s.name);
@@ -100,6 +111,8 @@ int compileImpl(d9mt_air_compile_params* p) {
   header.render_target_count = airBuilder.getOutputInfo().renderTargetCount;
   header.writes_depth = airBuilder.getOutputInfo().writesDepth ? 1u : 0u;
   header.writes_point_size = airBuilder.getOutputInfo().writesPointSize ? 1u : 0u;
+  header.uses_arg_buffer = airBuilder.getAbInfo().used ? 1u : 0u;
+  header.arg_buffer_index = uint8_t(airBuilder.getAbInfo().tableIndex);
   header.entry_count = uint32_t(entries.size());
 
   size_t reflectionSize = sizeof(header)

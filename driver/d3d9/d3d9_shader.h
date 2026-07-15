@@ -62,6 +62,20 @@ namespace dxvk {
    */
   struct D3D9CbvSlotMap {
     std::array<int8_t, 8> slot;
+    /* Argument-buffer binding model (reflection header uses_arg_buffer):
+     * the shader reads textures/samplers/CBVs as 8-byte handle words from
+     * ONE buffer at abTableIndex. abWords lists each word in order:
+     * kind + D3D9 register; the backend writes the matching gpuAddress /
+     * gpuResourceID into a ring slice and binds its address once per draw.
+     * When abUsed, `slot` above holds AB WORD indices instead of Metal
+     * buffer slots. */
+    struct AbWord {
+      uint8_t kind;   /* MtlAbWordKind */
+      uint8_t reg;    /* D3D9 register (CbvIndex / t# / s#) */
+    };
+    bool                 abUsed = false;
+    uint8_t              abTableIndex = 21u;
+    std::vector<AbWord>  abWords;
     D3D9CbvSlotMap() { slot.fill(int8_t(-1)); }
   };
 

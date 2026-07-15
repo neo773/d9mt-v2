@@ -61,8 +61,17 @@ public:
     /** Bake spec constants to fixed values instead of emitting AIR
      *  function constants. Key = specId; missing ids use the IR default. */
     bool foldSpecConstants = false;
+    /** Argument-buffer binding model: textures, samplers and constant
+     *  buffers become 8-byte handle words in ONE struct bound at
+     *  [[buffer(kAbTableIndex)]] (CPU writes gpuResourceID/gpuAddress
+     *  words; no per-slot argument-table calls). Push data keeps its own
+     *  buffer slot. Off = classic per-slot [[texture/sampler/buffer(n)]]. */
+    bool useArgumentBuffer = false;
     std::unordered_map<uint32_t, uint32_t> specValues;
   };
+
+  /** Argument-table buffer index the AB binds at (useArgumentBuffer). */
+  static constexpr uint32_t kAbTableIndex = 21u;
 
   AirBuilder(const ir::Builder& builder, const Options& options);
 
@@ -79,7 +88,19 @@ public:
     uint64_t    byteSize = 0u; /* allocation size of the pointee */
     bool        isCbv = false; /* came from a DclCbv (vs legacy builtin / push) */
     uint32_t    regIndex = 0u; /* DclCbv register index (== D3D9 CbvIndex) */
+    int32_t     abWord = -1;   /* word index in the argument buffer, -1 = own slot */
   };
+
+  /** Argument-buffer summary (valid after buildMetallib). */
+  struct AbInfo {
+    bool     used = false;      /* entry consumes an AB */
+    uint32_t tableIndex = kAbTableIndex;
+    uint32_t sizeBytes = 0u;    /* AB struct size (wordCount * 8) */
+  };
+
+  const AbInfo& getAbInfo() const {
+    return m_abInfo;
+  }
 
   /** Shader stage seen on the IR entry point (valid after buildMetallib). */
   ir::ShaderStage getStage() const {
@@ -94,8 +115,10 @@ public:
   /** One texture/sampler argument of the built entry point. */
   struct ResourceBinding {
     std::string name;
-    uint32_t    index = 0u;  /* Metal [[texture(n)]] / [[sampler(n)]] */
+    uint32_t    index = 0u;  /* Metal [[texture(n)]] / [[sampler(n)]] slot,
+                              * == the D3D9 register in both binding models */
     std::string kind;        /* textures: "2d" | "cube" | "3d" */
+    int32_t     abWord = -1; /* word index in the argument buffer, -1 = own slot */
   };
 
   const std::vector<ResourceBinding>& getTextureBindings() const {
@@ -145,6 +168,7 @@ private:
   std::vector<ResourceBinding> m_samplerBindings;
   std::vector<SpecBinding>     m_specBindings;
   OutputInfo                   m_outputInfo;
+  AbInfo                       m_abInfo;
 
 };
 

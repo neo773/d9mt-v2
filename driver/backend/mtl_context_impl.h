@@ -244,15 +244,22 @@ namespace dxvk::backend {
     /* Provisional per-draw push-constant buffer index (top of the 0..30 Metal
      * buffer table, clear of CBVs 0..2 and streams 3..18). */
     static constexpr uint32_t kPushConstantIndex = 20u;
+    /* Argument-buffer binding model (MtlShaderFunction::abWords non-empty):
+     * the stage's textures/samplers/CBVs are 8-byte handle words in ONE ring
+     * slice bound at this table index — flushResources writes the words
+     * CPU-side and appends a single setAddress instead of per-slot calls. */
+    static constexpr uint32_t kAbIndex = 21u;
     /* Bytes reserved at the front of each stage's push buffer for the shared
      * D3D9SharedPushData block (matches DXVK MaxSharedPushDataSize). Per-stage
      * push blocks (vs/ffvs/ffps) start immediately after. */
     static constexpr uint32_t kPushSharedBlockSize = 32u;
     /* Mid-pass wmtcmd flush cap: bounds the PE-side arena (CmdChunk blocks
-     * never shrink) at ~a few hundred draws per crossing. Flushing at a
-     * command boundary is order-preserving, so the cap is purely a memory
-     * knob, not a correctness one. */
-    static constexpr size_t kCmdChunkFlushBytes = 1u << 20;
+     * never shrink). Flushing at a command boundary is order-preserving, so
+     * the cap is purely a memory knob, not a correctness one. 4 MiB: the
+     * PE->unix crossing costs ~14-17µs, so fewer, larger replays win — the
+     * AB swap also shrank per-draw struct volume, so this now covers most
+     * passes in one crossing. */
+    static constexpr size_t kCmdChunkFlushBytes = 1u << 22;
 
     // --- per-stage bound state (flat D3D9 slot model) ----------------------
     struct StageBindings {
@@ -292,6 +299,17 @@ namespace dxvk::backend {
       uint32_t dirtyTextures = ~0u;   // 16 texture slots
       uint32_t dirtySamplers = ~0u;   // 16 sampler slots
       uint32_t dirtyCbvs     = ~0u;   // 8 CBV slots
+      /* Argument-buffer path: gpuAddress of the stage's current handle-word
+       * slice (0 = none built yet). Rebuilt by flushResources whenever any
+       * binding mask is dirty or the PSO changed (the word layout is
+       * shader-derived); re-appended cheaply (shadow-diffed) otherwise. */
+      uint64_t abGpuAddress = 0u;
+      /* Which binding model consumed the dirty masks last (0 = per-slot,
+       * 1 = argument buffer). The two paths clear the same masks, so a
+       * model switch (FF ubershader <-> translated shader) must force a
+       * full reconcile or the incoming path misses changes the outgoing
+       * one consumed. */
+      uint8_t abActive = 0u;
     };
 
     /* Shadow of one argument table's PERSISTENT contents — the value the
@@ -388,6 +406,25 @@ namespace dxvk::backend {
      * diff (appendTable*) writes only slots that actually change. */
     std::vector<ArgTablePair> m_argTables;
     uint32_t                 m_argTableCursor = 0u;
+
+    /* Per-draw trim state (perf):
+     * - m_lastStampSerial: the GPU-use stamps (setTrackingSerial) for the
+     *   bound vertex/index buffers are already == m_currentSerial unless the
+     *   serial moved or a stream/index (re)bind happened — skip the whole
+     *   stamp loop on the (common) unchanged draw.
+     * - m_lastEncodedPso: skip appending a setPSO command when the resolved
+     *   PSO is the one already encoded on this encoder.
+     * - m_dynValid + shadows: fresh encoders have no dynamic state, so the
+     *   first flush appends everything; afterwards only pieces that changed
+     *   are re-appended. All reset at materializePass (new encoder). */
+    uint64_t     m_lastStampSerial = ~0ull;
+    obj_handle_t m_lastEncodedPso  = 0u;
+    bool         m_dynValid        = false;
+    MtlViewport  m_lastViewport    = {};
+    MtlRect      m_lastScissor     = {};
+    obj_handle_t m_lastDsso        = 0u;
+    uint32_t     m_lastStencilRef  = 0u;
+    MtlColor4    m_lastBlendColor  = {};
 
     /* DIAG (observers): draws whose bound slice snapshot diverged from the
      * buffer's live storage at flush time — the recorded-vs-live retargeting

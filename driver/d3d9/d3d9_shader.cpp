@@ -20,6 +20,15 @@ namespace dxvk {
       return;
     for (size_t i = 0u; i < fn->cbvSlotMap.size(); i++)
       fn->cbvSlotMap[i] = (i < map.slot.size()) ? map.slot[i] : int8_t(-1);
+
+    // Argument-buffer layout (empty = classic per-slot binding).
+    fn->abTableIndex = map.abTableIndex;
+    fn->abWords.clear();
+    if (map.abUsed) {
+      fn->abWords.reserve(map.abWords.size());
+      for (const auto& w : map.abWords)
+        fn->abWords.push_back({ MtlShaderFunction::AbWordKind(w.kind), w.reg });
+    }
   }
 
   D3D9CommonShader::D3D9CommonShader(
