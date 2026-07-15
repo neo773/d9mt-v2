@@ -163,8 +163,16 @@ namespace dxvk {
     }
 
     static constexpr std::pair<MtlStageMask, uint32_t> getTextureSlotInfo(uint32_t index) {
-      // Sampler slot and binding indices match 1:1, see above
-      return std::make_pair(IsVSSampler(index) ? MtlStageVertex : MtlStageFragment, index);
+      // Internal sampler indices are flat (0..15 PS, 16 DMAP, 17..20 VS) but the
+      // backend binds per-stage argument tables of 16 slots, so VS samplers must
+      // be rebased to their stage-relative slot (SM3 vertex sampler s#N lives at
+      // table slot N). Binding the flat index wrote past the 16-entry stage
+      // arrays and corrupted adjacent binding state (GTA IV vertex textures).
+      // Internal slot 16 (FF DMAP) has no Metal table slot; the backend drops
+      // out-of-range slots.
+      return IsVSSampler(index)
+        ? std::make_pair(MtlStageVertex,   index - FirstVSSamplerSlot)
+        : std::make_pair(MtlStageFragment, index);
     }
   };
 
