@@ -254,9 +254,13 @@ namespace dxvk::backend {
 
       /* push data -> fresh UploadRing slice at the push slot (snapshot
        * semantics: the table reads the gpuAddress at the draw snapshot, and
-       * this slice's memory is never rewritten under a queued draw). */
+       * this slice's memory is never rewritten under a queued draw).
+       * Size by pushExtent, NOT pushDirtyHi: the slice replaces the whole
+       * bound block, so it must cover every byte any shader may read, not
+       * just the range this update touched (a shared-block-only update
+       * would otherwise truncate the per-stage block at byte 32+). */
       if (b.pushDirtyHi > 0u) {
-        uint64_t sz = b.pushDirtyHi;
+        uint64_t sz = b.pushExtent;
         RingSlice rs = m_device->uploadRing().allocate(sz, 256u);
         if (rs.cpuPtr) {
           std::memcpy(rs.cpuPtr, b.pushData.data(), sz);

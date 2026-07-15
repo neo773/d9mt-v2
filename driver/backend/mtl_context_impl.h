@@ -242,6 +242,12 @@ namespace dxvk::backend {
       std::array<CbvBinding, 8> cbvs;
       std::array<uint8_t, 4096> pushData;
       uint32_t pushDirtyLo = 0, pushDirtyHi = 0;
+      /* High watermark of push bytes EVER written on this stage. The upload
+       * copies [0, pushExtent), not [0, pushDirtyHi): a partial update (e.g.
+       * only the shared alphaRef block, bytes 0..16) must still republish the
+       * per-stage block at kPushSharedBlockSize+ — a shorter fresh slice
+       * would leave the shader's cFSize/pointSize reads past the slice end. */
+      uint32_t pushExtent = 0;
       uint64_t pushGpuAddress = 0u;
     };
 

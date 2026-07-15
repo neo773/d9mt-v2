@@ -305,11 +305,16 @@ namespace dxvk::backend {
       closePass();
     ensureCommandBuffer();
 
-    /* Commit the blit that wrote the drawable. NO pre-commit waitForDrawable:
-     * dxmt omits it, and a queue-timeline wait on a drawable the display never
-     * releases blocks forever — the completion signalEvent enqueued after it
-     * then never fires and every CPU wait wedges. signalDrawable + present come
-     * AFTER commit (the Metal 4 present handshake). */
+    /* METAL 4 present handshake, all four steps: queue waitForDrawable BEFORE
+     * the commit that writes the drawable (GPU-side wait for the display to
+     * release the texture — without it the present copy scribbles into a
+     * drawable mid-scanout: visible tearing), then commit, then
+     * signalDrawable + present. The old forever-block fear dated from the
+     * drawable-leak era (drawables pinned in the residency set were never
+     * released by CA, so the wait could never satisfy); drawable lifecycle
+     * is sound now — acquire/copy/present/release on one thread, layer-owned
+     * residency set. */
+    MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
     submit(false);
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
@@ -723,6 +728,7 @@ namespace dxvk::backend {
         std::memcpy(b.pushData.data() + baseOff + offset, data, size);
         b.pushDirtyLo = b.pushDirtyLo ? std::min(b.pushDirtyLo, baseOff + offset) : baseOff + offset;
         b.pushDirtyHi = std::max(b.pushDirtyHi, baseOff + offset + size);
+        b.pushExtent  = std::max(b.pushExtent, baseOff + offset + size);
       }
     }
     m_dirty |= DirtyPush;
