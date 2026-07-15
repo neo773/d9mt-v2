@@ -140,9 +140,19 @@ namespace dxvk {
      * (was DxvkDevice::getShaderPipelineStages, minus Vulkan semantics). */
     virtual MtlStageMask getShaderStages() const;
 
-    /* CPU-waits until the GPU is done with the resource (compares the
-     * resource's tracking serial against the completed serial). Reset /
-     * Lock-with-sync paths only — never per draw. */
+    /* Whether encoded GPU work may still touch the resource: its tracking
+     * serial (stamped at CS encode time) has not completed yet. Only
+     * meaningful after the CS thread has caught up with every chunk that
+     * could use the resource (D3D9DeviceEx::WaitForResource syncs first). */
+    bool isResourceInUse(const MtlResource& resource) {
+      return resource.trackingSerial() > getCompletedSerial();
+    }
+
+    /* CPU-waits until the GPU is done with the resource (blocks until the
+     * completed serial reaches the resource's tracking serial). The caller
+     * must have flushed: an unsubmitted recording command buffer never
+     * signals, so waiting on it without a flush is a stall. Lock-with-sync /
+     * readback paths only — never per draw. */
     virtual void waitForResource(const MtlResource& resource);
 
     /* Staging upload space (was DxvkStagingBuffer allocation). */

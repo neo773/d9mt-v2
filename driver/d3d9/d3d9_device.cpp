@@ -4740,6 +4740,7 @@ namespace dxvk {
 
       if (size <= UPBufferSize) {
         m_upBuffer = std::move(buffer);
+        m_upBufferAllocation = m_upBuffer->storage();
         m_upBufferMapPtr = mapPtr;
       } else {
         // Temporary buffer
@@ -4753,9 +4754,15 @@ namespace dxvk {
     MtlDeviceSize alignedSize = align(size, CACHE_LINE_SIZE);
 
     if (unlikely(m_upBufferOffset + alignedSize > UPBufferSize)) {
+      // Ring wrap: rename the backing NOW on the app thread. The buffer
+      // object's storage() only follows when the CS executes assignStorage,
+      // so slices handed out from here on snapshot m_upBufferAllocation —
+      // draws recorded before the wrap keep the old backing, draws after it
+      // read the one the CPU writes below.
       auto slice = m_upBuffer->allocateStorage();
 
       m_upBufferOffset = 0;
+      m_upBufferAllocation = slice;
       m_upBufferMapPtr = slice->mapPtr;
 
       EmitCs([
@@ -4769,7 +4776,7 @@ namespace dxvk {
     }
 
     D3D9BufferSlice result;
-    result.slice = MtlBufferSlice(m_upBuffer, m_upBufferOffset, size);
+    result.slice = MtlBufferSlice(m_upBuffer, m_upBufferAllocation, m_upBufferOffset, size);
     result.mapPtr = reinterpret_cast<char*>(m_upBufferMapPtr) + m_upBufferOffset;
 
     m_upBufferOffset += alignedSize;
@@ -4782,34 +4789,20 @@ namespace dxvk {
     result.slice = m_stagingBuffer.alloc(size);
     if (unlikely(!result.slice.defined())) {
       // The staging backing is a linear allocator with no in-place recycle —
-      // once its 4 MiB fills, every alloc fails. Retire the full backing and
-      // start a fresh one big enough for this request. Without this the backing
-      // filled once and every later upload failed ("staging allocation failed
-      // (address space?)") — GTA IV streamed past 4 MiB and crashed.
+      // once it fills, retire it and start a fresh one big enough for this
+      // request, folding the full backing's total into the monotonic base so
+      // GetStagingMemoryStatistics() stays DXVK's allocatedTotal.
       //
-      // The retired backing must stay alive until the GPU has finished reading
-      // its uploads: copyBuffer only BORROWS the staging Rc (dropped after the
-      // copy is encoded, not executed), so freeing it early corrupts in-flight
-      // uploads (garbled 2D text). Stash it under the staging-fence value at
-      // which those uploads are guaranteed consumed, and release stashed
-      // backings lazily once the fence has passed.
+      // Lifetime needs no frontend bookkeeping: every encoded upload holds
+      // the backing Rc through its CS chunk, and the final release routes
+      // the Metal object through deferred destruction (~MtlAllocationImpl,
+      // gated on the recording serial) — the GPU always finishes reading a
+      // retired backing before it is torn down.
       m_stagingAllocatedBase += m_stagingBuffer.stats().allocated;
-      m_retiredStagingBuffers.emplace_back(m_stagingAllocatedBase, m_stagingBuffer.buffer());
 
       MtlDeviceSize newSize = std::max<MtlDeviceSize>(size, StagingBufferSize);
       m_stagingBuffer.reinit(GetDXVKDevice(), newSize);
       result.slice = m_stagingBuffer.alloc(size);
-    }
-
-    // Drop retired backings the GPU has finished consuming.
-    if (unlikely(!m_retiredStagingBuffers.empty())) {
-      const uint64_t fenceValue = m_stagingBufferFence->value();
-      m_retiredStagingBuffers.erase(
-        std::remove_if(m_retiredStagingBuffers.begin(), m_retiredStagingBuffers.end(),
-          [fenceValue](const std::pair<MtlDeviceSize, Rc<MtlBuffer>>& e) {
-            return fenceValue >= e.first;
-          }),
-        m_retiredStagingBuffers.end());
     }
 
     result.mapPtr = result.slice.mapPtr(0);
@@ -4849,10 +4842,14 @@ namespace dxvk {
 
 
   MtlStagingBufferStats D3D9DeviceEx::GetStagingMemoryStatistics() const {
+    // DXVK's allocatedTotal: monotonic staging bytes (retired backings live
+    // in m_stagingAllocatedBase) plus discarded buffer memory, which counts
+    // as staging for throttling. ThrottleAllocation's wait target and the
+    // fence value signaled in ExecuteFlush are compared in these units —
+    // both must come from this one definition.
     MtlStagingBufferStats stats = m_stagingBuffer.stats();
-    stats.allocated += m_stagingAllocatedBase;   // include retired backings (monotonic)
+    stats.allocated += m_stagingAllocatedBase;
     stats.allocated += m_discardMemoryCounter;
-    stats.allocated += m_discardMemoryCounter - m_discardMemoryOnFlush;
     return stats;
   }
 
@@ -4873,25 +4870,31 @@ namespace dxvk {
     const MtlResource&                Resource,
           uint64_t                          SequenceNumber,
           DWORD                             MapFlags) {
-    // Wait for the any pending D3D9 command to be executed
-    // on the CS thread so that we can determine whether the
-    // resource is currently in use or not.
+    // GPU-busy detection is a serial compare: the backend stamps the
+    // resource's tracking serial when a use is ENCODED on the CS thread, so
+    // the compare is only meaningful once the CS thread has caught up with
+    // every chunk that could reference the resource (SequenceNumber — for
+    // resources without one, SynchronizeAll). Mirrors DXVK's
+    // WaitForResource over DxvkPagedResource::isInUse; the Metal seam
+    // tracks a single serial, so read-only locks conservatively wait for
+    // the last GPU READ as well, not only writes.
+    if (!m_dxvkDevice->isResourceInUse(Resource))
+      SynchronizeCsThread(SequenceNumber);
 
-    // PHASE-E: MtlResource::isInUse() is still a conservative stub (always
-    // false), so serial-based busy detection is unavailable. Treat every
-    // waited resource as busy: sync the CS thread (records pending copies),
-    // submit the open command list, and wait for the GPU to drain. Without
-    // the submit+wait the CPU reads the mapping buffer before the GPU copy
-    // ran (GetRenderTargetData readback returns zeros). D3DLOCK_DONOTWAIT
-    // also takes this path — reporting WASSTILLDRAWING forever would spin
-    // the app, since we cannot observe the resource becoming idle yet.
-    (void) MapFlags;
+    if (m_dxvkDevice->isResourceInUse(Resource)) {
+      if (MapFlags & D3DLOCK_DONOTWAIT) {
+        // We don't have to wait, but misbehaving games may still spin on
+        // Lock until the resource is idle, so flush pending commands.
+        ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+        return false;
+      }
 
-    SynchronizeCsThread(SequenceNumber);
-    ExecuteFlush(false);
-    /* the flush chunk itself lands after SequenceNumber — drain everything */
-    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
-    m_dxvkDevice->waitForIdle();
+      // Pending uses live in the still-recording command buffer, whose
+      // serial only signals after submission — flush before blocking.
+      ExecuteFlush(false);
+      SynchronizeCsThread(SequenceNumber);
+      m_dxvkDevice->waitForResource(Resource);
+    }
 
     return true;
   }
@@ -5325,12 +5328,6 @@ namespace dxvk {
 
       alignedExtent = util::snapExtent3D(alignedDestOffset, alignedExtent, dstTexLevelExtent);
       alignedExtent = util::snapExtent3D(alignedSrcOffset, alignedExtent, srcTexLevelExtent);
-      { static int n=0; if (n++<8) Logger::info(str::format(
-          "D9MT-UPDTEXBUF src=", SrcExtent.width, "x", SrcExtent.height,
-          " blocks=", extentBlockCount.width, "x", extentBlockCount.height,
-          " aligned=", alignedExtent.width, "x", alignedExtent.height,
-          " dstLvl=", dstTexLevelExtent.width, "x", dstTexLevelExtent.height,
-          " srcLvl=", srcTexLevelExtent.width, "x", srcTexLevelExtent.height)); }
 
       MtlOrigin srcOffsetBlockCount = util::computeBlockOffset(alignedSrcOffset, util::formatBlockSize(formatInfo));
       MtlExtent3D srcTexLevelExtentBlockCount = util::computeBlockCount(srcTexLevelExtent, util::formatBlockSize(formatInfo));
@@ -6131,9 +6128,6 @@ namespace dxvk {
 
     // Update signaled staging buffer counter and signal the fence
     m_stagingMemorySignaled = GetStagingMemoryStatistics().allocated;
-
-    // Reset counter for discarded memory in flight
-    m_discardMemoryOnFlush = m_discardMemoryCounter;
 
     // Add commands to flush the threaded
     // context, then flush the command list

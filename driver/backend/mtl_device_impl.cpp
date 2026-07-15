@@ -97,8 +97,15 @@ namespace dxvk::backend {
   }
 
   MtlDeviceImpl::~MtlDeviceImpl() {
+    /* Teardown order (member dtors run AFTER this body, in reverse
+     * declaration order: ring, residency, tracker): the pump thread must be
+     * stopped and every retirement callback drained FIRST — those callbacks
+     * reach into the residency tracker (allocDestroyed), which must still
+     * be alive when they run. drainAndStopPump also waits the GPU idle. */
     if (m_tracker)
-      m_tracker->waitFor(m_tracker->lastSubmittedSerial());
+      m_tracker->drainAndStopPump();
+    /* ~MtlResidencyTracker then flushes all deferred destructions
+     * (serialRetired(~0) under its GPU-idle contract, now satisfied). */
   }
 
   void* MtlDeviceImpl::hostAlloc(uint64_t size) {
@@ -177,6 +184,7 @@ namespace dxvk::backend {
     storage->residencyDevice = this;
     m_residency->allocCreated(handle);   // resident from creation to retirement
     buffer->assignStorage(std::move(storage));
+    m_diagBuffersCreated++;
     return buffer;
   }
 
@@ -228,6 +236,7 @@ namespace dxvk::backend {
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     texture->residencyDevice = this;
     m_residency->allocCreated(handle);   // resident from creation to retirement
+    m_diagImagesCreated++;
     return texture;
   }
 
@@ -324,6 +333,15 @@ namespace dxvk::backend {
   Rc<MtlAllocation> MtlDeviceImpl::renameBuffer(MtlBuffer* buffer) {
     auto* impl = static_cast<MtlBufferImpl*>(buffer);
 
+    /* Recycle a retired backing first (returned via the retirement spine,
+     * so its last referencing submission has completed): steady-state
+     * DISCARD renaming must not mint a Metal buffer + VirtualAlloc + set
+     * mutation per Lock. */
+    if (Rc<MtlAllocation> recycled = impl->takeRecycledStorage()) {
+      m_diagBuffersRecycled++;
+      return recycled;
+    }
+
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = impl->size;
     bufferInfo.options = storageOptions(impl->info.cpuAccess);
@@ -346,6 +364,7 @@ namespace dxvk::backend {
     storage->size = impl->size;
     storage->residencyDevice = this;
     m_residency->allocCreated(handle);   // renamed backing resident until it retires
+    m_diagBuffersRenamed++;
     return storage;
   }
 
@@ -445,6 +464,14 @@ namespace dxvk::backend {
      * made this a silent no-op (CPU readbacks raced the GPU copy). */
     if (m_tracker)
       m_tracker->waitFor(m_tracker->lastSubmittedSerial());
+  }
+
+  void MtlDeviceImpl::waitForResource(const MtlResource& resource) {
+    /* Blocking shared-event wait for the resource's last encode serial.
+     * A serial from a still-recording command buffer only signals after the
+     * flush the caller (D3D9DeviceEx::WaitForResource) already issued. */
+    if (m_tracker)
+      m_tracker->waitFor(resource.trackingSerial());
   }
 
   bool MtlDeviceImpl::supportsFormat(MtlFormat format, MtlUsage usage) const {

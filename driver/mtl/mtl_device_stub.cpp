@@ -94,7 +94,10 @@ namespace dxvk {
   }
 
   void MtlDevice::waitForResource(const MtlResource& resource) {
-    while (getCompletedSerial() < resource.trackingSerial()) { }
+    /* No GPU behind the stub: nothing to wait for. The backend overrides
+     * this with a blocking wait on the submission tracker's shared event. */
+    (void) resource;
+    Logger::warn("MtlDevice::waitForResource: stub");
   }
 
   Rc<MtlStagingBuffer> MtlDevice::createStagingBuffer(MtlDeviceSize size) {

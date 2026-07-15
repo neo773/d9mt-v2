@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <utility>
 
@@ -68,38 +69,69 @@ namespace dxvk {
   };
 
   // --- MtlBufferSlice (was DxvkBufferSlice) --------------------------------
-  // (offset,length) view into a buffer; underpins Lock/Discard. Holds an Rc to the
-  // logical buffer so a slice moved into a recorded lambda keeps it alive to chunk
-  // execution (contract 3h move-ownership).
+  // (offset,length) view into a buffer; underpins Lock/Discard. Holds an Rc to
+  // the logical buffer (keeps it alive through the recorded lambda, contract 3h)
+  // AND a snapshot of the PHYSICAL backing (MtlAllocation) taken when the slice
+  // is constructed. GPU consumers (bind flush, indexed draws) resolve addresses
+  // through the SNAPSHOT, never through the live buffer: a Discard rename on
+  // another thread must not retarget a draw that was recorded against the old
+  // backing (record-time snapshot semantics — the DXVK physical-slice model).
+  // The only sanctioned re-resolution is MtlContext::invalidateBuffer, which
+  // refreshes still-bound slices on the CS thread AFTER assignStorage, in
+  // command order (bind-once-then-Discard patterns).
   class MtlBufferSlice {
 
   public:
 
     MtlBufferSlice() = default;
 
-    MtlBufferSlice(Rc<MtlBuffer> buffer, MtlDeviceSize offset, MtlDeviceSize length)
-    : m_buffer(std::move(buffer)), m_offset(offset), m_length(length) { }
+    // Snapshots the buffer's current storage. Only safe where no rename can
+    // race: never-renamed buffers (real/staging/mapping), CS-thread code, or
+    // creation-time slices. Rename-aware record paths must use the explicit-
+    // storage constructor below. Defined after MtlBuffer.
+    MtlBufferSlice(Rc<MtlBuffer> buffer, MtlDeviceSize offset, MtlDeviceSize length);
 
-    const Rc<MtlBuffer>& buffer() const { return m_buffer; }
-    MtlDeviceSize        offset() const { return m_offset; }
-    MtlDeviceSize        length() const { return m_length; }
-    bool                 defined() const { return m_buffer != nullptr; }
+    // Explicit physical backing: frontends that rename on the app thread
+    // (Lock DISCARD, the UP ring) pass the allocation the CPU actually wrote —
+    // the buffer's own storage() only catches up when the CS executes the
+    // matching assignStorage. Defined after MtlAllocation.
+    MtlBufferSlice(Rc<MtlBuffer> buffer, Rc<MtlAllocation> storage,
+                   MtlDeviceSize offset, MtlDeviceSize length);
+
+    const Rc<MtlBuffer>&     buffer()  const { return m_buffer; }
+    const Rc<MtlAllocation>& storage() const { return m_storage; }
+    MtlDeviceSize            offset()  const { return m_offset; }
+    MtlDeviceSize            length()  const { return m_length; }
+    bool                     defined() const { return m_buffer != nullptr; }
+
+    // GPU address of (slice origin + extra) in the SNAPSHOTTED backing.
+    // Defined after MtlAllocation.
+    uint64_t gpuAddress(MtlDeviceSize extra = 0) const;
+
+    // Bytes addressable from (slice origin + extra) to the end of the
+    // snapshotted backing (MTL4 draw APIs take an accessible range).
+    MtlDeviceSize addressableLength(MtlDeviceSize extra = 0) const;
+
+    // CS-thread only: re-snapshot the buffer's CURRENT storage. Called by
+    // invalidateBuffer after assignStorage so live bindings follow a rename;
+    // already-recorded draws keep the snapshot they were recorded against.
+    void refreshStorage();
 
     // Sub-view within this slice (was DxvkBufferSlice::subSlice). Offset is
-    // relative to this slice's origin.
-    MtlBufferSlice subSlice(MtlDeviceSize offset, MtlDeviceSize length) const {
-      return MtlBufferSlice(m_buffer, m_offset + offset, length);
-    }
+    // relative to this slice's origin; the storage snapshot carries over.
+    // Defined after MtlAllocation.
+    MtlBufferSlice subSlice(MtlDeviceSize offset, MtlDeviceSize length) const;
 
-    // CPU pointer at (slice origin + offset) (was DxvkBufferSlice::mapPtr).
-    // Defined after MtlBuffer.
+    // CPU pointer at (slice origin + offset) into the SNAPSHOTTED backing
+    // (was DxvkBufferSlice::mapPtr). Defined after MtlAllocation.
     void* mapPtr(MtlDeviceSize offset) const;
 
   private:
 
-    Rc<MtlBuffer> m_buffer = nullptr;
-    MtlDeviceSize m_offset = 0;
-    MtlDeviceSize m_length = 0;
+    Rc<MtlBuffer>     m_buffer  = nullptr;
+    Rc<MtlAllocation> m_storage = nullptr;
+    MtlDeviceSize     m_offset  = 0;
+    MtlDeviceSize     m_length  = 0;
 
   };
 
@@ -151,20 +183,19 @@ namespace dxvk {
   public:
     virtual ~MtlResource() { }
 
-    // Submission serial of the last GPU use; the backend stamps it at
-    // submit. WaitForResource-style CPU syncs compare it against the
-    // device's completed serial (was DxvkPagedResource tracking).
-    uint64_t trackingSerial() const { return m_trackingSerial; }
-    void setTrackingSerial(uint64_t serial) { m_trackingSerial = serial; }
-
-    // Whether the GPU may still be using this resource (was DxvkPagedResource::
-    // isInUse). PHASE-E: compare trackingSerial against the device completed
-    // serial for the given access; the stub is conservative-safe as false
-    // (CPU never blocks) — the real submission tracker wires this in the backend.
-    bool isInUse(MtlCpuAccess = MtlCpuAccess::Read) const { return false; }
+    // Serial of the last command buffer whose ENCODED commands may read or
+    // write this resource on the GPU (was DxvkPagedResource use tracking).
+    // Contract: the backend context stamps this at ENCODE time (CS thread)
+    // with the serial of the currently recording command buffer — for every
+    // draw that fetches a bound buffer and every transfer/init/resolve on
+    // either operand. The resource is GPU-idle once the device's completed
+    // serial reaches this value. Stamps are monotonic (CS encodes in order);
+    // the app thread reads concurrently, hence the atomic.
+    uint64_t trackingSerial() const { return m_trackingSerial.load(std::memory_order_acquire); }
+    void setTrackingSerial(uint64_t serial) { m_trackingSerial.store(serial, std::memory_order_release); }
 
   private:
-    uint64_t m_trackingSerial = 0u;
+    std::atomic<uint64_t> m_trackingSerial = { 0u };
   };
 
   // The renamed backing storage of a buffer (was DxvkResourceAllocation).
@@ -229,8 +260,41 @@ namespace dxvk {
     friend class MtlDevice;
   };
 
+  inline MtlBufferSlice::MtlBufferSlice(Rc<MtlBuffer> buffer, MtlDeviceSize offset, MtlDeviceSize length)
+  : m_buffer(std::move(buffer)), m_offset(offset), m_length(length) {
+    if (m_buffer != nullptr)
+      m_storage = m_buffer->storage();
+  }
+
+  inline MtlBufferSlice::MtlBufferSlice(Rc<MtlBuffer> buffer, Rc<MtlAllocation> storage,
+                                        MtlDeviceSize offset, MtlDeviceSize length)
+  : m_buffer(std::move(buffer)), m_storage(std::move(storage)),
+    m_offset(offset), m_length(length) { }
+
+  inline uint64_t MtlBufferSlice::gpuAddress(MtlDeviceSize extra) const {
+    return m_storage != nullptr ? m_storage->gpuAddress + m_offset + extra : 0u;
+  }
+
+  inline MtlDeviceSize MtlBufferSlice::addressableLength(MtlDeviceSize extra) const {
+    if (m_storage == nullptr)
+      return 0u;
+    MtlDeviceSize origin = m_offset + extra;
+    return m_storage->size > origin ? m_storage->size - origin : 0u;
+  }
+
+  inline void MtlBufferSlice::refreshStorage() {
+    if (m_buffer != nullptr)
+      m_storage = m_buffer->storage();
+  }
+
+  inline MtlBufferSlice MtlBufferSlice::subSlice(MtlDeviceSize offset, MtlDeviceSize length) const {
+    return MtlBufferSlice(m_buffer, m_storage, m_offset + offset, length);
+  }
+
   inline void* MtlBufferSlice::mapPtr(MtlDeviceSize offset) const {
-    return m_buffer ? m_buffer->mapPtr(m_offset + offset) : nullptr;
+    return m_storage != nullptr && m_storage->mapPtr
+      ? reinterpret_cast<char*>(m_storage->mapPtr) + m_offset + offset
+      : nullptr;
   }
 
   // Image metadata the frontend reads back through image->info() (was
@@ -327,10 +391,6 @@ namespace dxvk {
     void reset() { m_offset = 0u; m_stats.used = 0u; }
 
     const MtlStagingBufferStats& stats() const { return m_stats; }
-
-    // The backing buffer — used to keep a retired (full) backing alive until the
-    // GPU has finished reading its uploads before it is dropped.
-    const Rc<MtlBuffer>& buffer() const { return m_buffer; }
 
   private:
     Rc<MtlBuffer> m_buffer;

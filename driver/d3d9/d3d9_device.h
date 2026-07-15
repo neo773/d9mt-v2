@@ -1613,6 +1613,10 @@ namespace dxvk {
     std::array<D3D9ConstantBuffer, CbvIndex::Count> m_constantBuffers;
 
     Rc<MtlBuffer>                   m_upBuffer;
+    /* The UP ring's CURRENT physical backing as the frontend sees it. The
+     * buffer object's storage() only follows at CS time (assignStorage), so
+     * record-time slices snapshot THIS — never the live buffer. */
+    Rc<MtlAllocation>               m_upBufferAllocation;
     MtlDeviceSize                   m_upBufferOffset  = 0ull;
     void*                           m_upBufferMapPtr  = nullptr;
 
@@ -1621,19 +1625,13 @@ namespace dxvk {
     MtlDeviceSize                   m_stagingMemorySignaled = 0ull;
     /* Monotonic bytes allocated by staging backings that have already been
      * retired (replaced when full). Keeps GetStagingMemoryStatistics().allocated
-     * monotonic across backing swaps so the throttle + fence accounting stays
-     * correct. */
+     * monotonic across backing swaps (DXVK's allocatedTotal) so the throttle +
+     * fence accounting stays correct. Retired backings themselves need no
+     * frontend bookkeeping: their teardown rides the deferred-destruction
+     * spine once the last encoded upload drops the Rc. */
     MtlDeviceSize                   m_stagingAllocatedBase = 0ull;
-    /* Retired (full) staging backings kept alive until the GPU is done reading
-     * their uploads. .first = staging-fence value at/after which the GPU has
-     * consumed everything in that backing (safe to free). copyBuffer only
-     * borrows the staging Rc (drops it after ENCODING, not GPU execution), so
-     * freeing a retired backing before this fence value corrupts in-flight
-     * uploads (garbled 2D text/geometry). */
-    std::vector<std::pair<MtlDeviceSize, Rc<MtlBuffer>>> m_retiredStagingBuffers;
 
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
-    MtlDeviceSize                   m_discardMemoryOnFlush = 0u;
 
     D3D9Cursor                      m_cursor;
 

@@ -169,17 +169,22 @@ namespace dxvk::backend {
     obj_handle_t table = m_argTables[m_currentArgTable].table[0].handle();
     for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
       VertexStream& s = m_vertexStreams[i];
-      if (!s.slice.defined()) {
+      /* Record-time snapshot (MtlBufferSlice contract): the slice's captured
+       * physical backing, NEVER the live buffer — an app-thread rename must
+       * not retarget a draw recorded against the old backing. Renames reach
+       * still-bound slices only via invalidateBuffer's refresh, in command
+       * order. */
+      if (!s.slice.defined() || s.slice.storage() == nullptr) {
         MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
         continue;
       }
-      const Rc<MtlBuffer>& buf = s.slice.buffer();
-      if (buf == nullptr) {
-        MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
-        continue;
-      }
+      /* DIAG: with in-order flow the bound snapshot must equal the buffer's
+       * live storage at draw time (renames refresh in command order). A
+       * divergence here is the recorded-vs-live retargeting bug class. */
+      if (unlikely(s.slice.storage() != s.slice.buffer()->storage()))
+        s_diagVbStale++;
       MTL4ArgumentTable_setAddress(
-        table, buf->gpuAddress(s.slice.offset()), kVertexBufferBaseIndex + i);
+        table, s.slice.gpuAddress(), kVertexBufferBaseIndex + i);
     }
   }
 
@@ -206,28 +211,18 @@ namespace dxvk::backend {
         if (airSlot < 0)
           continue;
 
-        if (!cbv.slice.defined()) {
+        /* Record-time snapshot (MtlBufferSlice contract): resolve through
+         * the slice's captured backing. CBV renames (constant-buffer
+         * Discard) retarget this binding via invalidateBuffer's refresh. */
+        if (!cbv.slice.defined() || cbv.slice.storage() == nullptr
+         || uintptr_t(cbv.slice.storage().ptr()) < 0x10000u) {
           MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
           continue;
         }
-
-        const Rc<MtlBuffer>& buf = cbv.slice.buffer();
-        if (buf == nullptr) {
-          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
-          continue;
-        }
-        /* Defense-in-depth: a CBV whose MtlBuffer has null/garbage storage
-         * would fault on gpuAddress. With the reflection-driven mapping this
-         * should never trigger (we only bind declared CBVs). */
-        if (buf->storage() == nullptr
-         || uintptr_t(buf->storage().ptr()) < 0x10000u) {
-          logOnce("MtlContextImpl: skipped CBV with no backing storage "
-                  "(slot-mapping/lifetime bug — see SOURCE_OF_TRUTH)");
-          MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
-          continue;
-        }
+        if (unlikely(cbv.slice.storage() != cbv.slice.buffer()->storage()))
+          s_diagCbvStale++;
         MTL4ArgumentTable_setAddress(
-          table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset),
+          table, cbv.slice.gpuAddress(cbv.rangeOffset),
           uint32_t(airSlot));
       }
 
@@ -371,6 +366,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
     MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
       enc, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
     /* §4c: make this copy's write visible to the later draw/copy that reads it
@@ -392,6 +389,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
     /* Drawable-backed textures (borrowed handle, owned unset) are covered
      * by the CAMetalLayer's own residency set, queue-attached in the
      * presenter; owned textures are resident from creation. */
@@ -438,6 +437,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     WMTOrigin origin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
@@ -459,6 +460,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
     WMTOrigin origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
@@ -487,6 +490,8 @@ namespace dxvk::backend {
     if (!tex)
       return;
     obj_handle_t enc = computeEncoder();
+    if (view->image != nullptr)
+      view->image->setTrackingSerial(m_currentSerial);
     MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
@@ -500,6 +505,7 @@ namespace dxvk::backend {
     if (!b)
       return;
     obj_handle_t enc = computeEncoder();
+    b->setTrackingSerial(m_currentSerial);
     MTL4ComputeCommandEncoder_fillBuffer(enc, b->handle.buf, 0u, b->size, 0u);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
@@ -526,6 +532,7 @@ namespace dxvk::backend {
     if (m_pass.active)
       closePass();
     ensureCommandBuffer();
+    t->setTrackingSerial(m_currentSerial);
 
     const MtlFormatInfo* fi = lookupFormatInfo(t->format);
     const bool depthStencil = (fi->flags & (MtlFormatFlagDepth | MtlFormatFlagStencil)) != 0u;
@@ -560,14 +567,48 @@ namespace dxvk::backend {
     NSObject_release(enc);
   }
 
-  void MtlContextImpl::invalidateBuffer(const Rc<MtlBuffer>&, Rc<MtlAllocation>&& slice) {
-    /* Contract 3a / decision 6: the OLD backing rides the retirement spine and
-     * releases only once the last submission referencing it completes. */
+  void MtlContextImpl::invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) {
+    /* Contract 3a / decision 6. Runs on the CS thread right after the
+     * matching assignStorage, in command order. Two duties:
+     *
+     * 1. Retarget LIVE bindings (DXVK's invalidateBuffer dirty-tracking):
+     *    bound slices are record-time physical snapshots, so a bind-once-
+     *    then-Discard pattern (SetStreamSource once, Lock DISCARD per draw;
+     *    constant-buffer rings) must re-snapshot here — draws recorded after
+     *    this command read the new backing, draws recorded before it keep
+     *    their old snapshot untouched.
+     *
+     * 2. Retire the OLD backing: commands referencing it live in the current
+     *    or an older command buffer, so m_currentSerial bounds its last GPU
+     *    use. Once that serial completes the backing returns to the buffer's
+     *    recycle pool (DXVK's slice cache); renameBuffer hands it out for a
+     *    later DISCARD instead of minting a new Metal buffer per Lock. Pool
+     *    overflow (or a dead buffer) drops the Rc into deferred destruction. */
     if (slice == nullptr)
       return;
     ensureCommandBuffer();
+
+    for (auto& stream : m_vertexStreams) {
+      if (stream.slice.buffer() == buffer)
+        stream.slice.refreshStorage();
+    }
+    if (m_indexBuffer.buffer() == buffer)
+      m_indexBuffer.refreshStorage();
+    for (uint32_t st = 0u; st < 2u; st++) {
+      for (auto& cbv : m_bindings[st].cbvs) {
+        if (cbv.slice.buffer() == buffer)
+          cbv.slice.refreshStorage();
+      }
+    }
+
+    Rc<MtlBuffer> owner = buffer;
     Rc<MtlAllocation> keep = std::move(slice);
-    m_device->submissions().retireAfter(m_currentSerial, [keep]() mutable { keep = nullptr; });
+    m_device->submissions().retireAfter(m_currentSerial, [owner, keep]() mutable {
+      if (owner != nullptr)
+        static_cast<MtlBufferImpl*>(owner.ptr())->recycleStorage(std::move(keep));
+      owner = nullptr;
+      keep  = nullptr;
+    });
   }
 
   bool MtlContextImpl::ensureTextureUsage(const Rc<MtlTexture>&, MtlTextureUsage) {

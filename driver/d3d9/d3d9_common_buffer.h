@@ -133,8 +133,17 @@ namespace dxvk {
     template <D3D9_COMMON_BUFFER_TYPE Type>
     inline MtlBufferSlice GetBufferSlice(MtlDeviceSize offset, MtlDeviceSize length) const {
      if (likely(length && offset < m_desc.Size)) {
-        return MtlBufferSlice(GetBuffer<Type>(), offset,
-          std::min<MtlDeviceSize>(m_desc.Size - offset, length));
+        const Rc<MtlBuffer>& buffer = GetBuffer<Type>();
+        MtlDeviceSize clamped = std::min<MtlDeviceSize>(m_desc.Size - offset, length);
+
+        // The map buffer renames on the APP thread (DiscardMapSlice); its
+        // storage() only catches up when the CS executes assignStorage.
+        // Slices of it must snapshot the allocation the frontend actually
+        // maps, or a recorded draw can resolve against the wrong generation.
+        if (buffer == GetMapBuffer())
+          return MtlBufferSlice(buffer, m_allocation, offset, clamped);
+
+        return MtlBufferSlice(buffer, offset, clamped);
      }
 
       return MtlBufferSlice();

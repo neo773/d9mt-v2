@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include "../mtl/mtl_device.h"
 #include "../mtl/mtl_context.h"   // MtlQuery / MtlEvent / MtlQueryType
@@ -50,6 +51,36 @@ namespace dxvk::backend {
     MtlBufferCreateInfo info = { };     /* for rename re-creation */
 
     void bindDevice(MtlDevice* device) { m_device = device; }
+
+    /* Discard-rename recycling (DXVK's per-buffer slice cache): a retired
+     * backing returns here via the retirement spine — only AFTER the last
+     * submission referencing it completed — and renameBuffer() hands it out
+     * again instead of minting a fresh Metal buffer per DISCARD. Bounded:
+     * overflow drops the Rc, which routes the allocation into deferred
+     * destruction (~MtlAllocationImpl). Cross-thread: renames run on app
+     * threads, recycling on the retirement pump / CS thread. */
+    void recycleStorage(Rc<MtlAllocation>&& alloc) {
+      if (alloc == nullptr)
+        return;
+      std::lock_guard<std::mutex> lock(m_recycleMutex);
+      if (m_recycled.size() < MaxRecycledBackings)
+        m_recycled.push_back(std::move(alloc));
+    }
+
+    Rc<MtlAllocation> takeRecycledStorage() {
+      std::lock_guard<std::mutex> lock(m_recycleMutex);
+      if (m_recycled.empty())
+        return nullptr;
+      Rc<MtlAllocation> alloc = std::move(m_recycled.back());
+      m_recycled.pop_back();
+      return alloc;
+    }
+
+  private:
+    static constexpr size_t MaxRecycledBackings = 4u;
+
+    std::mutex m_recycleMutex;
+    std::vector<Rc<MtlAllocation>> m_recycled;
   };
 
   class MtlTextureImpl : public MtlTexture {
@@ -104,6 +135,10 @@ namespace dxvk::backend {
     uint64_t getNextSerial() override;
     void     waitForIdle() override;
 
+    /* Blocking wait on the submission tracker's shared event for the
+     * resource's tracking serial (never a spin). */
+    void     waitForResource(const MtlResource& resource) override;
+
     /* VirtualAlloc with a drain-and-retry fallback when the 32-bit address
      * space is exhausted by in-flight buffer backings. */
     void*    hostAlloc(uint64_t size);
@@ -136,7 +171,19 @@ namespace dxvk::backend {
 
     bool valid() const { return bool(m_device); }
 
+    /* DIAG observers: cumulative creation counts by source, so the endFrame
+     * DIAG line can attribute residency churn (buffers vs renames vs images). */
+    uint64_t diagBuffersCreated() const { return m_diagBuffersCreated.load(); }
+    uint64_t diagBuffersRenamed() const { return m_diagBuffersRenamed.load(); }
+    uint64_t diagBuffersRecycled() const { return m_diagBuffersRecycled.load(); }
+    uint64_t diagImagesCreated()  const { return m_diagImagesCreated.load(); }
+
   private:
+
+    std::atomic<uint64_t> m_diagBuffersCreated { 0u };
+    std::atomic<uint64_t> m_diagBuffersRenamed { 0u };
+    std::atomic<uint64_t> m_diagBuffersRecycled { 0u };
+    std::atomic<uint64_t> m_diagImagesCreated  { 0u };
 
     WmtDevice   m_device;
     WmtQueue    m_queue;      // MTL4CommandQueue
