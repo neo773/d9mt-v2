@@ -89,3 +89,13 @@ textures is the outstanding formal gate. Fold into the next agent as cheap insur
 
 See METAL4_PERF_RESEARCH.md (Apple-sourced techniques) and the d3dmetal4-audit memory
 (Apple's own D3DMetal batches D3D12 lists across the wine boundary).
+
+## Second test title — Sonic Adventure 2 (BLOCKED, game-side)
+SA2 (Steam appid 213610) installed in the "DirectX 9 games" bottle (SteamCMD
+Windows-platform pull; Steam fresh-installed + logged in there). Launched through
+d9mt: **deterministic crash at sonic2app+0x1c13 (`fildl 4(%eax)`, EAX=0 — null-ptr
+FP load) in the game's OWN startup, BEFORE d3d9 loads** (loaddll trace: 0 d3d9 loads).
+NOT a driver bug — our d3d9/winemetal never enter the backtrace. This is the
+notorious SA2 2012-port startup crash; needs game-side fixes (config/registry/compat
+or the SA2 mod loader), a separate bring-up project. x87 sidecar not required per user.
+GTA IV remains the working D3D9 test title. Revisit SA2 only if a second title is wanted.
