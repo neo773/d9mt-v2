@@ -148,6 +148,24 @@ MINGW="${MINGW:-i686-w64-mingw32-g++}"
 command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 
 FLAGS=(-std=c++17 -O1 -g -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+
+# --- PROFILE_INSTRUMENT=1 — per-function CPU profiler build mode -------------
+# Compiles ONLY the backend hot-path TUs (the CS-thread draw loop) with GCC
+# -finstrument-functions (mingw-GCC has no clang -after-inlining variant) and
+# adds the hook TU backend/mtl_instrument.cpp (itself NEVER instrumented).
+# Instrumented objects get a distinct .prof.o name so the normal build's cached
+# objects — and its link input list — are byte-for-byte unaffected when the
+# flag is unset. Runtime is additionally gated on D9MT_PROFILE_INSTRUMENT=1 in
+# the environment (hooks return immediately otherwise).
+PROFILE_INSTRUMENT="${PROFILE_INSTRUMENT:-0}"
+INSTRUMENT_TUS=" mtl_context_impl.cpp mtl_context_impl2.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp "
+# GCC instruments pre-inline, so trivial getters (std::array::operator[],
+# Rc<>::operator->, MtlBufferSlice::defined, ...) each cost two hook calls that
+# land in their CALLER's self time (400k+ calls/10s observed in GTA IV). The
+# exclude list (substring match, mangled + demangled) is GCC's stand-in for
+# clang's -finstrument-functions-after-inlining.
+INSTRUMENT_EXCLUDE="std::,dxvk::Rc,_ZNSt,_ZNKSt,definedEv,MtlBufferSlice"
+[ "$PROFILE_INSTRUMENT" = 1 ] && echo "=== [driver] PROFILE_INSTRUMENT=1: instrumenting backend hot TUs ==="
 # dxbc-spirv (sm3 IR parser) include root — the SM3->IR analysis passes
 # (d3d9_shader_analysis / real d3d9_shader) include <sm3/...> and <util/...> from
 # it. These are -I includes (third-party headers), exempt from the driver Vulkan
@@ -196,6 +214,8 @@ CORE+=("$DRV"/backend/mtl_context_impl.cpp "$DRV"/backend/mtl_context_impl2.cpp 
        "$DRV"/backend/mtl_pso_cache.cpp "$DRV"/backend/mtl_presenter_impl.cpp \
        "$DRV"/backend/mtl_device_impl.cpp "$DRV"/backend/mtl_ring.cpp \
        "$DRV"/backend/mtl_submission.cpp "$DRV"/backend/mtl_residency.cpp)
+# PROFILE_INSTRUMENT: the __cyg_profile_func_enter/exit hook TU (not instrumented).
+[ "$PROFILE_INSTRUMENT" = 1 ] && CORE+=("$DRV"/backend/mtl_instrument.cpp)
 # d3d9 — Phase-C ported ADAPT retypes + Phase-D neutral stubs that compile now.
 #   d3d9_util        : enum-decoder retype (Vk*->Mtl*), ADAPT.
 #   d3d9_names       : enum->string debug tables, KEEP (util_enum include fixed).
@@ -259,15 +279,21 @@ CORE+=("$DRV"/d3d9/phasec_probe.cpp)
 echo "=== [driver] CORE compile (${#CORE[@]} TUs) ==="
 OBJS=(); PIDS=(); RC=0
 compile_one() {
-  local src="$1" obj="$2"
-  "$MINGW" "${FLAGS[@]}" -c "$src" -o "$obj"
+  local src="$1" obj="$2"; shift 2
+  "$MINGW" "${FLAGS[@]}" "$@" -c "$src" -o "$obj"
 }
 for src in "${CORE[@]}"; do
-  obj="$OBJ/$(echo "${src#$DRV/}" | tr '/' '_').o"
+  psuffix=""; pflag=""
+  if [ "$PROFILE_INSTRUMENT" = 1 ]; then
+    case "$INSTRUMENT_TUS" in
+      *" $(basename "$src") "*) psuffix=".prof"; pflag="-finstrument-functions -finstrument-functions-exclude-function-list=$INSTRUMENT_EXCLUDE" ;;
+    esac
+  fi
+  obj="$OBJ/$(echo "${src#$DRV/}" | tr '/' '_')$psuffix.o"
   OBJS+=("$obj")
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
-    echo "[cc] ${src#$DRV/}"
-    compile_one "$src" "$obj" & PIDS+=($!)
+    echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
+    compile_one "$src" "$obj" $pflag & PIDS+=($!)
     if [ "${#PIDS[@]}" -ge 12 ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
   fi
 done
