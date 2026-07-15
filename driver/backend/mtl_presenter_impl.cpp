@@ -17,8 +17,8 @@ namespace dxvk::backend {
 
     MtlPresenterImpl(const Rc<MtlDevice>& device, intptr_t hwnd, const MtlPresenterDesc& desc)
     : m_device(device), m_desc(desc) {
-      auto* impl = static_cast<MtlDeviceImpl*>(device.ptr());
-      m_wmtDevice = impl ? impl->wmtDevice() : 0u;
+      m_backend   = static_cast<MtlDeviceImpl*>(device.ptr());
+      m_wmtDevice = m_backend ? m_backend->wmtDevice() : 0u;
 
       obj_handle_t layer = 0u;
       m_view  = CreateMetalViewFromHWND(hwnd, m_wmtDevice, &layer);
@@ -26,9 +26,18 @@ namespace dxvk::backend {
       if (!m_layer)
         Logger::err("MtlPresenterImpl: CreateMetalViewFromHWND returned no layer");
       applyProps();
+
+      /* Drawable residency: attach the layer's OWN residency set at queue
+       * level (mtl_residency.h invariant 4) — drawable textures never enter
+       * the driver set. The layer's set only exists once its device is
+       * applied (async on the main thread), so retry from acquireNextImage
+       * until it sticks. */
+      attachLayerResidency();
     }
 
     ~MtlPresenterImpl() {
+      if (m_backend && m_layer)
+        m_backend->residency().detachLayer(m_layer);
       if (m_view)
         ReleaseMetalView(m_view);
     }
@@ -45,6 +54,11 @@ namespace dxvk::backend {
 
       if (!m_layer)
         return image;
+
+      /* The GPU writes the drawable this frame — its residency set must be
+       * queue-attached before then (retries the async-init race, no-ops
+       * once attached). */
+      attachLayerResidency();
 
       obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
       if (!drawable)
@@ -103,11 +117,19 @@ namespace dxvk::backend {
 
     Rc<MtlDevice>    m_device;
     MtlPresenterDesc m_desc;
+    MtlDeviceImpl*   m_backend   = nullptr;   // borrowed; m_device keeps it alive
     obj_handle_t     m_wmtDevice = 0u;
     obj_handle_t     m_view      = 0u;
     obj_handle_t     m_layer     = 0u;
+    bool             m_layerResidencyAttached = false;
     uint64_t         m_lastPresented = 0u;
     uint64_t         m_completedFrame = 0u;
+
+    void attachLayerResidency() {
+      if (m_layerResidencyAttached || !m_backend || !m_layer)
+        return;
+      m_layerResidencyAttached = m_backend->residency().attachLayer(m_layer);
+    }
 
     void applyProps() {
       if (!m_layer)

@@ -178,7 +178,6 @@ namespace dxvk::backend {
         MTL4ArgumentTable_setAddress(table, 0u, kVertexBufferBaseIndex + i);
         continue;
       }
-      makeResident(buf->handle.buf);
       MTL4ArgumentTable_setAddress(
         table, buf->gpuAddress(s.slice.offset()), kVertexBufferBaseIndex + i);
     }
@@ -227,7 +226,6 @@ namespace dxvk::backend {
           MTL4ArgumentTable_setAddress(table, 0u, uint32_t(airSlot));
           continue;
         }
-        makeResident(buf->handle.buf);
         MTL4ArgumentTable_setAddress(
           table, buf->gpuAddress(cbv.slice.offset() + cbv.rangeOffset),
           uint32_t(airSlot));
@@ -245,7 +243,6 @@ namespace dxvk::backend {
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-        residentTextureView(view);
         MTL4ArgumentTable_setTexture(table, tv->gpuResourceId, slot);
       }
 
@@ -268,7 +265,6 @@ namespace dxvk::backend {
         RingSlice rs = m_device->uploadRing().allocate(sz, 256u);
         if (rs.cpuPtr) {
           std::memcpy(rs.cpuPtr, b.pushData.data(), sz);
-          makeResident(rs.buffer);
           b.pushGpuAddress = rs.gpuAddress;
         }
         b.pushDirtyLo = b.pushDirtyHi = 0u;
@@ -335,36 +331,6 @@ namespace dxvk::backend {
       enc, m_depthBias.constantFactor, m_depthBias.slopeFactor, m_depthBias.clamp);
   }
 
-  void MtlContextImpl::makeResident(obj_handle_t handle) {
-    /* Most resources are already resident from creation (device add-at-alloc).
-     * This covers the exceptions — borrowed handles the device never created:
-     * the CAMetalLayer drawable texture and the visibility buffer. The device
-     * residency set is a set (addAllocation idempotent), so re-adding an
-     * already-resident created resource is a harmless no-op; the local dedup
-     * just avoids the unix round-trip. Never cleared → never wiped. */
-    if (!handle)
-      return;
-    for (obj_handle_t h : m_residentSet)
-      if (h == handle)
-        return;
-    m_residentSet.push_back(handle);
-    m_device->residencyAdd(handle);
-  }
-
-  void MtlContextImpl::residentTextureView(const Rc<MtlTextureView>& view) {
-    if (view == nullptr)
-      return;
-    auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-    /* Track the underlying image allocation (the view shares its storage);
-     * fall back to the view handle for drawable-backed attachments whose base
-     * image carries no owned allocation. */
-    if (view->image != nullptr) {
-      auto* base = static_cast<MtlTextureImpl*>(view->image.ptr());
-      makeResident(base->owned.handle() ? base->owned.handle() : base->texture.tex);
-    }
-    makeResident(tv->owned.handle());
-  }
-
   // --- transfers / blits (decision 8: MTL4 compute-encoder copies) ------------
 
   obj_handle_t MtlContextImpl::computeEncoder() {
@@ -405,8 +371,6 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(s->handle.buf);
-    makeResident(d->handle.buf);
     MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
       enc, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
     /* §4c: make this copy's write visible to the later draw/copy that reads it
@@ -428,11 +392,9 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
-    /* Drawable-backed textures carry only a borrowed handle (owned unset) —
-     * they still MUST be resident for the GPU write (CAMetalLayer drawables
-     * are not implicitly resident on an MTL4 queue). */
-    makeResident(s->owned.handle() ? s->owned.handle() : s->texture.tex);
-    makeResident(d->owned.handle() ? d->owned.handle() : d->texture.tex);
+    /* Drawable-backed textures (borrowed handle, owned unset) are covered
+     * by the CAMetalLayer's own residency set, queue-attached in the
+     * presenter; owned textures are resident from creation. */
     WMTOrigin srcOrigin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   srcSize   = { extent.width, extent.height, extent.depth };
     WMTOrigin dstOrigin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
@@ -476,8 +438,6 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(s->handle.buf);
-    makeResident(d->owned.handle());
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     WMTOrigin origin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
@@ -499,8 +459,6 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(s->owned.handle());
-    makeResident(d->handle.buf);
     WMTOrigin origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
@@ -529,7 +487,6 @@ namespace dxvk::backend {
     if (!tex)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(tex);
     MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
@@ -543,7 +500,6 @@ namespace dxvk::backend {
     if (!b)
       return;
     obj_handle_t enc = computeEncoder();
-    makeResident(b->handle.buf);
     MTL4ComputeCommandEncoder_fillBuffer(enc, b->handle.buf, 0u, b->size, 0u);
     emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
     MTLCommandEncoder_endEncoding(enc);
@@ -596,8 +552,6 @@ namespace dxvk::backend {
       info.colors[0].clear_color  = { 0.0, 0.0, 0.0, 0.0 };
     }
 
-    makeResident(t->owned.handle());
-
     /* load=Clear + store=Store clears the whole subresource with no draws. */
     obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
     /* §4c: order the clear's fragment write ahead of a later sample/copy. */
@@ -633,9 +587,9 @@ namespace dxvk::backend {
     obj_handle_t h = MTLDevice_newBuffer(m_device->wmtDevice(), &info);
     m_visBuffer = WmtBuffer::adopt(h);
     m_visCpu    = info.memory.get();
-    /* The visibility buffer is read by the GPU across every pass — keep it
-     * resident for the context lifetime. */
-    makeResident(h);
+    /* Written by the GPU across every pass — resident for the context
+     * lifetime; leaves via allocDestroyed in ~MtlContextImpl. */
+    m_device->residency().allocCreated(h);
   }
 
   void MtlContextImpl::beginQuery(const Rc<MtlQuery>& query) {
@@ -682,10 +636,14 @@ namespace dxvk::backend {
   // --- signals / events (contracts 3d,3e) ------------------------------------
 
   void MtlContextImpl::signal(const Rc<MtlSignal>& signal, uint64_t value) {
-    (void)value;
+    /* Contract: CPU-visible ON COMPLETION of the recording submission.
+     * The frontend's staging-buffer fence rides this — a signal that never
+     * fires strands every retired staging backing forever (and deadlocks
+     * ThrottleAllocation once the in-flight budget is hit). */
     ensureCommandBuffer();
     Rc<MtlSignal> keep = signal;
-    m_device->submissions().retireAfter(m_currentSerial, [keep]() { (void)keep; });
+    m_device->submissions().retireAfter(m_currentSerial,
+      [keep, value]() { keep->signal(value); });
   }
 
   void MtlContextImpl::signalGpuEvent(const Rc<MtlEvent>& event) {

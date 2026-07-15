@@ -88,14 +88,10 @@ namespace dxvk::backend {
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
-    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize);
-
-    /* Device-lifetime residency set (kk model). Add-at-alloc / remove-at-free;
-     * never wiped. The context binds it per cmdbuf + commit/requestResidency
-     * per submit. */
-    WMTResidencySetInfo rsi = {};
-    rsi.initial_capacity = 16384u;
-    m_residencySet = WmtResidencySet::adopt(MTLDevice_newResidencySet(m_device.handle(), &rsi));
+    /* All residency state lives in the tracker (mtl_residency.h): one
+     * queue-attached set, add-at-alloc, serial-deferred destruction. */
+    m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle());
+    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get());
 
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
   }
@@ -116,6 +112,10 @@ namespace dxvk::backend {
       waitForIdle();
       if (m_tracker)
         m_tracker->processRetirements();
+      /* The retirements just dropped the last Rcs; flush the completed
+       * deferred destructions so their VirtualAlloc'd backings free NOW. */
+      if (m_tracker && m_residency)
+        m_residency->serialRetired(m_tracker->completedSerial());
       p = VirtualAlloc(nullptr, SIZE_T(size),
           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
       if (!p)
@@ -125,11 +125,20 @@ namespace dxvk::backend {
   }
 
   MtlAllocationImpl::~MtlAllocationImpl() {
-    /* Remove from the residency set BEFORE releasing the Metal buffer, so a
-     * stale handle never lingers in the set (would fault requestResidency). */
-    if (residencyDevice)
-      residencyDevice->residencyRemove(handle.buf);
-    /* Release the Metal buffer BEFORE freeing its bytesNoCopy host memory. */
+    if (residencyDevice) {
+      /* Deferred destruction (mtl_residency.h invariant 3): the tracker
+       * removes the set entry, releases the Metal buffer and frees the
+       * bytesNoCopy host backing — in that order — once every submission
+       * that could reference this allocation has completed. The recording
+       * serial bounds that (encoded references live in the current or an
+       * older command buffer). */
+      residencyDevice->residency().allocDestroyed(
+        owned.detach(), mapPtr,
+        residencyDevice->submissions().nextSerial());
+      mapPtr = nullptr;
+      return;
+    }
+    /* Never registered with a device: release directly. */
     owned.reset();
     if (mapPtr) {
       VirtualFree(mapPtr, 0, MEM_RELEASE);
@@ -166,7 +175,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
     storage->residencyDevice = this;
-    residencyAdd(handle);   // resident for its whole lifetime (kk model)
+    m_residency->allocCreated(handle);   // resident from creation to retirement
     buffer->assignStorage(std::move(storage));
     return buffer;
   }
@@ -218,7 +227,7 @@ namespace dxvk::backend {
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     texture->residencyDevice = this;
-    residencyAdd(handle);   // resident for its whole lifetime (kk model)
+    m_residency->allocCreated(handle);   // resident from creation to retirement
     return texture;
   }
 
@@ -336,7 +345,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
     storage->residencyDevice = this;
-    residencyAdd(handle);   // renamed backing resident until it retires
+    m_residency->allocCreated(handle);   // renamed backing resident until it retires
     return storage;
   }
 

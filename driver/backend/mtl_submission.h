@@ -38,6 +38,9 @@ public:
   /* Serial of the most recent submission (0 = nothing submitted yet). */
   uint64_t lastSubmittedSerial() const { return m_nextSerial - 1u; }
 
+  /* diag: pending (not-yet-retired) callback count. */
+  size_t retirementCount() { std::lock_guard<std::mutex> l(m_retireMutex); return m_retirements.size(); }
+
   /* Enqueues the GPU-side signal onto the MTL4 command queue and returns the
    * serial it will signal. METAL 4: MTL4CommandBuffer has no
    * encodeSignalEvent — the signal is a queue-timeline op, so call this

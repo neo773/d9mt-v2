@@ -1823,3 +1823,29 @@ MTLResidencySet_removeAllocation(obj_handle_t residency_set, obj_handle_t resour
   params.arg = resource;
   UNIX_CALL(204, &params);
 }
+
+/* --- drawable residency + queue-level attach (205..207) -------------- */
+WINEMETAL_API obj_handle_t
+MetalLayer_residencySet(obj_handle_t layer) {
+  struct unixcall_generic_obj_obj_ret params;
+  params.handle = layer;
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(205, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(206, &params);
+}
+
+WINEMETAL_API void
+MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_set) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = queue;
+  params.arg = residency_set;
+  UNIX_CALL(207, &params);
+}

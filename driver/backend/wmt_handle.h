@@ -65,6 +65,12 @@ public:
     }
   }
 
+  /* Transfers the owned +1 reference OUT; the caller becomes responsible
+   * for the eventual NSObject_release (deferred-destruction hand-off). */
+  obj_handle_t detach() {
+    return std::exchange(m_handle, 0u);
+  }
+
   obj_handle_t handle() const { return m_handle; }
 
   explicit operator bool() const { return m_handle != 0u; }

@@ -50,9 +50,9 @@ namespace dxvk::backend {
     pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
     m_argTables.push_back(std::move(pair));
 
-    /* Residency: the DEVICE owns one lifetime residency set (add-at-alloc /
-     * remove-at-free, never wiped). The context just binds it per cmdbuf and
-     * commits it per submit. */
+    /* Residency: owned entirely by the device's MtlResidencyTracker
+     * (queue-attached set; nothing to bind per cmdbuf). The context only
+     * drives beforeSubmit()/serialRetired() from submit()/endFrame(). */
 
     /* Allocator ring seed: slot 0 exists so pre-frame resource-init cmdbufs
      * (before the first beginRecording) have backing memory. beginRecording
@@ -65,13 +65,22 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     if (m_pass.active)
       closePass();
+    /* Context-lifetime visibility buffer: registered at creation, leaves
+     * the residency set through the same deferred-destruction path as
+     * every other allocation. */
+    if (m_visBuffer) {
+      m_device->residency().allocDestroyed(m_visBuffer.detach(), nullptr,
+        m_device->submissions().nextSerial());
+    }
   }
 
   // --- lifecycle -----------------------------------------------------------
 
   void MtlContextImpl::beginRecording() {
     m_dirty = DirtyEverything;
-    m_argTableCursor = 0u;
+    /* NOTE: do NOT reset m_argTableCursor here. The argument-table pool is a
+     * cross-frame ring (selectArgumentTablesForDraw); resetting the cursor per
+     * recording broke reuse and ratcheted the pool. It wraps mod size itself. */
 
     /* Rotate to a >= ring-depth-old allocator and reset it. MTL4CommandAllocator
      * contract: every command buffer whose memory came from this allocator must
@@ -94,10 +103,10 @@ namespace dxvk::backend {
     m_allocator = m_allocators[slot].handle();
     m_allocatorSlot = slot;
 
-    /* NO residency wipe. The device set is add-at-alloc / remove-at-free and
-     * lives forever — wiping it mid-run (the old epoch rebuild) dropped
-     * bound-but-not-re-touched resources out of residency and faulted the GPU
-     * ("BIF0 page fault"). Resources are resident from creation to free. */
+    /* NO residency work here. Allocations are resident from creation until
+     * their deferred destruction retires (MtlResidencyTracker) — any
+     * per-frame set rebuild drops bound-but-not-re-touched resources and
+     * faults the GPU ("BIF0 page fault"). */
 
     ensureCommandBuffer();
   }
@@ -109,7 +118,8 @@ namespace dxvk::backend {
     m_cmdbuf = WmtCommandBuffer::adopt(
       MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
     MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
-    MTL4CommandBuffer_useResidencySet(m_cmdbuf.handle(), m_device->residencySet());
+    /* Residency sets are queue-attached (MtlResidencyTracker) — no
+     * per-cmdbuf useResidencySet. */
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
@@ -179,9 +189,9 @@ namespace dxvk::backend {
 
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
-    /* Realize residency before the GPU runs this cmdbuf (device set). */
-    MTLResidencySet_commit(m_device->residencySet());
-    MTLResidencySet_requestResidency(m_device->residencySet());
+    /* Realize pending residency adds before the queue sees this cmdbuf
+     * (batched in the tracker; commits only when dirty). */
+    m_device->residency().beforeSubmit();
 
     obj_handle_t cb = m_cmdbuf.handle();
     gpuCaptureBeforeCommit(m_device->wmtDevice());
@@ -222,7 +232,14 @@ namespace dxvk::backend {
 
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
     submit(false);
-    ensureCommandBuffer();
+    /* beginRecording (NOT ensureCommandBuffer) rotates the 3-deep command-
+     * allocator ring: it waits for the slot's prior GPU work to retire before
+     * reusing it (CS<->GPU pacing, caps frames in flight) and resets the
+     * allocator's command memory. Calling ensureCommandBuffer here instead left
+     * beginRecording running only once at device creation, so the CS thread
+     * submitted unbounded frames ahead of the GPU and allocator/retirement
+     * memory piled up until it froze/OOM'd after ~30s. */
+    beginRecording();
     if (status) {
       status->submissionId = m_currentSerial;
       status->completed    = false;
@@ -231,8 +248,25 @@ namespace dxvk::backend {
 
   void MtlContextImpl::endFrame() {
     uint64_t completed = m_device->submissions().completedSerial();
+    /* Retirements drop the last Rcs (allocations enqueue their deferred
+     * removal), then the tracker flushes removals whose serial completed. */
     m_device->submissions().processRetirements();
+    m_device->residency().serialRetired(completed);
     m_device->uploadRing().onComplete(completed);
+
+    /* DIAG: per-frame growth watch (leak instrumentation; observers only). */
+    static uint64_t s_diagFrame = 0u;
+    if ((++s_diagFrame & 0xFFu) == 0u) {
+      Logger::info(str::format("DIAG frame=", s_diagFrame,
+        " residencyNet=", m_device->residency().netResident(),
+        " adds=", m_device->residency().totalAdds(),
+        " removes=", m_device->residency().totalRemoves(),
+        " pending=", m_device->residency().pendingRemovals(),
+        " argTables=", m_argTables.size(),
+        " retirements=", m_device->submissions().retirementCount(),
+        " serial=", m_device->submissions().lastSubmittedSerial(),
+        " completed=", completed));
+    }
   }
 
   void MtlContextImpl::synchronizeWsi(MtlPresenterSync sync) {
@@ -388,7 +422,6 @@ namespace dxvk::backend {
         const auto& v = m_pass.clearValues[i];
         info.colors[i].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
       }
-      residentTextureView(view);
     }
 
     if (m_pass.targets.depthStencil != nullptr) {
@@ -404,7 +437,6 @@ namespace dxvk::backend {
         info.stencil.store_action = WMTStoreActionStore;
         info.stencil.clear_stencil = m_pass.stencilClear;
       }
-      residentTextureView(m_pass.targets.depthStencil);
     }
 
     m_pass.encoder = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
@@ -429,9 +461,44 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::selectArgumentTablesForDraw() {
-    m_currentArgTable = m_argTableCursor++;
-    if (m_currentArgTable >= m_argTables.size())
-      m_argTables.push_back(createArgumentTablePair());
+    /* Per-draw argument tables: a table's bindings must not be mutated while an
+     * earlier encoded draw that still reads it is in flight (Metal 4 overlapping
+     * execution). Round-robin a pool, reusing a slot only once its last-use
+     * submission serial has RETIRED (the same retire-after-serial discipline as
+     * the command-allocator ring / upload ring). If the slot we'd wrap onto is
+     * still in flight, the pool is too small for the current in-flight draw
+     * depth, so grow it right here. This self-limits: once the pool covers the
+     * peak concurrent in-flight draws it stops growing — bounded by construction.
+     *
+     * The prior version incremented a cursor that was only ever reset in
+     * beginRecording(), which runs ONCE at device creation (not per frame), so
+     * the pool grew ~1 table/draw forever and exhausted the 32-bit address space
+     * after ~30s. */
+    const uint64_t completed = m_device->submissions().completedSerial();
+    const size_t   n         = m_argTables.size();
+
+    /* Round-robin from the cursor and reuse the FIRST table whose last-use
+     * serial has retired. Only when every table is still in flight (pool too
+     * small for the current in-flight draw depth) do we grow — by push_back at
+     * the end, NEVER insert-at-cursor. The prior insert-at-cursor scrambled the
+     * per-slot serials so the round-robin never landed on a retired slot: the
+     * pool ratcheted up ~4 tables/frame forever (never shrank) and exhausted
+     * memory after ~2200 frames. A stable ring self-limits to the peak
+     * concurrent in-flight draw count and then stops growing. */
+    for (size_t scan = 0u; scan < n; ++scan) {
+      const size_t idx = (m_argTableCursor + scan) % n;
+      if (m_argTables[idx].serial <= completed) {
+        m_currentArgTable       = idx;
+        m_argTableCursor        = idx + 1u;
+        m_argTables[idx].serial = m_currentSerial;
+        return;
+      }
+    }
+
+    m_argTables.push_back(createArgumentTablePair());
+    m_currentArgTable       = m_argTables.size() - 1u;
+    m_argTableCursor        = m_currentArgTable + 1u;
+    m_argTables[m_currentArgTable].serial = m_currentSerial;
   }
 
   void MtlContextImpl::bindArgumentTables() {
@@ -625,10 +692,6 @@ namespace dxvk::backend {
     const Rc<MtlBuffer>& ib = m_indexBuffer.buffer();
     if (ib == nullptr)
       return;
-    /* The index buffer is read by GPU address (no argument-table slot) — it
-     * still must be in the residency set or the fetch faults / reads zeros
-     * once the epoch rebuild drops it (decision 4). */
-    makeResident(ib->handle.buf);
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;

@@ -2328,4 +2328,17 @@ WINEMETAL_API void MTL4CommandEncoder_barrier(
     obj_handle_t encoder, uint64_t after_stages,
     uint64_t before_queue_stages, uint64_t visibility_options);
 
+/* --- drawable residency + queue-level attach (205..207) -------------- *
+ * CAMetalLayer exposes a READ-ONLY MTLResidencySet that automatically
+ * tracks its drawable textures; attaching THAT set to the MTL4 queue is
+ * the sanctioned drawable-residency mechanism. Adding drawable textures
+ * to a driver-owned set instead pins them forever and starves the
+ * drawable pool (nextDrawable blocks indefinitely). The returned handle
+ * is BORROWED (the layer owns its set); available once the layer has a
+ * device, 0 otherwise. Queue attach/detach mirror -[MTL4CommandQueue
+ * addResidencySet:/removeResidencySet:] (max 32 sets per queue). */
+WINEMETAL_API obj_handle_t MetalLayer_residencySet(obj_handle_t layer);
+WINEMETAL_API void MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
+WINEMETAL_API void MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_set);
+
 #endif

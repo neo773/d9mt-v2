@@ -6203,6 +6203,30 @@ _MTL4CommandEncoder_barrier(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- drawable residency + queue-level attach (205..207) -------------- *
+ * The layer's residencySet is read-only and layer-owned: return it
+ * BORROWED (no retain — attaching it to the queue retains it unix-side). */
+static NTSTATUS
+_MetalLayer_residencySet(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[(CAMetalLayer *)params->handle residencySet];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_addResidencySet(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle addResidencySet:(id<MTLResidencySet>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_removeResidencySet(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  [(id<MTL4CommandQueue>)params->handle removeResidencySet:(id<MTLResidencySet>)params->arg];
+  return STATUS_SUCCESS;
+}
+
 const void *__wine_unix_call_funcs[] = {
     &_NSObject_retain,
     &_NSObject_release,
@@ -6419,6 +6443,9 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
     &_MTL4CommandEncoder_barrier,                           /* 203 */
     &_MTLResidencySet_removeAllocation,                     /* 204 */
+    &_MetalLayer_residencySet,                              /* 205 */
+    &_MTL4CommandQueue_addResidencySet,                     /* 206 */
+    &_MTL4CommandQueue_removeResidencySet,                  /* 207 */
 };
 
 #ifndef DXMT_NATIVE
@@ -6642,5 +6669,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4RenderCommandEncoder_setVisibilityResultMode,     /* 202 */
     &_MTL4CommandEncoder_barrier,                           /* 203 */
     &_MTLResidencySet_removeAllocation,                     /* 204 */
+    &_MetalLayer_residencySet,                              /* 205 */
+    &_MTL4CommandQueue_addResidencySet,                     /* 206 */
+    &_MTL4CommandQueue_removeResidencySet,                  /* 207 */
 };
 #endif

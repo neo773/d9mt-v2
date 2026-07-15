@@ -34,12 +34,14 @@
  *    still read.
  *    Textures/samplers bind via setTexture(gpuResourceID)/setSamplerState.
  *
- * 4. Residency + keep-alive. track() holds an Rc until submit; every bound
- *    resource's trackingSerial is stamped at submit. ONE MTLResidencySet per
- *    context: bound resources addAllocation (flat dedup gate); commit +
- *    requestResidency before queue commit; cmdbuf useResidencySet. The set
- *    rebuilds at a frame boundary only once the prior epoch's serial retires
- *    (never evict an in-flight allocation).
+ * 4. Residency + keep-alive. Residency lives entirely in the device's
+ *    MtlResidencyTracker (mtl_residency.h): every driver-created allocation
+ *    joins the ONE queue-attached set at creation and leaves via the
+ *    serial-deferred destruction queue; drawables ride the CAMetalLayer's
+ *    own residency set (attached by the presenter). The context only
+ *    drives the frame hooks — beforeSubmit() in submit(), serialRetired()
+ *    in endFrame(). track() holds an Rc until submit; every tracked
+ *    resource's trackingSerial is stamped at submit.
  *
  * 5. Submission spine. beginRecording rotates a 3-deep MTL4CommandAllocator
  *    ring + resets the caught-up slot. submit(): endCommandBuffer, queue
@@ -242,6 +244,7 @@ namespace dxvk::backend {
 
     struct ArgTablePair {
       std::array<WmtArgTable, 2> table;
+      uint64_t serial = 0u;   // submission serial of this pair's last use
     };
 
     struct VertexStream {
@@ -308,9 +311,6 @@ namespace dxvk::backend {
     // keep-alive until submit (moved into tracker.retireAfter at flush)
     std::vector<Rc<MtlResource>> m_keepAlive;
 
-    // flat residency dedup (v1 ResidentSet pattern)
-    std::vector<obj_handle_t> m_residentSet;
-
     uint64_t m_currentSerial = 0;
 
     // per-context visibility-result buffer for occlusion queries (decision 7).
@@ -319,7 +319,7 @@ namespace dxvk::backend {
     uint64_t  m_visSlot  = 0u;         // next free 8-byte counter slot
 
     // --- core internal flow -------------------------------------------------
-    void ensureCommandBuffer();        // rotate allocator, begin MTL4 cmdbuf, useResidencySet
+    void ensureCommandBuffer();        // begin MTL4 cmdbuf on the current allocator
     void materializePass();            // open MTL4 render encoder, fold clears
     void flushPendingClears();         // materialize folded clears with no draw
     void closePass();                  // endEncoding + release encoder
@@ -332,8 +332,6 @@ namespace dxvk::backend {
     void flushResources();             // CBVs/textures/samplers/push -> arg tables + ring
     void flushDynamicState();          // viewport/scissor/dsso/blend/raster setters
     void submit(bool waitCompleted);   // endCommandBuffer, commit, signalEvent, retire
-    void makeResident(obj_handle_t handle);
-    void residentTextureView(const Rc<MtlTextureView>& view);
 
     obj_handle_t computeEncoder();     // close pass, open a one-shot MTL4 compute encoder
     void         ensureVisBuffer();

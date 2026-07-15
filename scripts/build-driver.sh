@@ -160,7 +160,7 @@ CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
 CORE+=("$DRV"/backend/mtl_context_impl.cpp "$DRV"/backend/mtl_context_impl2.cpp \
        "$DRV"/backend/mtl_pso_cache.cpp "$DRV"/backend/mtl_presenter_impl.cpp \
        "$DRV"/backend/mtl_device_impl.cpp "$DRV"/backend/mtl_ring.cpp \
-       "$DRV"/backend/mtl_submission.cpp)
+       "$DRV"/backend/mtl_submission.cpp "$DRV"/backend/mtl_residency.cpp)
 # d3d9 — Phase-C ported ADAPT retypes + Phase-D neutral stubs that compile now.
 #   d3d9_util        : enum-decoder retype (Vk*->Mtl*), ADAPT.
 #   d3d9_names       : enum->string debug tables, KEEP (util_enum include fixed).

@@ -173,6 +173,13 @@ namespace dxvk {
   // last submission that referenced it completes (contract 3a).
   class MtlAllocation : public RcObject {
   public:
+    // Rc<MtlAllocation> deletes through THIS type while the backend subclass
+    // (MtlAllocationImpl) owns the Metal object, the host backing and the
+    // residency-set entry. RcObject has no virtual destructor, so without
+    // this the subclass destructor never ran: no allocation was ever freed
+    // or removed from the residency set (the zero-removals leak).
+    virtual ~MtlAllocation() { }
+
     MtlBufferHandle handle     = { };       // backing id<MTLBuffer> token
     void*           mapPtr     = nullptr;   // shared-storage CPU pointer
     uint64_t        gpuAddress = 0u;

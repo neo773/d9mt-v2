@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "wmt_handle.h"
+#include "mtl_residency.h"
 
 namespace dxvk::backend {
 
@@ -37,7 +38,9 @@ class UploadRing {
 
 public:
 
-  UploadRing(obj_handle_t device, uint64_t chunkSize);
+  /* Chunks register with the residency tracker at creation and hand their
+   * buffer + host backing back to it at ring teardown (GPU idle then). */
+  UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency);
 
   ~UploadRing();
 
@@ -68,6 +71,7 @@ private:
 
   obj_handle_t m_device;
   uint64_t m_chunkSize;
+  MtlResidencyTracker* m_residency = nullptr;
   uint64_t m_totalBytes = 0u;
 
   std::vector<Chunk> m_live;   /* [0] = current bump target */

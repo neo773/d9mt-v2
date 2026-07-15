@@ -6,13 +6,23 @@
 
 namespace dxvk::backend {
 
-UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize)
-: m_device(device), m_chunkSize(chunkSize) {
+UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency)
+: m_device(device), m_chunkSize(chunkSize), m_residency(residency) {
   m_live.push_back(createChunk(m_chunkSize));
 }
 
 UploadRing::~UploadRing() {
-  /* WmtBuffer RAII releases; caller guarantees GPU idle at teardown */
+  /* Ring teardown only happens at device teardown, after the GPU drained
+   * (serial 0 = already complete). The tracker owns removal, buffer
+   * release and the VirtualFree of each chunk's host backing. */
+  for (auto& chunk : m_live) {
+    if (m_residency)
+      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u);
+  }
+  for (auto& chunk : m_free) {
+    if (m_residency)
+      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u);
+  }
 }
 
 RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
@@ -93,6 +103,11 @@ UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
   chunk.size = minSize;
   chunk.used = 0u;
   m_totalBytes += minSize;
+
+  /* Ring memory is read by the GPU long after encoding — resident for the
+   * chunk's lifetime like any other driver-created allocation. */
+  if (m_residency)
+    m_residency->allocCreated(handle);
   return chunk;
 }
 

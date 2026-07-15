@@ -9,6 +9,7 @@
  * reach the owned winemetal handles.
  */
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -17,6 +18,7 @@
 #include "../mtl/mtl_context.h"   // MtlQuery / MtlEvent / MtlQueryType
 
 #include "wmt_handle.h"
+#include "mtl_residency.h"
 #include "mtl_ring.h"
 #include "mtl_submission.h"
 
@@ -26,7 +28,6 @@ namespace dxvk::backend {
    * API-neutral file stays untouched). */
   struct Mtl4CompilerTag;     using WmtCompiler     = WmtRef<Mtl4CompilerTag>;
   struct Mtl4AllocatorTag;    using WmtAllocator    = WmtRef<Mtl4AllocatorTag>;
-  struct Mtl4ResidencySetTag; using WmtResidencySet = WmtRef<Mtl4ResidencySetTag>;
   struct Mtl4ArgTableTag;     using WmtArgTable     = WmtRef<Mtl4ArgTableTag>;
 
   /* Backend payloads. The seam's POD handle mirrors the owned handle so
@@ -34,11 +35,12 @@ namespace dxvk::backend {
   class MtlAllocationImpl : public MtlAllocation {
   public:
     WmtBuffer owned;
-    class MtlDeviceImpl* residencyDevice = nullptr;   // for remove-at-free
+    class MtlDeviceImpl* residencyDevice = nullptr;   // deferred-destruction route
 
-    /* Frees the VirtualAlloc'd host backing (bytesNoCopy memory) and removes
-     * the allocation from the device residency set. Runs only after the
-     * retirement spine drops the last Rc, i.e. the GPU is done. */
+    /* Hands the Metal object, the VirtualAlloc'd host backing and the
+     * residency-set entry to the device's MtlResidencyTracker, which tears
+     * them down only after every submission that could reference the
+     * allocation has completed (mtl_residency.h invariant 3). */
     ~MtlAllocationImpl();
   };
 
@@ -55,7 +57,7 @@ namespace dxvk::backend {
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
     MtlImageCreateInfo info  = { };
-    class MtlDeviceImpl* residencyDevice = nullptr;   // for remove-at-free
+    class MtlDeviceImpl* residencyDevice = nullptr;   // deferred-destruction route
     ~MtlTextureImpl();   // inline-defined after MtlDeviceImpl below
   };
 
@@ -123,23 +125,10 @@ namespace dxvk::backend {
     SubmissionTracker& submissions() { return *m_tracker; }
     UploadRing&        uploadRing()  { return *m_ring; }
 
-    /* ONE device-lifetime residency set (kk model): every Metal allocation is
-     * added at creation and removed at destruction, so the set always covers
-     * exactly the live resources. It is NEVER wiped mid-frame — that was the
-     * cause of non-resident GPU faults (a bound-but-not-re-touched resource
-     * dropped out of the set). The context binds it per cmdbuf and does
-     * commit+requestResidency per submit. */
-    obj_handle_t residencySet() const { return m_residencySet.handle(); }
-    void residencyAdd(obj_handle_t alloc) {
-      if (!alloc) return;
-      std::lock_guard<std::mutex> lock(m_residencyMutex);
-      MTLResidencySet_addAllocation(m_residencySet.handle(), alloc);
-    }
-    void residencyRemove(obj_handle_t alloc) {
-      if (!alloc) return;
-      std::lock_guard<std::mutex> lock(m_residencyMutex);
-      MTLResidencySet_removeAllocation(m_residencySet.handle(), alloc);
-    }
+    /* Single owner of all residency state (set membership, batched
+     * commits, deferred destruction, drawable-layer sets) — see
+     * mtl_residency.h for the invariants. */
+    MtlResidencyTracker& residency() { return *m_residency; }
 
     /* Cached MTLDepthStencilState keyed by the folded depth-stencil state
      * (setDepthStencilState is not a PSO key; the DSSO is bound dynamically). */
@@ -153,8 +142,12 @@ namespace dxvk::backend {
     WmtQueue    m_queue;      // MTL4CommandQueue
     WmtCompiler m_compiler;   // MTL4Compiler (PSO builds)
 
-    std::unique_ptr<SubmissionTracker> m_tracker;
-    std::unique_ptr<UploadRing>        m_ring;
+    /* Declaration order is load-bearing: destruction runs in reverse, so
+     * the ring hands its chunks to the tracker before the tracker flushes
+     * and detaches, and the tracker still has a live queue underneath. */
+    std::unique_ptr<SubmissionTracker>   m_tracker;
+    std::unique_ptr<MtlResidencyTracker> m_residency;
+    std::unique_ptr<UploadRing>          m_ring;
 
     std::mutex m_samplerMutex;
     std::unordered_map<size_t, Rc<MtlSamplerState>> m_samplerCache;
@@ -162,19 +155,21 @@ namespace dxvk::backend {
     std::mutex m_dssoMutex;
     std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
 
-    std::mutex      m_residencyMutex;
-    WmtResidencySet m_residencySet;   // device-lifetime; add-at-alloc/remove-at-free
-
     friend class MtlContextImpl;
 
   };
 
   /* Inline (weak comdat) so TUs that construct MtlTextureImpl — e.g. the
    * presenter wrapping a drawable — don't each emit a conflicting strong
-   * out-of-line definition. Defined here now that MtlDeviceImpl is complete. */
+   * out-of-line definition. Defined here now that MtlDeviceImpl is complete.
+   * Drawable wrappers own nothing (borrowed handle, no residencyDevice) and
+   * fall through; owned textures ride the deferred-destruction queue. */
   inline MtlTextureImpl::~MtlTextureImpl() {
-    if (residencyDevice)
-      residencyDevice->residencyRemove(owned.handle());
+    if (residencyDevice && owned) {
+      residencyDevice->residency().allocDestroyed(
+        owned.detach(), nullptr,
+        residencyDevice->submissions().nextSerial());
+    }
   }
 
 }
