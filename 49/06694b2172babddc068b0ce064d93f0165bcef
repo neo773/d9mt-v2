@@ -1,0 +1,23 @@
+docs/architecture/70-render-server.md
+  s_68632dcad39ed7::t_80bd045cdacf1b 1-87
+docs/architecture/60-present.md
+  s_68632dcad39ed7::t_882d494211fd33 1-131
+docs/architecture/90-history.md
+  s_68632dcad39ed7::t_c6a66a0614cc9d 1-194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4906694b2172babddc068b0ce064d93f0165bcef",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
