@@ -74,6 +74,9 @@ namespace dxvk::backend::prof {
     CntPassCloseXfer,   //   transfer compute encoder (uploads/copies mid-frame)
     CntPassCloseBarrier,//   emitGraphicsBarrier (feedback-loop hazard)
     CntPassCloseBlit,   //   meta-blit / mipgen
+    /* Frame-deferred pass list (decision 10): */
+    CntFramePasses,     //   render encoders actually created per flush (after merge/cull)
+    CntStoreDontCare,   //   attachments whose store was optimized to DontCare (Rules B/C)
     CounterCount
   };
 
@@ -141,7 +144,9 @@ namespace dxvk::backend::prof {
       " clear=", double(g_counts[CntPassCloseClear]) / kFrames,
       " xfer=", double(g_counts[CntPassCloseXfer]) / kFrames,
       " barrier=", double(g_counts[CntPassCloseBarrier]) / kFrames,
-      " blit=", double(g_counts[CntPassCloseBlit]) / kFrames);
+      " blit=", double(g_counts[CntPassCloseBlit]) / kFrames,
+      " | framePasses=", double(g_counts[CntFramePasses]) / kFrames, "/f",
+      " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 
