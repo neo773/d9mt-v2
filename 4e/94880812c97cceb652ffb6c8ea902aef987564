@@ -1,0 +1,21 @@
+scripts/build-server.sh
+  s_68632dcad39ed7::t_48c2138f9ef30e 1-40
+server/test_feed.c
+  s_68632dcad39ed7::t_b9eaf8483ca1c4 1-250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4e94880812c97cceb652ffb6c8ea902aef987564",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
