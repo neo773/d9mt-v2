@@ -6448,11 +6448,14 @@ extern char **environ;
 static struct d9mt_wire_ring *wire_ring; /* PE VA: shm-mapped (server) or PE anon (local) */
 static uint64_t wire_ring_total;         /* control block + capacity, bytes */
 static struct d9mt_status *wire_status;  /* unix-side mapping of the status file */
+static struct d9mt_wire_heap *wire_heap; /* PE VA: S3 content heap (NULL = none) */
+static uint64_t wire_heap_total;         /* header + data, bytes */
 static pid_t wire_server_pid;
 static uint32_t wire_mode; /* enum WMTWireAttachMode */
 static char wire_dir[PATH_MAX];
 static char wire_ring_path[PATH_MAX];
 static char wire_status_path[PATH_MAX];
+static char wire_heap_path[PATH_MAX];
 
 static uint64_t
 wire_now_ms(void) {
@@ -6519,7 +6522,10 @@ wire_create_map(const char *name, size_t bytes, void *fixed_at, char out_path[PA
 
 /* Undo a partially-built shm setup: unlink files, drop the status mapping,
  * restore plain anonymous memory over the PE ring region (never unmap it —
- * the PE side owns that VA and will keep producing into it). */
+ * the PE side owns that VA and will keep producing into it). base != NULL is
+ * the fallback path (regions go back to plain memory); at detach the caller
+ * passes NULL and the PE side VirtualFrees the regions afterwards. The heap
+ * region (wire_heap, S3) follows the same rules. */
 static void
 wire_teardown_shm(void *base, uint64_t total) {
   if (wire_status) {
@@ -6530,12 +6536,20 @@ wire_teardown_shm(void *base, uint64_t total) {
     unlink(wire_ring_path);
   if (wire_status_path[0])
     unlink(wire_status_path);
+  if (wire_heap_path[0])
+    unlink(wire_heap_path);
   if (wire_dir[0])
     rmdir(wire_dir);
-  wire_ring_path[0] = wire_status_path[0] = wire_dir[0] = 0;
-  if (base)
+  wire_ring_path[0] = wire_status_path[0] = wire_heap_path[0] = wire_dir[0] = 0;
+  if (base) {
     mmap(base, total, PROT_READ | PROT_WRITE,
          MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    if (wire_heap)
+      mmap(wire_heap, wire_heap_total, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+  }
+  wire_heap = NULL;
+  wire_heap_total = 0;
 }
 
 static NTSTATUS
@@ -6595,6 +6609,38 @@ _WireRing_attach(void *obj) {
   }
   wire_init_header((struct d9mt_wire_ring *)base, cap);
 
+  /* S3 shared heap (optional second region, same MAP_FIXED relocation).
+   * Failure is NOT fatal to the attach: the transport runs ring-only and
+   * the PE side simply never emits upload records (heap_ok = 0). Mapped
+   * BEFORE the spawn so the server finds the file at boot. */
+  {
+    uint8_t *hbase = params->heap_base.ptr;
+    const uint64_t htotal = params->heap_bytes;
+    const uint64_t hcap = htotal > D9MT_WIRE_HEAP_DATA_OFFSET
+                        ? htotal - D9MT_WIRE_HEAP_DATA_OFFSET : 0;
+    if (hbase && hcap && !(hcap & (hcap - 1u)) &&
+        !((uintptr_t)hbase & (uintptr_t)(page - 1))) {
+      if (wire_create_map("heap", (size_t)htotal, hbase, wire_heap_path) == (void *)hbase) {
+        struct d9mt_wire_heap *h = (struct d9mt_wire_heap *)hbase;
+        /* fresh O_TRUNC file: cursors already zero; header last */
+        h->capacity = hcap;
+        h->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+        h->magic = D9MT_WIRE_HEAP_MAGIC;
+        wire_heap = h;
+        wire_heap_total = htotal;
+      } else {
+        fprintf(stderr, "[wire] WARN: heap shm map failed (%s) — content uploads disabled\n",
+                strerror(errno));
+        if (wire_heap_path[0])
+          unlink(wire_heap_path);
+        wire_heap_path[0] = 0;
+      }
+    } else if (hbase || htotal) {
+      fprintf(stderr, "[wire] WARN: bad heap region (base=%p bytes=%llu) — content uploads disabled\n",
+              (void *)hbase, (unsigned long long)htotal);
+    }
+  }
+
   {
     pid_t pid = 0;
     char *argv[3] = {exe, wire_dir, NULL};
@@ -6639,9 +6685,11 @@ _WireRing_attach(void *obj) {
   wire_ring_total = total;
   wire_mode = WMTWireAttachServer;
   params->mode = WMTWireAttachServer;
+  params->heap_ok = wire_heap != NULL;
   fprintf(stderr, "[wire] render server attached: pid=%d dir=%s exe=%s (via %s) "
-                  "capacity=%llu bytes\n",
-          (int)wire_server_pid, wire_dir, exe, src, (unsigned long long)cap);
+                  "capacity=%llu bytes heap=%llu bytes\n",
+          (int)wire_server_pid, wire_dir, exe, src, (unsigned long long)cap,
+          (unsigned long long)(wire_heap ? wire_heap->capacity : 0));
   return STATUS_SUCCESS;
 
 local:
@@ -6682,13 +6730,25 @@ _WireRing_stats(void *obj) {
     out->heartbeat = atomic_load_explicit(&wire_status->heartbeat, memory_order_relaxed);
     out->server_error = atomic_load_explicit(&wire_status->error, memory_order_relaxed);
     /* status v2 (render-server S2): zero on a pre-S2 server (version==0) */
-    if (atomic_load_explicit(&wire_status->version, memory_order_acquire) >= 2u) {
+    uint32_t version = atomic_load_explicit(&wire_status->version, memory_order_acquire);
+    if (version >= 2u) {
       out->server_frames = atomic_load_explicit(&wire_status->frames, memory_order_relaxed);
       out->server_frame_serial =
           atomic_load_explicit(&wire_status->frame_serial, memory_order_relaxed);
       out->server_exec_errors =
           atomic_load_explicit(&wire_status->exec_errors, memory_order_relaxed);
     }
+    /* status v3 (render-server S3) */
+    if (version >= 3u) {
+      out->server_skipped_pso = atomic_load_explicit(
+          &wire_status->draws_skipped_pending_pso, memory_order_relaxed);
+      out->server_uploads =
+          atomic_load_explicit(&wire_status->uploads_executed, memory_order_relaxed);
+    }
+  }
+  if (wire_heap) {
+    out->heap_consumed = atomic_load_explicit(&wire_heap->consumed, memory_order_relaxed);
+    out->heap_dropped = atomic_load_explicit(&wire_heap->dropped, memory_order_relaxed);
   }
   return STATUS_SUCCESS;
 }

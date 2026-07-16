@@ -18,6 +18,8 @@
 #include "mtl_device_impl.h"
 #include "mtl_wire_emit.h"
 
+#include "../mtl/mtl_format.h"
+
 #include "../../bridge/winemetal.h"
 #include "../util/log/log.h"
 #include "../util/util_string.h"
@@ -25,9 +27,21 @@
 namespace dxvk::backend {
 
   namespace {
-    /* 4 MiB of record space: ~64 B/record * ~10k hot records/frame stays
-     * well under one ring turn per frame; the consumer only counts. */
-    constexpr uint64_t WireRingCapacity = 4ull << 20;
+    /* 16 MiB of record space (S3). S1 evidence: ~665 KB/frame in-game, but
+     * boot bursts (shader storms: chunked metallibs + creates) are far
+     * larger, and the S2 executor consumes slower than the S1 counter — the
+     * 4 MiB ring filled during GTA IV boot and tripped the watchdog. */
+    constexpr uint64_t WireRingCapacity = 16ull << 20;
+
+    /* S3 shared heap: 256 MiB sparse file (RENDER_SERVER_SPEC layout #2).
+     * The PE region is address space, the FILE stays sparse until written. */
+    constexpr uint64_t WireHeapCapacity = 256ull << 20;
+
+    /* Stall watchdog (S3): one window is the old ~1 s spin bound; the
+     * transport survives WireStallWindows consecutive full-ring windows
+     * (warn each) before the permanent disable — boot bursts ride through,
+     * the dead-server safety net stays. */
+    constexpr uint32_t WireStallWindows = 5u;
 
     /* Only one ring per process; later contexts forward without recording. */
     std::atomic<bool> g_wireClaimed = { false };
@@ -67,6 +81,29 @@ namespace dxvk::backend {
     /* create_shader chunking: metallib payloads exceed the uint16 record
      * size; keep chunks comfortably under the 0xFFF8 reserve cap. */
     constexpr uint32_t kShaderChunkBytes = 0xE000u;
+
+    /* S3: MIRROR of computeBufferImagePitch (mtl_context_transfer.cpp) — the
+     * wire's upload_texture pitches must match what the local execution
+     * encodes, byte for byte. rowAlign/sliceAlign are ALIGNMENTS. */
+    void wirePitch(MtlFormat format, MtlSize extent,
+                   MtlDeviceSize rowAlign, MtlDeviceSize sliceAlign,
+                   MtlDeviceSize& bytesPerRow, MtlDeviceSize& bytesPerImage,
+                   MtlDeviceSize& totalBytes) {
+      const MtlFormatInfo* fi = lookupFormatInfo(format);
+      const uint32_t elementSize = fi->elementSize ? fi->elementSize : 4u;
+      const uint32_t bw = fi->blockWidth  ? fi->blockWidth  : 1u;
+      const uint32_t bh = fi->blockHeight ? fi->blockHeight : 1u;
+      auto alignUp = [](MtlDeviceSize v, MtlDeviceSize a) {
+        return a > 1u ? (v + a - 1u) / a * a : v;
+      };
+      const MtlDeviceSize rows = (extent.height + bh - 1u) / bh;
+      bytesPerRow   = alignUp(MtlDeviceSize((extent.width + bw - 1u) / bw) * elementSize, rowAlign);
+      bytesPerImage = extent.depth > 1u
+        ? alignUp(bytesPerRow * rows, sliceAlign)
+        : 0u;
+      totalBytes = extent.depth > 1u ? bytesPerImage * extent.depth
+                                     : bytesPerRow * rows;
+    }
   }
 
   MtlWireContext::MtlWireContext(const Rc<MtlDevice>& device, Rc<MtlContext>&& inner)
@@ -90,12 +127,36 @@ namespace dxvk::backend {
       return;
     }
 
-    const uint32_t mode = WireRing_attach(m_ringMem, total);
+    /* S3: the shared heap region (content transport). Optional — a failed
+     * reserve degrades to a ring-only attach (uploads never emitted). */
+    const uint64_t heapTotal = D9MT_WIRE_HEAP_DATA_OFFSET + WireHeapCapacity;
+    m_heapMem = static_cast<uint8_t*>(::VirtualAlloc(nullptr, SIZE_T(heapTotal),
+      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!m_heapMem)
+      Logger::warn("MtlWireContext: heap region reserve failed, content uploads disabled");
+
+    uint32_t heapOk = 0u;
+    const uint32_t mode = WireRing_attach(m_ringMem, total,
+      m_heapMem, m_heapMem ? heapTotal : 0u, &heapOk);
     if (mode == WMTWireAttachFailed) {
       ::VirtualFree(m_ringMem, 0, MEM_RELEASE);
       m_ringMem = nullptr;
+      if (m_heapMem) {
+        ::VirtualFree(m_heapMem, 0, MEM_RELEASE);
+        m_heapMem = nullptr;
+      }
       Logger::err("MtlWireContext: wire attach failed, forwarding only");
       return;
+    }
+
+    if (heapOk && m_heapMem) {
+      m_heap = reinterpret_cast<d9mt_wire_heap*>(m_heapMem);
+      m_heapData = m_heapMem + D9MT_WIRE_HEAP_DATA_OFFSET;
+      m_heapCap = WireHeapCapacity;
+    } else if (m_heapMem) {
+      /* plain memory nobody consumes — release it, run ring-only */
+      ::VirtualFree(m_heapMem, 0, MEM_RELEASE);
+      m_heapMem = nullptr;
     }
 
     /* The unix side initialized the control block (in the shm file or, on
@@ -111,7 +172,8 @@ namespace dxvk::backend {
     g_wireAttached.store(true, std::memory_order_release);
     if (m_hasConsumer) {
       Logger::info(str::format("MtlWireContext: render server attached, shm ring=",
-        WireRingCapacity >> 20, " MiB (echo mode)"));
+        WireRingCapacity >> 20, " MiB, heap=",
+        m_heap ? (WireHeapCapacity >> 20) : 0u, " MiB (dual execution)"));
     } else {
       Logger::warn(str::format("MtlWireContext: no render server, local ring=",
         WireRingCapacity >> 20, " MiB with no consumer (disables on first ring-full)"));
@@ -138,6 +200,12 @@ namespace dxvk::backend {
     ::VirtualFree(m_ringMem, 0, MEM_RELEASE);
     m_ringMem = nullptr;
     m_ring = nullptr;
+    if (m_heapMem) {
+      /* heap file was unlinked by detach; this drops the last reference */
+      ::VirtualFree(m_heapMem, 0, MEM_RELEASE);
+      m_heapMem = nullptr;
+      m_heap = nullptr;
+    }
     m_active = false;
   }
 
@@ -148,31 +216,51 @@ namespace dxvk::backend {
     if (m_head - tail + need <= m_cap)
       return true;
 
-    /* Ring full: the consumer is starved (it only counts) or dead. Count
-     * one stall episode, kick defensively, then spin. Give up after a
-     * bounded wait so a dead consumer degrades to forward-only instead of
-     * hanging the CS thread. */
-    m_ring->stalls.fetch_add(1u, std::memory_order_relaxed);
+    /* Ring full: the consumer is behind (S3: async PSO builds keep it
+     * flowing, but bursts still happen) or dead. Kick defensively, then spin
+     * in WINDOWS: each ~1 s window that ends still-full logs a warn (the
+     * PROF near-miss trail) and counts a stall episode; only
+     * WireStallWindows consecutive full windows — a consumer that made NO
+     * space for the whole budget — trip the PERMANENT disable (the
+     * dead-server safety net). */
 
     /* No server attached (WMTWireAttachLocal): nothing will EVER consume, so
      * a full ring is final — degrade to forward-only immediately instead of
      * spinning out the bound. */
     if (!m_hasConsumer) {
+      m_ring->stalls.fetch_add(1u, std::memory_order_relaxed);
       Logger::warn("MtlWireContext: ring full with no consumer, disabling wire transport");
       m_active = false;
       return false;
     }
     WireRing_kick();
 
-    for (uint32_t spin = 0u; spin < (1u << 20); spin++) {
-      tail = m_ring->tail.load(std::memory_order_acquire);
-      if (m_head - tail + need <= m_cap)
-        return true;
-      if ((spin & 0x3Fu) == 0x3Fu)
-        ::Sleep(0);
+    for (uint32_t window = 1u; window <= WireStallWindows; window++) {
+      m_ring->stalls.fetch_add(1u, std::memory_order_relaxed);
+      const uint64_t tailAtStart = m_ring->tail.load(std::memory_order_acquire);
+      for (uint32_t spin = 0u; spin < (1u << 20); spin++) {
+        tail = m_ring->tail.load(std::memory_order_acquire);
+        if (m_head - tail + need <= m_cap) {
+          if (window > 1u)
+            Logger::warn(str::format("MtlWireContext: ring recovered after ",
+              window, " stall windows"));
+          return true;
+        }
+        if ((spin & 0x3Fu) == 0x3Fu)
+          ::Sleep(0);
+      }
+      Logger::warn(str::format("MtlWireContext: ring stall window ", window,
+        "/", WireStallWindows, " (~1s each, consumer behind)"));
+      /* consumer moved but the record still doesn't fit: it is ALIVE and the
+       * producer is parked, so space converges — only zero-progress windows
+       * count toward the disable ("consecutive" semantics). */
+      if (m_ring->tail.load(std::memory_order_acquire) != tailAtStart)
+        window = 0u;
     }
 
-    Logger::err("MtlWireContext: ring stalled >1s, disabling wire transport");
+    Logger::err(str::format("MtlWireContext: ring stalled for ",
+      WireStallWindows, " consecutive windows (~", WireStallWindows,
+      "s), disabling wire transport"));
     m_active = false;
     return false;
   }
@@ -290,7 +378,10 @@ namespace dxvk::backend {
   }
 
   bool MtlWireContext::ensureBufferCreated(const MtlBufferSlice& slice) {
-    const Rc<MtlAllocation>& storage = slice.storage();
+    return ensureStorageCreated(slice.storage());
+  }
+
+  bool MtlWireContext::ensureStorageCreated(const Rc<MtlAllocation>& storage) {
     if (storage == nullptr)
       return false;
     if (storage->wireId)
@@ -306,9 +397,136 @@ namespace dxvk::backend {
     r->size = storage->size;
     r->usage = 0u;       /* informational; not tracked at slice level */
     r->cpu_access = 0u;
-    r->heap_offset = 0u; /* S3: shared-heap placement */
+    r->heap_offset = 0u; /* content rides upload_buffer records instead */
     endRecord();
+    /* S3: initial content snapshot for host-visible backings — static VB/IB
+     * bytes are Lock-written BEFORE the first bind (which is when this
+     * create fires), so this catches most one-shot geometry. Private
+     * backings (mapPtr null) get content only through uploadBuffer taps. */
+    if (m_heap && storage->mapPtr && storage->size)
+      emitUploadBuffer(storage->wireId, storage->handle.buf, 0u,
+                       storage->mapPtr, storage->size);
     return true;
+  }
+
+  /* --- S3 shared-heap producer (see mtl_wire_context.h) -------------------- */
+
+  uint64_t MtlWireContext::heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut) {
+    if (m_heap == nullptr || src == nullptr || bytes == 0u)
+      return UINT64_MAX;
+    const uint64_t need = (bytes + 255u) & ~255ull;
+    if (need > m_heapCap / 2u)
+      return UINT64_MAX; /* pathological single region; keep the ring live */
+
+    /* regions never straddle the wrap: skip to the next capacity boundary */
+    uint64_t start = m_heapHead;
+    const uint64_t idx = start & (m_heapCap - 1u);
+    if (need > m_heapCap - idx)
+      start += m_heapCap - idx;
+
+    const uint64_t consumed = m_heap->consumed.load(std::memory_order_acquire);
+    if (start + need - consumed > m_heapCap) {
+      /* full — the server has not GPU-completed enough regions. NEVER stall
+       * the CS thread on bulk data: drop this upload (server keeps stale
+       * content for the resource) and count it. */
+      m_heap->dropped.fetch_add(1u, std::memory_order_relaxed);
+      if (!m_heapWarned) {
+        m_heapWarned = true;
+        Logger::warn("MtlWireContext: shared heap full, dropping content uploads (server acks behind)");
+      }
+      return UINT64_MAX;
+    }
+
+    std::memcpy(m_heapData + (start & (m_heapCap - 1u)), src, size_t(bytes));
+    m_heapHead = start + need;
+    /* informational (debug); ORDERING rides the ring's head release-store:
+     * the record referencing this region publishes after the memcpy above */
+    m_heap->head.store(m_heapHead, std::memory_order_release);
+    *genOut = m_heapHead;
+    return start;
+  }
+
+  void MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
+                                        uint64_t dstOff, const void* src, uint64_t size) {
+    uint64_t gen = 0u;
+    const uint64_t off = heapAlloc(src, size, &gen);
+    if (off == UINT64_MAX)
+      return;
+    if (auto* r = beginRecord<d9mt_wire_rec_upload_buffer>(d9mt_wire_op_upload_buffer)) {
+      r->wire_id = wireId;
+      r->client_handle = clientHandle;
+      r->dst_offset = dstOff;
+      r->size = size;
+      r->heap_offset = off;
+      r->heap_generation = gen;
+      endRecord();
+    }
+  }
+
+  void MtlWireContext::emitBindTextureById(MtlStageMask stages, uint32_t slot,
+                                           const Rc<MtlTextureView>& view) {
+    uint64_t id = 0u;
+    if (view != nullptr && view->image != nullptr)
+      id = ensureTextureCreated(view->image);
+    auto* r = beginRecord<d9mt_wire_rec_bind_texture_by_id>(d9mt_wire_op_bind_texture_by_id);
+    if (!r)
+      return;
+    r->stages = stages;
+    r->slot = slot;
+    r->image_wire_id = id;
+    if (id) {
+      r->format = uint32_t(view->key.format);
+      r->view_type = uint32_t(view->key.viewType);
+      r->base_mip = view->key.baseMip;
+      r->mip_count = view->key.mipCount;
+      r->base_layer = view->key.baseLayer;
+      r->layer_count = view->key.layerCount;
+    }
+    endRecord();
+  }
+
+  /* Discard rename follow-up: the frontend never re-binds after a rename
+   * (that is the point of invalidateBuffer), so the WIRE must re-emit every
+   * binding that referenced the renamed logical buffer — otherwise the
+   * server keeps drawing from the retired backing (HANDOFF-S2 flag 4). */
+  void MtlWireContext::rebindAfterInvalidate(const Rc<MtlBuffer>& buffer) {
+    for (uint32_t i = 0u; i < 16u; i++) {
+      BufShadow& sh = m_streamShadow[i];
+      if (sh.buffer.ptr() != buffer.ptr())
+        continue;
+      MtlBufferSlice slice(sh.buffer, sh.offset, sh.length); /* CS thread: snapshots CURRENT storage */
+      ensureBufferCreated(slice);
+      if (auto* r = beginRecord<d9mt_wire_rec_bind_vertex_buffer>(d9mt_wire_op_bind_vertex_buffer)) {
+        r->binding = i;
+        r->stride = sh.stride;
+        fillBufferRef(r->buf, slice);
+        endRecord();
+      }
+    }
+    for (uint32_t st = 0u; st < 2u; st++) {
+      for (uint32_t slot = 0u; slot < 8u; slot++) {
+        BufShadow& sh = m_uboShadow[st][slot];
+        if (sh.buffer.ptr() != buffer.ptr())
+          continue;
+        MtlBufferSlice slice(sh.buffer, sh.offset, sh.length);
+        ensureBufferCreated(slice);
+        if (auto* r = beginRecord<d9mt_wire_rec_bind_uniform_buffer>(d9mt_wire_op_bind_uniform_buffer)) {
+          r->stages = 1u << st;
+          r->slot = slot;
+          fillBufferRef(r->buf, slice);
+          endRecord();
+        }
+      }
+    }
+    if (m_indexShadow.buffer.ptr() == buffer.ptr()) {
+      MtlBufferSlice slice(m_indexShadow.buffer, m_indexShadow.offset, m_indexShadow.length);
+      ensureBufferCreated(slice);
+      if (auto* r = beginRecord<d9mt_wire_rec_bind_index_buffer>(d9mt_wire_op_bind_index_buffer)) {
+        fillBufferRef(r->buf, slice);
+        r->index_type = m_indexShadow.type;
+        endRecord();
+      }
+    }
   }
 
   uint64_t MtlWireContext::ensureTextureCreated(const Rc<MtlTexture>& image) {
@@ -648,6 +866,13 @@ namespace dxvk::backend {
       fillBufferRef(r->buf, slice);
       endRecord();
     }
+    if (m_ring != nullptr && binding < 16u) {
+      BufShadow& sh = m_streamShadow[binding];
+      sh.buffer = slice.buffer();
+      sh.offset = slice.offset();
+      sh.length = slice.length();
+      sh.stride = stride;
+    }
     m_inner->bindVertexBuffer(binding, std::move(slice), stride);
   }
 
@@ -659,6 +884,12 @@ namespace dxvk::backend {
       r->length = length;
       endRecord();
     }
+    if (m_ring != nullptr && binding < 16u) {
+      BufShadow& sh = m_streamShadow[binding];
+      sh.offset = offset;
+      sh.length = length;
+      sh.stride = stride;
+    }
     m_inner->bindVertexBufferRange(binding, offset, length, stride);
   }
 
@@ -669,6 +900,12 @@ namespace dxvk::backend {
       fillBufferRef(r->buf, slice);
       r->index_type = uint32_t(type);
       endRecord();
+    }
+    if (m_ring != nullptr) {
+      m_indexShadow.buffer = slice.buffer();
+      m_indexShadow.offset = slice.offset();
+      m_indexShadow.length = slice.length();
+      m_indexShadow.type = uint32_t(type);
     }
     m_inner->bindIndexBuffer(std::move(slice), type);
   }
@@ -682,6 +919,16 @@ namespace dxvk::backend {
       fillBufferRef(r->buf, slice);
       endRecord();
     }
+    if (m_ring != nullptr && slot < 8u) {
+      for (uint32_t st = 0u; st < 2u; st++) {
+        if (!(stages & (1u << st)))
+          continue;
+        BufShadow& sh = m_uboShadow[st][slot];
+        sh.buffer = slice.buffer();
+        sh.offset = slice.offset();
+        sh.length = slice.length();
+      }
+    }
     m_inner->bindUniformBuffer(stages, slot, std::move(slice));
   }
 
@@ -692,6 +939,14 @@ namespace dxvk::backend {
       r->offset = offset;
       r->length = length;
       endRecord();
+    }
+    if (m_ring != nullptr && slot < 8u) {
+      for (uint32_t st = 0u; st < 2u; st++) {
+        if (!(stages & (1u << st)))
+          continue;
+        m_uboShadow[st][slot].offset = offset;
+        m_uboShadow[st][slot].length = length;
+      }
     }
     m_inner->bindUniformBufferRange(stages, slot, offset, length);
   }
@@ -708,6 +963,10 @@ namespace dxvk::backend {
       }
       endRecord();
     }
+    /* S3 twin (op 35): names the IMAGE by wire id so the server binds the
+     * real texture (view key bits carried for server-side view minting). */
+    if (m_active)
+      emitBindTextureById(stages, slot, view);
     m_inner->bindTexture(stages, slot, std::move(view));
   }
 
@@ -895,6 +1154,42 @@ namespace dxvk::backend {
   void MtlWireContext::copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
                                            const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                                            MtlDeviceSize sliceAlign, MtlFormat format) {
+    /* S3: THE texture-content seam (frontend Lock/UpdateTexture staging
+     * lands here). Additive: the staging bytes ALSO copy into a heap region
+     * and an upload_texture record names the subresource box — the local
+     * execution below is untouched. */
+    if (m_active && m_heap && dst != nullptr && src != nullptr) {
+      const uint64_t texId = ensureTextureCreated(dst);
+      const void* bytes = src->mapPtr(off);
+      if (texId && bytes) {
+        const MtlFormat fmt = format != MtlFormat::Invalid ? format : dst->format;
+        MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u, total = 0u;
+        wirePitch(fmt, extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage, total);
+        uint64_t gen = 0u;
+        const uint64_t heapOff = heapAlloc(bytes, total, &gen);
+        if (heapOff != UINT64_MAX) {
+          if (auto* r = beginRecord<d9mt_wire_rec_upload_texture>(d9mt_wire_op_upload_texture)) {
+            r->wire_id = texId;
+            r->client_handle = dst->texture.tex;
+            r->mip = dstSub.mipLevel;
+            r->layer = dstSub.baseLayer;
+            r->x = uint32_t(dstOff.x);
+            r->y = uint32_t(dstOff.y);
+            r->z = uint32_t(dstOff.z);
+            r->width = extent.width;
+            r->height = extent.height;
+            r->depth = extent.depth;
+            r->row_pitch = uint32_t(bytesPerRow);
+            r->slice_pitch = uint32_t(bytesPerImage);
+            r->format = uint32_t(fmt);
+            r->heap_offset = heapOff;
+            r->heap_generation = gen;
+            r->data_size = total;
+            endRecord();
+          }
+        }
+      }
+    }
     m_inner->copyBufferToTexture(dst, dstSub, dstOff, extent, src, off, rowAlign, sliceAlign, format);
   }
 
@@ -930,11 +1225,37 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) {
+    /* S3: the Discard-rename refresh point. Three wire duties, all additive:
+     *  1. create the NEW backing (recycled pooled backings already have ids),
+     *  2. best-effort content snapshot — the CS may run this before the app
+     *     finishes writing the renamed slice (Lock returns first), so this
+     *     can carry PARTIAL bytes; defined-but-stale on the server, honest
+     *     flag in HANDOFF-S3,
+     *  3. re-emit every binding that referenced the logical buffer (the
+     *     frontend never re-binds after a rename). */
+    if (m_active && buffer != nullptr) {
+      const Rc<MtlAllocation>& fresh = buffer->storage();
+      if (fresh != nullptr) {
+        const bool wasNew = fresh->wireId == 0u;
+        ensureStorageCreated(fresh); /* emits the initial content snapshot */
+        if (!wasNew && m_heap && fresh->mapPtr && fresh->size)
+          emitUploadBuffer(fresh->wireId, fresh->handle.buf, 0u,
+                           fresh->mapPtr, fresh->size);
+        rebindAfterInvalidate(buffer);
+      }
+    }
     m_inner->invalidateBuffer(buffer, std::move(slice));
   }
 
   void MtlWireContext::uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                                     const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size) {
+    /* S3: buffer-content seam (constant-buffer ring et al). */
+    if (m_active && m_heap && dst != nullptr && staging != nullptr && size) {
+      const Rc<MtlAllocation>& storage = dst->storage();
+      const void* bytes = staging->mapPtr(srcOff);
+      if (storage != nullptr && bytes && ensureStorageCreated(storage))
+        emitUploadBuffer(storage->wireId, storage->handle.buf, dstOff, bytes, size);
+    }
     m_inner->uploadBuffer(dst, dstOff, staging, srcOff, size);
   }
 
@@ -1038,7 +1359,10 @@ namespace dxvk::backend::prof {
       " srvErr=", s.server_error,
       " srvFrames=", s.server_frames - prev.server_frames,
       " srvPace=", g_srvPace.load(std::memory_order_relaxed),
-      " srvExecErr=", s.server_exec_errors);
+      " srvExecErr=", s.server_exec_errors,
+      " psoSkip=", s.server_skipped_pso - prev.server_skipped_pso,
+      " upl=", s.server_uploads - prev.server_uploads,
+      " heapDrop=", s.heap_dropped);
     prev = s;
   }
 

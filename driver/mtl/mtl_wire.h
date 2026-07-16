@@ -166,7 +166,15 @@ enum d9mt_wire_op {
   d9mt_wire_op_present_frame = 31,
   d9mt_wire_op_clear_render_target_by_id = 32,
 
-  d9mt_wire_op_count = 33
+  /* --- Phase S3 (texture/buffer CONTENT via the shared heap; view identity
+   * for texture binds) — APPENDED ONLY. Bulk bytes live in the `shared-heap`
+   * file (struct d9mt_wire_heap below); records reference heap regions by
+   * free-running offset + generation. */
+  d9mt_wire_op_upload_buffer = 33,
+  d9mt_wire_op_upload_texture = 34,
+  d9mt_wire_op_bind_texture_by_id = 35,
+
+  d9mt_wire_op_count = 36
 };
 
 /* --- record header -------------------------------------------------------
@@ -631,5 +639,112 @@ struct d9mt_wire_rec_clear_render_target_by_id {
   struct d9mt_wire_clear_value value;
 };
 D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_render_target_by_id) == 56);
+
+/* ---------------------------------------------------------------------------
+ * Phase S3: shared heap (docs/RENDER_SERVER_SPEC.md "Shared memory layout"
+ * item 2) — the bulk-data channel for texture/buffer CONTENT.
+ *
+ * A second MAP_SHARED file `heap` in the shm dir:
+ *   [ struct d9mt_wire_heap (192 B) ][ pad to data_offset ][ data: capacity ]
+ * data_offset is D9MT_WIRE_HEAP_DATA_OFFSET (16 KiB) so the data area is
+ * host-page-aligned: the server wraps the WHOLE mapping once via
+ * newBufferWithBytesNoCopy and blits regions straight out of it (zero CPU
+ * copy); region offsets stay 256-aligned relative to the data area.
+ *
+ * PRODUCER (client, CS thread): sequential bump allocator. `head` is a
+ * FREE-RUNNING byte cursor; a region's data lives at (offset & (capacity-1))
+ * and NEVER straddles the wrap (the allocator skips to the next capacity
+ * boundary instead — the skipped bytes are reclaimed when a later region's
+ * generation is acked). Every region is tagged with a GENERATION = the
+ * free-running END cursor of the region (monotonic).
+ *
+ * CONSUMER (server): after the GPU submission that read a region COMPLETES,
+ * the server release-stores the region's generation into `consumed` (also
+ * mirrored into status v3 heap_consumed for observability). The producer's
+ * space check is head - consumed <= capacity - need: acking generation G
+ * frees every byte of every region allocated at or before G.
+ *
+ * FULL HEAP NEVER STALLS: the producer drops the upload (dropped++) and the
+ * server keeps its previous content for that resource — visual staleness on
+ * the server side only, the client's local execution is untouched. */
+
+#define D9MT_WIRE_HEAP_MAGIC 0x30315048544D3944ull /* "D9MTHP10" LE */
+#define D9MT_WIRE_HEAP_DATA_OFFSET 16384u
+
+struct d9mt_wire_heap {
+  /* line 0: immutable after attach */
+  uint64_t magic;       /* D9MT_WIRE_HEAP_MAGIC */
+  uint64_t capacity;    /* data bytes, power of two */
+  uint64_t data_offset; /* D9MT_WIRE_HEAP_DATA_OFFSET */
+  uint64_t _pad0[5];
+  /* line 1: producer-written */
+  d9mt_wire_au64 head;    /* free-running region end cursor (release) */
+  d9mt_wire_au64 dropped; /* uploads dropped because the heap was full */
+  uint64_t _pad1[6];
+  /* line 2: consumer-written */
+  d9mt_wire_au64 consumed; /* generation ack: every region with generation <=
+                            * consumed is GPU-complete and reusable */
+  uint64_t _pad2[7];
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_heap) == 192);
+
+/* --- Phase S3 records (opcodes 33..35) --------------------------------------
+ * Content records are emitted on the CS thread AFTER the resource's create_*
+ * record (ensure* order holds) and BEFORE any draw that consumes the bytes,
+ * so executing them in stream order gives the server the same content
+ * timeline the client executes locally (dual-execution stays additive). */
+
+/* Buffer content: `size` bytes for [dst_offset, dst_offset+size) of the
+ * backing identified by client_handle/wire_id (same identity rules as
+ * create_buffer). heap_offset is the region's free-running START cursor. */
+struct d9mt_wire_rec_upload_buffer {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint64_t dst_offset;
+  uint64_t size;
+  uint64_t heap_offset;
+  uint64_t heap_generation;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_upload_buffer) == 56);
+
+/* Texture content for ONE subresource box: linear rows at row_pitch/
+ * slice_pitch (Metal bytesPerRow/bytesPerImage semantics; slice_pitch is 0
+ * for non-3D extents, matching the client's copyBufferToTexture encode). */
+struct d9mt_wire_rec_upload_texture {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint32_t mip;
+  uint32_t layer;
+  uint32_t x, y, z;
+  uint32_t width, height, depth;
+  uint32_t row_pitch;
+  uint32_t slice_pitch;
+  uint32_t format; /* MtlFormat of the copy (view of the staging bytes) */
+  uint32_t _pad0;
+  uint64_t heap_offset;
+  uint64_t heap_generation;
+  uint64_t data_size;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_upload_texture) == 96);
+
+/* Emitted immediately after every bind_texture (op 3) from the same call:
+ * names the bound view's IMAGE by wire id + the view key bits, so the server
+ * can resolve a REAL texture instead of the S2 dummy. image_wire_id == 0
+ * means unbind (slot reverts to the dummy). */
+struct d9mt_wire_rec_bind_texture_by_id {
+  struct d9mt_wire_rec_hdr hdr;
+  uint32_t stages; /* MtlStageMask */
+  uint32_t slot;
+  uint64_t image_wire_id;
+  uint32_t format; /* view format (MtlFormat) */
+  uint32_t view_type;
+  uint32_t base_mip;
+  uint32_t mip_count;
+  uint32_t base_layer;
+  uint32_t layer_count;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_bind_texture_by_id) == 48);
 
 #endif /* D9MT_MTL_WIRE_H */

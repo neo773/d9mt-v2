@@ -42,6 +42,17 @@
  *   offset 184  u64      psos_built        MTL4Compiler pipeline builds
  *   offset 192  u64      exec_errors       non-fatal executor errors (never
  *                                          crashes the stream; see executor.mm)
+ *
+ * --- v3 (render-server Phase S3, ADDITIVE — first 200 bytes unchanged) ----
+ *   offset 200  u64      draws_skipped_pending_pso
+ *                                          subset of draws_skipped dropped
+ *                                          ONLY because the PSO's async
+ *                                          compile was still in flight
+ *   offset 208  u64      psos_pending      async pipeline builds in flight
+ *   offset 216  u64      uploads_executed  upload_buffer/upload_texture
+ *                                          records blitted from the heap
+ *   offset 224  u64      heap_consumed     mirror of d9mt_wire_heap.consumed
+ *                                          (generation ack; observability)
  */
 
 #ifdef __cplusplus
@@ -75,7 +86,7 @@ enum d9mt_status_error {
   d9mt_status_err_clear_verify = 5  /* GPU clear readback mismatch */
 };
 
-#define D9MT_STATUS_VERSION 2u
+#define D9MT_STATUS_VERSION 3u
 
 struct d9mt_status {
   d9mt_status_au64 epoch;            /*   0 */
@@ -96,9 +107,14 @@ struct d9mt_status {
   d9mt_status_au64 draws_skipped;    /* 176 */
   d9mt_status_au64 psos_built;       /* 184 */
   d9mt_status_au64 exec_errors;      /* 192 */
+  /* --- v3 (Phase S3) --- */
+  d9mt_status_au64 draws_skipped_pending_pso; /* 200 */
+  d9mt_status_au64 psos_pending;              /* 208 */
+  d9mt_status_au64 uploads_executed;          /* 216 */
+  d9mt_status_au64 heap_consumed;             /* 224 */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 200);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 232);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -115,5 +131,9 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_executed) == 168);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_skipped) == 176);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, psos_built) == 184);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, exec_errors) == 192);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_skipped_pending_pso) == 200);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, psos_pending) == 208);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, uploads_executed) == 216);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heap_consumed) == 224);
 
 #endif /* D9MT_SERVER_STATUS_H */

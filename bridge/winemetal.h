@@ -2570,6 +2570,12 @@ struct WMTWireStats {
   uint64_t server_frames;       /* presentFrame records executed */
   uint64_t server_frame_serial; /* client serial of the last executed present */
   uint64_t server_exec_errors;  /* executor non-fatal error count */
+  /* --- render-server S3 (status v3 / heap mirrors; 0 on a pre-S3 server) --- */
+  uint64_t server_skipped_pso;  /* draws skipped ONLY because an async PSO
+                                 * compile was still in flight */
+  uint64_t server_uploads;      /* heap content records the server executed */
+  uint64_t heap_consumed;       /* server's heap generation ack */
+  uint64_t heap_dropped;        /* producer uploads dropped: heap full */
 };
 
 enum WMTWireAttachMode {
@@ -2581,12 +2587,21 @@ enum WMTWireAttachMode {
 
 /* Relocates the PE-VirtualAlloc'd, page-aligned ring region (control block +
  * data, see mtl_wire.h) into a MAP_SHARED file mapped MAP_FIXED over the SAME
- * address, creates the shm dir ($TMPDIR/d9mt-<pid>/: `ring` + `status`),
- * spawns d9mt-serverd and waits <=3 s for its epoch. Returns the attach mode
- * (enum WMTWireAttachMode). The pointer stays valid in every mode; on
- * WMTWireAttachFailed the caller must release it, otherwise it releases it
- * only AFTER WireRing_detach. Call once. */
-WINEMETAL_API uint32_t WireRing_attach(void *base, uint64_t bytes);
+ * address, creates the shm dir ($TMPDIR/d9mt-<pid>/: `ring` + `status` +
+ * `heap`), spawns d9mt-serverd and waits <=3 s for its epoch. Returns the
+ * attach mode (enum WMTWireAttachMode). The pointers stay valid in every
+ * mode; on WMTWireAttachFailed the caller must release them, otherwise it
+ * releases them only AFTER WireRing_detach. Call once.
+ *
+ * S3 shared heap: heap_base/heap_bytes name a second page-aligned PE region
+ * (d9mt_wire_heap header + data, mtl_wire.h) relocated into the sparse
+ * MAP_SHARED `heap` file the same MAP_FIXED way. Optional: pass NULL/0 for a
+ * ring-only attach. *heap_ok reports whether the heap is file-backed and
+ * server-visible (0 = caller must not emit upload records; the region — if
+ * any — is plain memory). */
+WINEMETAL_API uint32_t WireRing_attach(void *base, uint64_t bytes,
+                                       void *heap_base, uint64_t heap_bytes,
+                                       uint32_t *heap_ok);
 
 /* Producer's empty->nonempty notification (tail == previous head sampled at
  * append; see mtl_wire.h). S1: a no-op — the server parks on a 1 ms poll and

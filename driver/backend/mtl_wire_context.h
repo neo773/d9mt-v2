@@ -155,6 +155,31 @@ namespace dxvk::backend {
     bool            m_draining = false; /* inside emitQueuedDestroys */
     uint64_t        m_presentSerial = 0u; /* presentFrame counter (S2) */
 
+    /* S3 shared heap (mtl_wire.h d9mt_wire_heap): second VirtualAlloc region
+     * relocated into the sparse MAP_SHARED `heap` file — texture/buffer
+     * CONTENT rides regions here; only region metadata rides ring records. */
+    uint8_t*        m_heapMem  = nullptr;
+    d9mt_wire_heap* m_heap     = nullptr;
+    uint8_t*        m_heapData = nullptr;
+    uint64_t        m_heapCap  = 0u;
+    uint64_t        m_heapHead = 0u;   /* local producer cursor mirror */
+    bool            m_heapWarned = false;
+
+    /* S3 rebind shadows: which LOGICAL buffer sits in each wire-visible
+     * binding, so invalidateBuffer (a Discard rename, which the frontend
+     * never follows with a re-bind) can emit refreshed bind records — the
+     * server otherwise keeps drawing from the retired backing (S2 flag). */
+    struct BufShadow {
+      Rc<MtlBuffer> buffer;
+      uint64_t      offset = 0u;
+      uint64_t      length = 0u;
+      uint32_t      stride = 0u; /* vertex streams */
+      uint32_t      type   = 0u; /* index buffer: MtlIndexType */
+    };
+    BufShadow m_streamShadow[16];
+    BufShadow m_uboShadow[2][8];
+    BufShadow m_indexShadow;
+
     /* Reserves size = sizeof(T) + trailing, 8-aligned, contiguous, zeroed,
      * with hdr.opcode/size filled. Returns nullptr when the transport is
      * inactive (caller skips serialization). endRecord() publishes + kicks. */
@@ -172,10 +197,24 @@ namespace dxvk::backend {
      * arbitrary-thread destructors via wire::queueDestroy (mtl_wire_emit.h)
      * and are drained at the top of reserveBytes. */
     bool     ensureBufferCreated(const MtlBufferSlice& slice);
+    bool     ensureStorageCreated(const Rc<MtlAllocation>& storage);
     uint64_t ensureTextureCreated(const Rc<MtlTexture>& image);
     void     ensureShaderCreated(const Rc<MtlShaderFunction>& fn);
     void     ensureSamplerCreated(const Rc<MtlSamplerState>& sampler);
     void     emitQueuedDestroys();
+
+    /* --- S3 shared-heap producer (CS thread) --------------------------------
+     * Copies `bytes` of `src` into a fresh 256-aligned heap region and
+     * returns its free-running start offset (genOut = the region's END
+     * cursor, the ack generation). NEVER stalls: a full heap (server behind
+     * on acks) drops the upload (heap->dropped++) and returns UINT64_MAX —
+     * the server keeps its previous content for that resource. */
+    uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut);
+    void     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
+                              uint64_t dstOff, const void* src, uint64_t size);
+    void     emitBindTextureById(MtlStageMask stages, uint32_t slot,
+                                 const Rc<MtlTextureView>& view);
+    void     rebindAfterInvalidate(const Rc<MtlBuffer>& buffer);
 
     static void fillBufferRef(d9mt_wire_buffer_ref& dst, const MtlBufferSlice& slice);
     static void fillRtRef(d9mt_wire_rt_ref& dst, const Rc<MtlTextureView>& view);

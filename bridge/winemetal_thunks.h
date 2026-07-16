@@ -609,8 +609,11 @@ struct unixcall_mtl4_barrier {
 struct unixcall_wirering_attach {
   struct WMTMemoryPointer base; /* in: page-aligned PE region (VirtualAlloc) */
   uint64_t bytes;               /* in: total region size incl. control block */
+  /* S3 shared heap (optional second region; NULL/0 = ring-only attach) */
+  struct WMTMemoryPointer heap_base; /* in: page-aligned PE region */
+  uint64_t heap_bytes;               /* in: header + data bytes */
   uint32_t mode;                /* out: enum WMTWireAttachMode */
-  uint32_t padding;
+  uint32_t heap_ok;             /* out: heap file mapped + server-visible */
 };
 
 struct unixcall_wirering_stats {
