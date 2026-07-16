@@ -4,6 +4,7 @@
 
 #include "../mtl/mtl_context.h"   // MtlDevice
 #include "../util/log/log.h"
+#include "../util/util_string.h"
 
 namespace dxvk::backend {
 
@@ -103,15 +104,6 @@ namespace dxvk::backend {
       view->image      = tex.ptr();
       view->key.format = m_desc.imageFormat;
 
-      /* Re-pin drawableSize when the layer drifted: applyProps sets it on the
-       * main thread asynchronously, and any later view layout resets it to
-       * bounds*contentsScale (window-sized). The present copy cannot scale, so
-       * a window-sized drawable shows the backbuffer in the top-left corner.
-       * Pinning back to the backbuffer size makes CA scale it to the window.
-       * Takes effect on a subsequent drawable — self-heals within a frame. */
-      if (dw && dh &&
-          (dw != m_desc.imageExtent.width || dh != m_desc.imageExtent.height))
-        applyProps();
       image.texture    = tex;
       image.view       = view;
       image.valid      = true;
@@ -155,11 +147,19 @@ namespace dxvk::backend {
     void applyProps() {
       if (!m_layer)
         return;
+      /* The window layer's GEOMETRY (contentsScale, drawableSize) belongs to
+       * the window system — the winemac driver recomputes both from the view
+       * bounds and backing scale on every layout. Writing either from here
+       * races that layout and strands stale values (a pixel-sized drawable
+       * composited in points = top-left quarter magnified; a stale oversized
+       * drawable = 4x present cost). Zero = leave untouched (bridge contract);
+       * the present blit scales the backbuffer to whatever drawable the
+       * layout produces. */
       WMTLayerProps props = {};
       props.device               = m_wmtDevice;
-      props.contents_scale       = 1.0;
-      props.drawable_width       = double(m_desc.imageExtent.width);
-      props.drawable_height      = double(m_desc.imageExtent.height);
+      props.contents_scale       = 0.0;
+      props.drawable_width       = 0.0;
+      props.drawable_height      = 0.0;
       props.opaque               = true;
       props.display_sync_enabled = m_desc.vsync;
       /* The present path copies the app backbuffer INTO the drawable via a

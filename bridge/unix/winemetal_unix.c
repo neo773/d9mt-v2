@@ -3744,9 +3744,14 @@ _MetalLayer_setProps(void *obj) {
     layer.opaque = props->opaque;
     dxmt_set_layer_background_black(layer);
     layer.framebufferOnly = props->framebuffer_only;
-    layer.contentsScale = props->contents_scale;
+    /* Zero means "leave untouched": layer geometry (contentsScale,
+     * drawableSize) is owned by the window system's view layout; callers
+     * that only configure device/format must not clobber it. */
+    if (props->contents_scale > 0.0)
+      layer.contentsScale = props->contents_scale;
     layer.displaySyncEnabled = props->display_sync_enabled;
-    layer.drawableSize = CGSizeMake(props->drawable_width, props->drawable_height);
+    if (props->drawable_width > 0.0 && props->drawable_height > 0.0)
+      layer.drawableSize = CGSizeMake(props->drawable_width, props->drawable_height);
     layer.pixelFormat = to_metal_pixel_format(props->pixel_format);
     if (props->maximum_drawable_count != 0)
       layer.maximumDrawableCount = props->maximum_drawable_count;
