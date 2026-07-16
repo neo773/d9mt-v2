@@ -1,0 +1,28 @@
+bridge/winemetal_thunks.c
+  s_68632dcad39ed7::t_9d18a6b3fd3805 1884-1905
+bridge/winemetal_thunks.h
+  s_68632dcad39ed7::t_902b562995cc79 607-617
+bridge/unix/winemetal_unix.c
+  s_68632dcad39ed7::t_a315014660cc4b 37
+  s_68632dcad39ed7::t_e236fdec95b5db 6411-6543
+  s_68632dcad39ed7::t_bed4a5803c4905 6679-6682
+  s_68632dcad39ed7::t_9a8e80870f87f4 7008-7013,7242-7247
+bridge/winemetal.h
+  s_68632dcad39ed7::t_0bb726e4f73c6b 2554-2580
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3d7d4b615033f8c1808d6f61474c8ea744e6d9e8",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
