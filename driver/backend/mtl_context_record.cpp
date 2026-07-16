@@ -896,10 +896,57 @@ namespace dxvk::backend {
 
   // --- draw path (decision 2+3) ----------------------------------------------
 
+  bool MtlContextImpl::ensureFanIndices() {
+    if (m_fanIndices != nullptr)
+      return true;
+    MtlBufferCreateInfo bi = {};
+    bi.size      = uint64_t(3u * (kFanMaxVerts - 2u)) * 4u;
+    bi.usage     = MtlUsage::IndexBuffer;
+    bi.cpuAccess = MtlCpuAccess::Write;
+    Rc<MtlBuffer> buf = m_device->createBuffer(bi);
+    uint32_t* p = buf != nullptr ? static_cast<uint32_t*>(buf->mapPtr(0u)) : nullptr;
+    if (p == nullptr) {
+      Logger::err("MtlContextImpl: fan index pattern buffer creation failed");
+      return false;
+    }
+    for (uint32_t t = 0u; t + 2u < kFanMaxVerts; t++) {
+      *p++ = 0u;
+      *p++ = t + 1u;
+      *p++ = t + 2u;
+    }
+    m_fanIndices = std::move(buf);
+    return true;
+  }
+
   void MtlContextImpl::draw(uint32_t count, const MtlDrawArgs* args) {
     if (!prepareDraw())
       return;
     prof::Scope profScope(prof::EncodeDraw);
+    if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
+      /* Fan emulation: without this, fans fall into the triangle-list default
+       * and rasterize as disconnected wedges (every 3rd triangle) — 2D vector
+       * content (minimaps, HUD polygons) is the classic victim. */
+      if (!ensureFanIndices())
+        return;
+      if (m_fanIndices->trackingSerial() != m_currentSerial)
+        m_fanIndices->setTrackingSerial(m_currentSerial);
+      for (uint32_t i = 0; i < count; i++) {
+        if (args[i].vertexCount < 3u)
+          continue;
+        const uint32_t verts = std::min(args[i].vertexCount, kFanMaxVerts);
+        auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw_indexed>(
+          uint16_t(WMTMtl4RenderCommandDrawIndexed));
+        cmd->primitive           = uint64_t(WMTPrimitiveTypeTriangle);
+        cmd->index_count         = 3u * (verts - 2u);
+        cmd->index_type          = uint64_t(WMTIndexTypeUInt32);
+        cmd->index_buffer        = m_fanIndices->gpuAddress(0u);
+        cmd->index_buffer_length = m_fanIndices->size;
+        cmd->instance_count      = args[i].instanceCount ? args[i].instanceCount : 1u;
+        cmd->base_vertex         = int64_t(args[i].firstVertex);
+        cmd->base_instance       = args[i].firstInstance;
+      }
+      return;
+    }
     for (uint32_t i = 0; i < count; i++) {
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw>(
         uint16_t(WMTMtl4RenderCommandDraw));
@@ -914,6 +961,16 @@ namespace dxvk::backend {
   void MtlContextImpl::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
     if (!prepareDraw())
       return;
+    if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
+      /* Indexed fans need a CPU remap of the source indices (GPU-side buffer,
+       * unreadable at record time) — unimplemented; drawn as a list. Warn so
+       * a title that actually uses them is identifiable. */
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn("MtlContextImpl: indexed triangle fan drawn as list (index remap unimplemented)");
+      }
+    }
     /* Record-time snapshot (MtlBufferSlice contract): index fetch resolves
      * through the slice's captured backing, never the live buffer. */
     if (m_indexBuffer.storage() == nullptr)

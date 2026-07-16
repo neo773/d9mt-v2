@@ -495,6 +495,15 @@ namespace dxvk::backend {
     bool                       m_blitInitFailed = false;
     std::vector<BlitArgTable>  m_blitArgTables;
     uint32_t                   m_blitArgCursor = 0u;
+
+    /* Triangle-fan emulation: Metal has no fan primitive (Vulkan did, so the
+     * frontend passes fans through). ONE shared index buffer holds the fan
+     * pattern (0,1,2, 0,2,3, ...) — a fan of N vertices consumes exactly its
+     * first 3*(N-2) indices (prefix property), so every non-indexed fan draw
+     * reuses this buffer with base_vertex = firstVertex. */
+    static constexpr uint32_t  kFanMaxVerts = 16386u;  /* pattern = 192 KiB of u32 */
+    Rc<MtlBuffer>              m_fanIndices;
+    bool ensureFanIndices();
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
 
