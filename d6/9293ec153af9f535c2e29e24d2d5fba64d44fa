@@ -1,0 +1,59 @@
+bridge/unix/winemetal_unix.c
+  s_68632dcad39ed7::t_ec0272e7d3ce33 6684-6691
+driver/d3d9/d3d9_swapchain.cpp
+  s_68632dcad39ed7::t_1dcf4a834ea443 800-803
+  s_68632dcad39ed7::t_d9d24723cafcdd 680-683
+  s_68632dcad39ed7::t_e7b947bc3cb339 17
+  s_68632dcad39ed7::t_987c72f8b12707 804
+driver/backend/mtl_device_impl.cpp
+  s_68632dcad39ed7::t_c184a0aab3ec30 354
+  s_68632dcad39ed7::t_e882e719e33009 147-150
+  s_68632dcad39ed7::t_be8494eab5e0db 426-434
+driver/backend/mtl_wire_emit.h
+  s_68632dcad39ed7::t_02e1354986cfd7 1-42
+driver/mtl/mtl_resource.h
+  s_68632dcad39ed7::t_c8a22440f1bb84 218-222
+  s_68632dcad39ed7::t_63d0c5719eee09 327-328
+  s_68632dcad39ed7::t_4e7103d1c91c4f 369-370
+driver/backend/mtl_device_impl.h
+  s_68632dcad39ed7::t_03764bc50eee22 25
+  s_68632dcad39ed7::t_c554e16f7600f3 106-109
+  s_68632dcad39ed7::t_b9663b3ff0a6d3 220-224
+driver/backend/mtl_wire_context.cpp
+  s_68632dcad39ed7::t_1b5b021d4a8c6c 442-455
+  s_68632dcad39ed7::t_5ee567bc962214 272-420
+  s_68632dcad39ed7::t_dbc5a48aa1d141 846-868
+  s_68632dcad39ed7::t_c50ff751fc2168 677-678
+  s_68632dcad39ed7::t_59c64de2b18120 184-190
+  s_68632dcad39ed7::t_6aec2c9e5c4670 754-785
+  s_68632dcad39ed7::t_2d2eeb696e0f29 13,15-16,19,37-69
+  s_68632dcad39ed7::t_ab2c8814a93cff 719-720
+  s_68632dcad39ed7::t_8f8b4e9df04ea0 421,983-1015,1021-1025,1038-1041
+  s_68632dcad39ed7::t_16ca7fcd362d3b 643-644
+  s_68632dcad39ed7::t_9f23dd176a553b 666-667
+  s_68632dcad39ed7::t_bf6f377c1d41fc 470-474
+  s_68632dcad39ed7::t_ffc79e9fa1cc6b 422
+driver/backend/mtl_wire_context.h
+  s_68632dcad39ed7::t_cad049244d229a 155-156,167-178
+  s_68632dcad39ed7::t_c010d910da589e 179
+driver/mtl/mtl_context.h
+  s_68632dcad39ed7::t_eea887841d54b0 82-90
+bridge/winemetal.h
+  s_68632dcad39ed7::t_8bc7de8b1492bf 2569-2572
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d69293ec153af9f535c2e29e24d2d5fba64d44fa",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
