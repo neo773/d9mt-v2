@@ -85,3 +85,11 @@ production rates. First-run checklist: log shows
 - No env gating; git revert is the safety net.
 - One ring per process forever (`g_wireClaimed` never resets) — a device
   destroy/recreate gets no transport the second time.
+
+## S1 real-game evidence (2026-07-17, GTA IV, recorded from the live session)
+
+Server spawned from the wine process, attached, and consumed the full command
+stream during in-city driving: **~16,000 records/frame (4.1M records / 170MB
+per 256-frame PROF window), 0 stalls, 0 decode errors, srvErr=0, heartbeat
+~100Hz**. Menu rates: ~80 records/frame. Client fps unaffected (listen-only by
+design). PROF source line format: `| wire: rec= bytes= stalls= decodeErr= hb= srvErr=`.
