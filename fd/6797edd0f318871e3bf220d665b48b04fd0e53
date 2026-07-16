@@ -1,0 +1,20 @@
+driver/backend/mtl_profiler.h
+  s_68632dcad39ed7::t_a60877750c59c3 147-149
+  s_68632dcad39ed7::t_ac4d5c41ba26b4 77-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "fd6797edd0f318871e3bf220d665b48b04fd0e53",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
