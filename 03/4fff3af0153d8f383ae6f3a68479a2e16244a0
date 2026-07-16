@@ -1,0 +1,52 @@
+server/test_feed.c
+  s_9dc0f2092159a8::t_c7963c2152f567 60
+  s_9dc0f2092159a8::t_32c2e0e743db79 693-699,710-717
+  s_9dc0f2092159a8::t_a8550230dfb8d7 273-301
+  s_9dc0f2092159a8::t_248dbffc755b79 240-261
+  s_9dc0f2092159a8::t_641454986913b8 120-126,134-147
+  s_9dc0f2092159a8::t_2b9f81f447c7e2 622-624
+  s_9dc0f2092159a8::t_83940c12f119a3 718-750,754-785,793-801,804,807
+  s_9dc0f2092159a8::t_90b78aade3e2ab 786-792,809-810
+  s_9dc0f2092159a8::t_37c3bbc5e52471 513-535,540
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_d7eb4982e1c2eb 714-715
+  s_9dc0f2092159a8::t_b7f46b18e6a348 1218-1235,1244,1246,1248-1258,1260
+  s_9dc0f2092159a8::t_3aa5f7c9adfb0c 1236-1242,1245
+  s_9dc0f2092159a8::t_6847303d422620 418-419,434-443
+  s_9dc0f2092159a8::t_ff6acf1d07a49b 40-43
+  s_9dc0f2092159a8::t_cf4199849e7539 474-511,515,517-518
+server/executor.mm
+  s_9dc0f2092159a8::t_8d56c57094102f 200-205
+  s_9dc0f2092159a8::t_d2e4d02f6e8ad7 78,80,82,84
+  s_9dc0f2092159a8::t_111c372719d2bd 76-77
+  s_9dc0f2092159a8::t_042df300157395 1106-1130,1132-1139
+  s_9dc0f2092159a8::t_674a5c951b89fc 1303-1351,1374-1376,1381-1393
+  s_9dc0f2092159a8::t_161b8366c21885 2015-2017
+  s_9dc0f2092159a8::t_cf579d03f82dbb 2285-2293
+  s_9dc0f2092159a8::t_1071932c19ba3d 2072-2092
+  s_9dc0f2092159a8::t_d83448ff8697bc 364-379,382-384
+server/HANDOFF-S3.md
+  s_9dc0f2092159a8::t_f68958d5bfdcdb 184-256
+driver/backend/mtl_wire_context.h
+  s_9dc0f2092159a8::t_4216c2c46d6bc8 227-228,231-233
+  s_9dc0f2092159a8::t_94b7ab89411ef5 30-31
+  s_9dc0f2092159a8::t_3b25dc5bf5d5ec 185-197
+server/d9mt_status.h
+  s_9dc0f2092159a8::t_c98398cb8169e4 49-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "034fff3af0153d8f383ae6f3a68479a2e16244a0",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
