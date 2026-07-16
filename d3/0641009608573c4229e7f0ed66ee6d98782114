@@ -1,0 +1,23 @@
+docs/architecture/20-shaders.md
+  s_68632dcad39ed7::t_2cf721c6a8aefd 1-155
+docs/architecture/00-overview.md
+  s_68632dcad39ed7::t_8241f8cde51b80 1-144
+docs/architecture/10-frontend.md
+  s_68632dcad39ed7::t_3094ee8a94efdb 1-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d30641009608573c4229e7f0ed66ee6d98782114",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
