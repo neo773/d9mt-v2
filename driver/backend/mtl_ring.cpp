@@ -86,6 +86,14 @@ UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
   void* host = VirtualAlloc(nullptr, SIZE_T(minSize),
     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
+  /* Rosetta first-touch pre-fault (v1 fix): the first write to a
+   * newBufferWithBytesNoCopy backing under Rosetta x86_32 + WoW64 is
+   * pathologically slow. Fault every page now, at chunk creation, so the
+   * cliff never lands mid-frame when the bump allocator wraps into a fresh
+   * chunk (push/CBV/AB slices allocate here every draw). */
+  if (host)
+    std::memset(host, 0, SIZE_T(minSize));
+
   WMTBufferInfo info = {};
   info.length = minSize;
   info.options = WMTResourceOptions(

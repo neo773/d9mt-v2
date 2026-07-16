@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <cstring>
+
 #include "mtl_context_impl.h"
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
@@ -128,6 +130,15 @@ namespace dxvk::backend {
       if (!p)
         Logger::err("MtlDeviceImpl: host allocation failed after drain");
     }
+    /* Rosetta first-touch pre-fault (v1 fix, d9mt src/d3d9fe/d9mt_resources.cpp).
+     * Under Rosetta x86_32 + WoW64 the FIRST write to a newBufferWithBytesNoCopy
+     * backing is pathologically slow (~100s ms to >1s for large blocks). Left
+     * lazy, that cliff lands on the DRAW hot path — the first frame that writes
+     * a fresh dynamic VB/IB/CB (Gamebryo/Oblivion DISCARD-renames these many
+     * times per frame) stutters for hundreds of ms. Touching every page here
+     * moves the cost to allocation time, off the frame path. */
+    if (p)
+      std::memset(p, 0, SIZE_T(size));
     return p;
   }
 
@@ -263,6 +274,16 @@ namespace dxvk::backend {
 
     MtlImageCreateInfo viewShape = impl->info;
     viewShape.arrayLayers = key.layerCount;
+    /* View type is derived from the view's layer span, NOT blindly from the
+     * source texture's cube flag. Metal asserts a cube view's slice range is
+     * a multiple of 6 ("newSliceRange.length must be a multiple of 6"). A
+     * whole-cube view (layerCount 6, or 6*N for a cube array) stays a cube;
+     * a single-face view — layerCount 1, e.g. Oblivion rendering its
+     * reflection cubemap one face at a time, or a per-face SRV — must be a
+     * plain 2D view of that face (baseLayer selects the slice). */
+    if (viewShape.cube
+     && (key.layerCount == 0u || key.layerCount % 6u != 0u))
+      viewShape.cube = false;
 
     uint64_t gpuResourceId = 0u;
     obj_handle_t handle = MTLTexture_newTextureView(
