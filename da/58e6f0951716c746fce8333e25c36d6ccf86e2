@@ -1,0 +1,24 @@
+server/d9mt_status.h
+  s_68632dcad39ed7::t_53d325d945b2ba 78-79,89-98,101,109-117
+  s_68632dcad39ed7::t_d0967311915163 30-44
+driver/mtl/mtl_wire.h
+  s_68632dcad39ed7::t_46ab60c8dc101a 481-633
+  s_68632dcad39ed7::t_011e1e52258fb7 153-169
+  s_68632dcad39ed7::t_55bd9319022093 634
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "da58e6f0951716c746fce8333e25c36d6ccf86e2",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
