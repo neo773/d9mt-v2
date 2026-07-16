@@ -1,21 +1,16 @@
 /*
- * iosurface_pool.m — d9mt-serverd swapchain IOSurface pool (Phase S1).
+ * iosurface_pool.m — d9mt-serverd swapchain IOSurface pool (Phase S2).
  *
- * Creates D9MT_SERVER_SURFACES (3) BGRA8 IOSurfaces at the requested size,
- * wraps each as an MTLTexture and GPU-clears each to a distinct solid color
- * via an empty render pass (LoadActionClear + StoreActionStore) — proving
- * the native process owns a live Metal device whose work lands in
- * cross-process-visible surfaces. IDs are published into
- * status->iosurface_id[0..2] with iosurface_serial=1 (generation 1).
+ * Creates D9MT_SERVER_SURFACES (3) BGRA8 IOSurfaces at the requested size and
+ * wraps each as an MTLTexture (RenderTarget | ShaderRead). IDs are published
+ * into status->iosurface_id[0..2] with iosurface_serial = the pool
+ * generation (1 at boot, bumped on every resize).
  *
- * The clear is verified by CPU readback of one pixel per surface: the S1
- * gate is "GPU work demonstrably landed", not "encoder ran without error".
- *
- * TODO(METAL4): this file uses the Metal 3 API surface (MTLCommandQueue /
- * MTLCommandBuffer) purely for the S1 skeleton's liveness clear. The real
- * S2 backend port must be MTL4-only per docs/SOURCE_OF_TRUTH.md §2
- * (MTL4CommandQueue + MTL4CommandBuffer + residency sets) — rip this out
- * when the backend state machine moves in.
+ * S2 refactor: the S1 GPU liveness clear (which used the Metal 3
+ * MTLCommandQueue API) moved into executor.mm and is METAL 4 ONLY per
+ * docs/SOURCE_OF_TRUTH.md §2 — this file owns NO command queue. It also
+ * gained resize (the client's real backbuffer size arrives with the first
+ * backbuffer-flagged setRenderTargetsById record, after spawn).
  */
 
 #import <Foundation/Foundation.h>
@@ -27,30 +22,39 @@
 
 /* Keep the surfaces alive for the process lifetime: the client resolves
  * them by ID via IOSurfaceLookup, which fails once the last reference in
- * any process is gone. IOSurfaceRefs are CF objects — not ARC-managed. */
+ * any process is gone. IOSurfaceRefs are CF objects — not ARC-managed.
+ * Old-generation surfaces after a resize are deliberately LEAKED until
+ * process exit: the client may still hold lookups into the previous
+ * generation for a frame or two (bounded: resizes are rare, one generation
+ * per display-mode change). */
 static IOSurfaceRef g_surfaces[D9MT_SERVER_SURFACES];
 static id<MTLTexture> g_textures[D9MT_SERVER_SURFACES];
 static id<MTLDevice> g_device;
+static uint32_t g_width, g_height;
+static uint64_t g_generation;
 
-int
-d9mt_iosurface_pool_init(struct d9mt_status *status, uint32_t width,
-                         uint32_t height) {
-  /* distinct solid colors per slot (BGRA readback bytes below) */
-  static const double colors[D9MT_SERVER_SURFACES][4] = {
-      {1.0, 0.0, 0.0, 1.0}, /* slot 0: red   */
-      {0.0, 1.0, 0.0, 1.0}, /* slot 1: green */
-      {0.0, 0.0, 1.0, 1.0}, /* slot 2: blue  */
-  };
+id<MTLDevice>
+d9mt_pool_device(void) {
+  return g_device;
+}
 
-  g_device = MTLCreateSystemDefaultDevice();
-  if (!g_device) {
-    fprintf(stderr, "[serverd] no Metal device\n");
-    atomic_store_explicit(&status->error, d9mt_status_err_metal,
-                          memory_order_release);
-    return 1;
-  }
-  id<MTLCommandQueue> queue = [g_device newCommandQueue];
+id<MTLTexture>
+d9mt_pool_texture(int slot) {
+  return (slot >= 0 && slot < D9MT_SERVER_SURFACES) ? g_textures[slot] : nil;
+}
 
+uint32_t
+d9mt_pool_width(void) {
+  return g_width;
+}
+
+uint32_t
+d9mt_pool_height(void) {
+  return g_height;
+}
+
+static int
+pool_create(struct d9mt_status *status, uint32_t width, uint32_t height) {
   for (int i = 0; i < D9MT_SERVER_SURFACES; i++) {
     /* kIOSurfaceIsGlobal is deprecated but makes the surface visible to
      * IOSurfaceLookup cross-process without a mach-port transfer (Chromium
@@ -82,7 +86,7 @@ d9mt_iosurface_pool_init(struct d9mt_status *status, uint32_t width,
                                      width:width
                                     height:height
                                  mipmapped:NO];
-    td.usage = MTLTextureUsageRenderTarget;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [g_device newTextureWithDescriptor:td
                                                   iosurface:surf
@@ -95,43 +99,44 @@ d9mt_iosurface_pool_init(struct d9mt_status *status, uint32_t width,
     }
     g_textures[i] = tex;
 
-    /* GPU liveness: clear the whole surface to the slot color. */
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
-    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.colorAttachments[0].texture = tex;
-    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    rp.colorAttachments[0].clearColor = MTLClearColorMake(
-        colors[i][0], colors[i][1], colors[i][2], colors[i][3]);
-    id<MTLRenderCommandEncoder> enc =
-        [cb renderCommandEncoderWithDescriptor:rp];
-    [enc endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-
-    /* verify the clear actually landed (BGRA byte order) */
-    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
-    const uint8_t *px = IOSurfaceGetBaseAddress(surf);
-    uint8_t expect[4] = {(uint8_t)(colors[i][2] * 255.0),
-                         (uint8_t)(colors[i][1] * 255.0),
-                         (uint8_t)(colors[i][0] * 255.0),
-                         (uint8_t)(colors[i][3] * 255.0)};
-    int ok = px[0] == expect[0] && px[1] == expect[1] && px[2] == expect[2] &&
-             px[3] == expect[3];
-    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
-    if (!ok) {
-      fprintf(stderr, "[serverd] clear verify FAILED (slot %d)\n", i);
-      atomic_store_explicit(&status->error, d9mt_status_err_clear_verify,
-                            memory_order_release);
-      return 1;
-    }
-
-    atomic_store_explicit(&status->iosurface_serial[i], 1,
+    atomic_store_explicit(&status->iosurface_serial[i], g_generation,
                           memory_order_relaxed);
     atomic_store_explicit(&status->iosurface_id[i], IOSurfaceGetID(surf),
                           memory_order_release);
-    fprintf(stderr, "[serverd] surface %d: id=%u %ux%u cleared+verified\n", i,
-            IOSurfaceGetID(surf), width, height);
+    fprintf(stderr, "[serverd] surface %d: id=%u %ux%u gen=%llu\n", i,
+            IOSurfaceGetID(surf), width, height,
+            (unsigned long long)g_generation);
   }
+  g_width = width;
+  g_height = height;
   return 0;
+}
+
+int
+d9mt_iosurface_pool_init(struct d9mt_status *status, uint32_t width,
+                         uint32_t height) {
+  g_device = MTLCreateSystemDefaultDevice();
+  if (!g_device) {
+    fprintf(stderr, "[serverd] no Metal device\n");
+    atomic_store_explicit(&status->error, d9mt_status_err_metal,
+                          memory_order_release);
+    return 1;
+  }
+  g_generation = 1u;
+  return pool_create(status, width, height);
+}
+
+int
+d9mt_iosurface_pool_resize(struct d9mt_status *status, uint32_t width,
+                           uint32_t height) {
+  if (width == g_width && height == g_height)
+    return 0;
+  /* Previous generation leaks by design (header comment). Textures are
+   * released (ARC nil-out); the IOSurfaceRefs stay alive. */
+  for (int i = 0; i < D9MT_SERVER_SURFACES; i++)
+    g_textures[i] = nil;
+  g_generation++;
+  fprintf(stderr, "[serverd] pool resize %ux%u -> %ux%u (gen %llu)\n", g_width,
+          g_height, width, height, (unsigned long long)g_generation);
+  return pool_create(status, width, height);
 }

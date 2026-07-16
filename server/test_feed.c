@@ -1,11 +1,11 @@
 /*
- * test_feed.c — S1 test gate for d9mt-serverd.
+ * test_feed.c — S1+S2 test gate for d9mt-serverd.
  *
  * A minimal synthetic CLIENT, built x86_64 on purpose so the test crosses
  * the same Rosetta<->native boundary as the real wine client (PoC P1/P4).
- * Plain C11, no frameworks.
+ * Plain C11 + the IOSurface C API (S2 pixel verification).
  *
- *   usage: test_feed <path-to-d9mt-serverd>
+ *   usage: test_feed <path-to-d9mt-serverd> [test_stub.metallib]
  *
  * Sequence:
  *   1. mkdtemp a shm dir; create `ring` (d9mt_wire_ring header + 1 MiB data)
@@ -16,6 +16,11 @@
  *   4. Wait for epoch==1, progress == produced bytes, records==1000,
  *      decode_errors==0, 3 distinct nonzero IOSurfaceIDs, and a heartbeat
  *      that advances over 200 ms.
+ *   S2. Feed a synthetic FRAME: create the backbuffer RT + a shader stub
+ *      (vsMain fullscreen triangle / fsMain solid red from the metallib
+ *      argument), clear blue, 50 draws, presentFrame — then assert status v2
+ *      publishes {frames=1, frame_serial=1, draws_executed=50, psos>=1,
+ *      exec_errors=0} and the presented IOSurface pixel is RED.
  *   5. Write the Detach record; server must consume it and exit 0 with
  *      consumer_exited==1.
  * Exit 0 = PASS. Any deviation prints FAIL and exits 1.
@@ -33,6 +38,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <IOSurface/IOSurface.h>
+
 #include "../driver/mtl/mtl_wire.h"
 #include "d9mt_status.h"
 
@@ -48,11 +55,12 @@ extern char **environ;
 
 static struct d9mt_wire_ring *g_ring;
 static uint8_t *g_data;
-static uint64_t g_head; /* producer-local free-running cursor */
+static uint64_t g_head;    /* producer-local free-running cursor */
+static uint64_t g_records; /* records emitted (final ring->records check) */
 
 /* Producer (single-threaded here): write one record, publish head. Handles
  * the never-straddle-the-wrap rule with an op_pad header (not hit with a
- * 1 MiB ring and ~34 KiB of records, but kept correct by construction). */
+ * 1 MiB ring and ~80 KiB of records, but kept correct by construction). */
 static void
 emit(const void *rec, uint16_t size) {
   uint64_t idx = g_head & (RING_CAP - 1u);
@@ -64,7 +72,39 @@ emit(const void *rec, uint16_t size) {
   }
   memcpy(g_data + idx, rec, size);
   g_head += size;
+  g_records++;
   atomic_store_explicit(&g_ring->head, g_head, memory_order_release);
+}
+
+/* S2: chunked create_shader emission (mirrors the client's chunking). */
+static void
+emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
+            const char *entry, const uint8_t *lib, size_t lib_size) {
+  const uint32_t kChunk = 0xE000u;
+  uint64_t off = 0;
+  while (off < lib_size || lib_size == 0) {
+    uint32_t chunk = lib_size - off > kChunk ? kChunk : (uint32_t)(lib_size - off);
+    uint32_t payload = (chunk + 7u) & ~7u;
+    uint16_t size = (uint16_t)(sizeof(struct d9mt_wire_rec_create_shader) + payload);
+    uint8_t buf[sizeof(struct d9mt_wire_rec_create_shader) + 0xE008];
+    memset(buf, 0, size);
+    struct d9mt_wire_rec_create_shader *r = (void *)buf;
+    r->hdr.opcode = d9mt_wire_op_create_shader;
+    r->hdr.size = size;
+    r->wire_id = wire_id;
+    r->client_handle = client_handle;
+    r->stage = stage;
+    r->total_size = lib_size;
+    r->chunk_offset = off;
+    r->chunk_size = chunk;
+    memset(r->cbv_slot_map, 0xFF, 8); /* -1: no CBVs */
+    snprintf(r->entry, sizeof(r->entry), "%s", entry);
+    memcpy(r + 1, lib + off, chunk);
+    emit(buf, size);
+    off += chunk;
+    if (off >= lib_size)
+      break;
+  }
 }
 
 static int
@@ -215,6 +255,148 @@ main(int argc, char **argv) {
   printf("[test_feed] heartbeat: %" PRIu64 " -> %" PRIu64 " over 200ms\n", hb0,
          hb1);
 
+  /* --- S2: synthetic frame (create RT + shader stub + clear + 50 draws +
+   * presentFrame) => status v2 publishes a frame serial + the presented
+   * IOSurface holds the draw output. --- */
+  if (atomic_load_explicit(&status->version, memory_order_acquire) != D9MT_STATUS_VERSION)
+    FAIL("status version=%u want %u",
+         atomic_load_explicit(&status->version, memory_order_acquire),
+         D9MT_STATUS_VERSION);
+
+  const char *libpath = argc >= 3 ? argv[2] : NULL;
+  uint8_t *lib = NULL;
+  size_t lib_size = 0;
+  if (libpath) {
+    FILE *f = fopen(libpath, "rb");
+    if (!f)
+      FAIL("cannot open metallib %s", libpath);
+    fseek(f, 0, SEEK_END);
+    lib_size = (size_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    lib = malloc(lib_size);
+    if (fread(lib, 1, lib_size, f) != lib_size)
+      FAIL("short read on %s", libpath);
+    fclose(f);
+  } else {
+    fprintf(stderr, "[test_feed] WARN: no metallib argument — S2 draws will "
+                    "be SKIPPED server-side (no PSO), gate degrades\n");
+  }
+
+  if (lib) {
+    emit_shader(100, 0xA001, 0, "vsMain", lib, lib_size); /* vertex */
+    emit_shader(101, 0xA002, 1, "fsMain", lib, lib_size); /* fragment */
+
+    struct d9mt_wire_rec_bind_shader bvs = {
+        {d9mt_wire_op_bind_shader, sizeof(bvs), 0}, 0, 0, 0xA001};
+    emit(&bvs, sizeof(bvs));
+    struct d9mt_wire_rec_bind_shader bfs = {
+        {d9mt_wire_op_bind_shader, sizeof(bfs), 0}, 1, 0, 0xA002};
+    emit(&bfs, sizeof(bfs));
+  }
+
+  /* no vertex fetch: empty vertex layout */
+  struct d9mt_wire_rec_set_vertex_layout vl = {
+      {d9mt_wire_op_set_vertex_layout, sizeof(vl), 0}, 0, 0};
+  emit(&vl, sizeof(vl));
+
+  /* backbuffer RT (server substitutes IOSurface slot 0), 640x480 BGRA8 */
+  struct d9mt_wire_rec_set_render_targets_by_id rt;
+  memset(&rt, 0, sizeof(rt));
+  rt.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+  rt.hdr.size = sizeof(rt);
+  rt.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+  rt.color[0].format = 80; /* BGRA8Unorm */
+  rt.color[0].width = 640;
+  rt.color[0].height = 480;
+  rt.color[0].sample_count = 1;
+  emit(&rt, sizeof(rt));
+
+  /* clear blue (folds into the pass), then 50 fullscreen-triangle draws */
+  struct d9mt_wire_rec_clear_render_target_by_id clr;
+  memset(&clr, 0, sizeof(clr));
+  clr.hdr.opcode = d9mt_wire_op_clear_render_target_by_id;
+  clr.hdr.size = sizeof(clr);
+  clr.flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+  clr.clear_aspects = 0x1; /* color */
+  clr.value.color[2] = 1.f;
+  clr.value.color[3] = 1.f;
+  emit(&clr, sizeof(clr));
+
+  struct {
+    struct d9mt_wire_rec_set_viewports rec;
+    struct d9mt_wire_viewport vp;
+  } vps = {{{d9mt_wire_op_set_viewports, sizeof(vps), 0}, 1, 0},
+           {0.f, 0.f, 640.f, 480.f, 0.f, 1.f, 0, 0, 0, 0}};
+  emit(&vps, sizeof(vps));
+
+  struct d9mt_wire_rec_set_primitive_topology topo = {
+      {d9mt_wire_op_set_primitive_topology, sizeof(topo), 0}, 3, 0};
+  emit(&topo, sizeof(topo));
+
+  for (int i = 0; i < 50; i++) {
+    struct {
+      struct d9mt_wire_rec_draw rec;
+      struct d9mt_wire_draw_args args[1];
+    } dr = {{{d9mt_wire_op_draw, sizeof(dr), 0}, 1, 0}, {{3, 1, 0, 0}}};
+    emit(&dr, sizeof(dr));
+  }
+
+  struct d9mt_wire_rec_present_frame pf = {
+      {d9mt_wire_op_present_frame, sizeof(pf), 0}, 1, 0};
+  emit(&pf, sizeof(pf));
+
+  /* S2a. frame serial published within 10 s (PSO compile included) */
+  for (int i = 0;; i++) {
+    if (atomic_load_explicit(&status->frames, memory_order_acquire) >= 1)
+      break;
+    if (i >= 1000)
+      FAIL("timeout waiting for frames>=1 (frame_serial=%" PRIu64
+           " exec_errors=%" PRIu64 ")",
+           (uint64_t)atomic_load_explicit(&status->frame_serial, memory_order_relaxed),
+           (uint64_t)atomic_load_explicit(&status->exec_errors, memory_order_relaxed));
+    usleep(10000);
+  }
+  if (atomic_load_explicit(&status->frame_serial, memory_order_acquire) != 1)
+    FAIL("frame_serial=%" PRIu64 " want 1",
+         (uint64_t)atomic_load_explicit(&status->frame_serial, memory_order_relaxed));
+  uint64_t execd = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+  uint64_t psos = atomic_load_explicit(&status->psos_built, memory_order_relaxed);
+  uint64_t encs = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+  uint64_t xerr = atomic_load_explicit(&status->exec_errors, memory_order_relaxed);
+  uint32_t slot = atomic_load_explicit(&status->present_slot, memory_order_relaxed);
+  if (lib && execd != 50)
+    FAIL("draws_executed=%" PRIu64 " want 50 (exec_errors=%" PRIu64 ")", execd, xerr);
+  if (lib && psos < 1)
+    FAIL("psos_built=%" PRIu64 " want >=1", psos);
+  if (encs < 1)
+    FAIL("encoders=%" PRIu64 " want >=1", encs);
+  if (xerr)
+    FAIL("exec_errors=%" PRIu64, xerr);
+  if (slot != 0)
+    FAIL("present_slot=%u want 0", slot);
+  printf("[test_feed] S2 frame: serial=1 slot=%u draws=%" PRIu64 " psos=%" PRIu64
+         " encoders=%" PRIu64 "\n", slot, execd, psos, encs);
+
+  /* S2b. pixel proof: presented IOSurface (slot 0) is RED where the
+   * fullscreen triangle drew (poll: publication precedes GPU completion). */
+  if (lib) {
+    IOSurfaceRef surf = IOSurfaceLookup(ids[0]);
+    if (!surf)
+      FAIL("IOSurfaceLookup(%u) failed", ids[0]);
+    int red = 0;
+    for (int i = 0; i < 500 && !red; i++) {
+      IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
+      const uint8_t *px = IOSurfaceGetBaseAddress(surf); /* BGRA */
+      red = px[0] == 0 && px[1] == 0 && px[2] == 255 && px[3] == 255;
+      IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
+      if (!red)
+        usleep(10000);
+    }
+    if (!red)
+      FAIL("presented pixel not red (draw output missing)");
+    printf("[test_feed] S2 pixel verify: slot 0 is red (draws landed)\n");
+  }
+
   /* 5. detach => server consumes it and exits 0 */
   struct d9mt_wire_rec_nul detach = {{d9mt_wire_op_detach, 8, 0}};
   emit(&detach, sizeof(detach));
@@ -234,9 +416,12 @@ main(int argc, char **argv) {
     FAIL("consumer_exited not set");
   if (atomic_load_explicit(&status->progress, memory_order_acquire) != g_head)
     FAIL("final progress mismatch");
-  if (atomic_load_explicit(&g_ring->records, memory_order_relaxed) != 1001)
-    FAIL("final records != 1001 (detach not counted)");
-  printf("[test_feed] clean detach: exit 0, consumer_exited=1, records=1001\n");
+  if (atomic_load_explicit(&g_ring->records, memory_order_relaxed) != g_records)
+    FAIL("final records=%" PRIu64 " != emitted %" PRIu64 " (detach not counted?)",
+         (uint64_t)atomic_load_explicit(&g_ring->records, memory_order_relaxed),
+         g_records);
+  printf("[test_feed] clean detach: exit 0, consumer_exited=1, records=%" PRIu64 "\n",
+         g_records);
 
   /* teardown */
   char p[1024];

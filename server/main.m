@@ -1,5 +1,5 @@
 /*
- * main.m — d9mt-serverd entry point (render server, Phase S1).
+ * main.m — d9mt-serverd entry point (render server, Phase S2).
  *
  * Native arm64 helper process (docs/RENDER_SERVER_SPEC.md). Spawned by the
  * client (wine/x86_64) with argv[1] = the shm directory it created:
@@ -9,14 +9,18 @@
  * usage: d9mt-serverd <shm-dir> [width height]     (default 2992x1934)
  *
  * Boot order matters for the client handshake: map ring, map status, create
- * the IOSurface pool (IDs published into status), THEN store epoch=1
- * (release) — the client's "server ready" gate. Everything after that is
- * the consumer loop; exit code 0 = clean detach/shutdown/unlink.
+ * the IOSurface pool (IDs published into status), init the executor (MTL4
+ * queue/compiler + the GPU liveness clear; publishes status version=2),
+ * THEN store epoch=1 (release) — the client's "server ready" gate.
+ * Everything after that is the consumer loop, which now EXECUTES records;
+ * exit code 0 = clean detach/shutdown/unlink.
  */
 
 #import <Foundation/Foundation.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <pthread/qos.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,10 +94,21 @@ main(int argc, char **argv) {
     return 2;
   }
 
+  /* QoS discipline (P-core-preferred): every frame-critical server thread —
+   * this one runs the ring consumer AND the executor's encode work — must
+   * declare USER_INTERACTIVE at start, or macOS schedules the helper like a
+   * background daemon onto E-cores. No hard pinning exists; QoS is the
+   * mechanism. S3: any additional thread (kick listener, encode workers)
+   * repeats this line. */
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
   int rc;
   @autoreleasepool {
-    /* IOSurface pool + GPU liveness proof; publishes ids into status. */
+    /* IOSurface pool (ids published into status), then the S2 executor
+     * (MTL4 stack + the GPU liveness clear + status v2 version field). */
     rc = d9mt_iosurface_pool_init(status, width, height);
+    if (!rc)
+      rc = d9mt_executor_init(status);
   }
   if (rc)
     return 2; /* status->error already set */

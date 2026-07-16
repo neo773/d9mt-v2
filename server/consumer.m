@@ -18,8 +18,12 @@
  *     the ring file disappearing (client died / tore down without detach —
  *     checked ~10 Hz via stat) all end the loop cleanly.
  *
- * Phase S1 is ECHO: content is validated for framing, counted per opcode
- * and DISCARDED; the client still executes everything locally.
+ * Phase S2: every framed record is handed to the executor
+ * (d9mt_executor_record — executor.mm), which EXECUTES it against the
+ * server's own Metal 4 device (dual-execution validation: the client still
+ * executes everything locally too). Counting/validation semantics from S1
+ * are unchanged; executor problems count into status v2 exec_errors and
+ * never abort the stream.
  */
 
 #include <stdio.h>
@@ -101,9 +105,13 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
         atomic_fetch_add_explicit(&ring->records, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&ring->bytes, hdr->size,
                                   memory_order_relaxed);
-        /* S1: content validated for framing only, then discarded. */
+        /* S2: execute BEFORE publishing tail — the record's ring bytes must
+         * stay valid while the executor reads them (the producer may reuse
+         * the space the moment tail advances past it). */
         if (hdr->opcode == d9mt_wire_op_detach)
           detached = 1;
+        else
+          d9mt_executor_record(hdr);
         tail += hdr->size;
       }
       /* Publish per record: releases ring space promptly; tail doubles as
@@ -114,6 +122,9 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
         break;
     }
   }
+
+  /* close the frame/GPU work before reporting (bounded drain inside) */
+  d9mt_executor_finish();
 
   /* final counters (mirrors the in-process consumer's exit report) */
   fprintf(stderr,
