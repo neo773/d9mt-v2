@@ -147,12 +147,17 @@
 
 namespace dxvk::backend {
 
-  /* Kill-switch for the frame-deferred pass architecture (decision 10).
-   * D9MT_NO_DEFERRED=1 reverts to the immediate materialize/close path —
-   * mandatory runtime bisect lever; read once. */
+  /* Frame-deferred pass architecture (decision 10) — OPT-IN via
+   * D9MT_DEFERRED=1. Default OFF: batching the whole frame into one
+   * flush serializes CPU and GPU (frame time = CPU + GPU instead of
+   * overlapped max(CPU, GPU)) — measured as a hard fps regression in GTA IV.
+   * The store/load rules also never fire on deferred renderers (GTA samples
+   * everything it stores). Re-default once submission overlap exists
+   * (native-backend plan phase 4: consumer thread submits pass batches
+   * while later passes are still being recorded). Read once. */
   inline bool deferredPassesEnabled() {
-    static const bool off = std::getenv("D9MT_NO_DEFERRED") != nullptr;
-    return !off;
+    static const bool on = std::getenv("D9MT_DEFERRED") != nullptr;
+    return on;
   }
 
   /* Backend query object. Occlusion answers come from a visibility-result
