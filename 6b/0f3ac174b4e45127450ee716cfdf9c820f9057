@@ -1,0 +1,43 @@
+bridge/winemetal.h
+  s_68632dcad39ed7::t_ef0893b7425614 2555-2559,2567-2590,2593-2594,2597-2601
+  s_68632dcad39ed7::t_f5eeadd4abef87 2602
+bridge/unix/winemetal_unix.c
+  s_68632dcad39ed7::t_c9e77ff82b6212 7449
+  s_68632dcad39ed7::t_a14eab682bf96a 6411-6418,6420-6455,6457-6462,6464-6512,6514-6518,6520-6527,6529-6538,6544-6563,6565-6654,6658-6661,6674-6675,6681-6740
+  s_68632dcad39ed7::t_4db4fe0e993929 6879-6880
+  s_68632dcad39ed7::t_37ea8bf96871d7 7214
+driver/mtl/mtl_wire.h
+  s_68632dcad39ed7::t_e0beb72fae679e 38-39,41-42,44-47
+  s_68632dcad39ed7::t_7bf914dbf03211 67-79
+bridge/winemetal_thunks.h
+  s_68632dcad39ed7::t_94d83942349723 607,610-613
+bridge/winemetal_thunks.c
+  s_68632dcad39ed7::t_568f7ee81e875c 1909-1914
+  s_68632dcad39ed7::t_030bf65b0da921 1885-1886,1891-1892,1894
+driver/backend/mtl_wire_context.cpp
+  s_68632dcad39ed7::t_4224a8eee78547 43-47,49-50,56-66,72,75-81,95-101
+  s_68632dcad39ed7::t_3ada0f9777272b 119-127
+  s_68632dcad39ed7::t_629fcdca4b0c55 709-711,722-724
+driver/backend/mtl_wire_context.h
+  s_68632dcad39ed7::t_59aae5fc8df091 142-145,153
+scripts/build-driver.sh
+  s_68632dcad39ed7::t_805887011282ff 455-468
+driver/mtl/HANDOFF-S1-CLIENT.md
+  s_68632dcad39ed7::t_5b2fb01b307362 1-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6b0f3ac174b4e45127450ee716cfdf9c820f9057",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
