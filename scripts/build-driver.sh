@@ -218,7 +218,8 @@ CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
 CORE+=("$DRV"/backend/mtl_context_record.cpp "$DRV"/backend/mtl_context_transfer.cpp \
        "$DRV"/backend/mtl_pso_cache.cpp "$DRV"/backend/mtl_presenter_impl.cpp \
        "$DRV"/backend/mtl_device_impl.cpp "$DRV"/backend/mtl_ring.cpp \
-       "$DRV"/backend/mtl_submission.cpp "$DRV"/backend/mtl_residency.cpp)
+       "$DRV"/backend/mtl_submission.cpp "$DRV"/backend/mtl_residency.cpp \
+       "$DRV"/backend/mtl_wire_context.cpp)
 # PROFILE_INSTRUMENT: the __cyg_profile_func_enter/exit hook TU (not instrumented).
 [ "$PROFILE_INSTRUMENT" = 1 ] && CORE+=("$DRV"/backend/mtl_instrument.cpp)
 # d3d9 — Phase-C ported ADAPT retypes + Phase-D neutral stubs that compile now.

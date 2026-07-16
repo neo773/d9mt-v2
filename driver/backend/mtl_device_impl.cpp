@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "mtl_context_impl.h"
+#include "mtl_wire_context.h"
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
 #include "../util/util_string.h"
@@ -421,7 +422,13 @@ namespace dxvk::backend {
   }
 
   Rc<MtlContext> MtlDeviceImpl::createContext() {
-    return new MtlContextImpl(Rc<MtlDeviceImpl>(this));
+    /* native-backend Phase 1 (echo mode): the wire wrapper is ALWAYS
+     * installed — it forwards every call to the real context and streams
+     * the hot-loop subset into the SPSC ring for the unix consumer
+     * (docs/NATIVE_BACKEND_PLAN.md). Only the first context in the process
+     * claims the ring; later ones forward without recording. */
+    Rc<MtlContext> inner = new MtlContextImpl(Rc<MtlDeviceImpl>(this));
+    return new MtlWireContext(Rc<MtlDevice>(this), std::move(inner));
   }
 
   Rc<MtlQuery> MtlDeviceImpl::createGpuQuery(MtlQueryType type) {

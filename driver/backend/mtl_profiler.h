@@ -44,6 +44,12 @@
 
 namespace dxvk::backend::prof {
 
+  /* Wire-transport stats appended to the PROF line. Defined in
+   * mtl_wire_context.cpp; pulls WireRing_stats once per 256-frame window
+   * (never per frame) and appends window deltas. Appends zeros when the
+   * transport never attached. */
+  void wireAppendProfStats(std::string& line);
+
   enum Bucket : uint32_t {
     BeginRecording = 0, // allocator rotation + waitFor slot serial (stall here = GPU-bound / pacing)
     PrepareDraw,        // whole per-draw resolve (parent of the next four)
@@ -149,6 +155,8 @@ namespace dxvk::backend::prof {
       " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
+
+    wireAppendProfStats(line);
 
     Logger::info(line);
   }
