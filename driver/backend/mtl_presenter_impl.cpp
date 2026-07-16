@@ -82,6 +82,26 @@ namespace dxvk::backend {
       uint32_t dh = uint32_t(MTLTexture_height(drawableTex));
       tex->extent      = { dw ? dw : m_desc.imageExtent.width,
                            dh ? dh : m_desc.imageExtent.height, 1u };
+      /* Fill the info block the generic paths read (mipLevelExtent, PSO
+       * sample count): the drawable is a plain single-sample 2D color RT. */
+      tex->m_info.type        = MtlImageType::e2D;
+      tex->m_info.format      = m_desc.imageFormat;
+      tex->m_info.extent      = { tex->extent.width, tex->extent.height, 1u };
+      tex->m_info.mipLevels   = 1u;
+      tex->m_info.numLayers   = 1u;
+      tex->m_info.sampleCount = 1u;
+      tex->m_info.usage       = MtlTextureUsageRenderTarget;
+
+      /* Full-image view for the scaled present blit (blitTextureView renders
+       * INTO the drawable when backbuffer and drawable sizes differ — CoreAnim
+       * window layout can re-size drawables to the window behind our pinned
+       * drawableSize, and a raw copy cannot scale). The texture is usable as
+       * its own full view; retain it so the view ref stays +1-owned. */
+      Rc<MtlTextureViewImpl> view = new MtlTextureViewImpl();
+      view->owned      = WmtTexture::retain(drawableTex);
+      view->view.tex   = drawableTex;
+      view->image      = tex.ptr();
+      view->key.format = m_desc.imageFormat;
 
       /* Re-pin drawableSize when the layer drifted: applyProps sets it on the
        * main thread asynchronously, and any later view layout resets it to
@@ -93,6 +113,7 @@ namespace dxvk::backend {
           (dw != m_desc.imageExtent.width || dh != m_desc.imageExtent.height))
         applyProps();
       image.texture    = tex;
+      image.view       = view;
       image.valid      = true;
       return image;
     }

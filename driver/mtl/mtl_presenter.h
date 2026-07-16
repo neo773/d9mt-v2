@@ -33,6 +33,7 @@ namespace dxvk {
   // acquire/release sync tokens the command buffer must wait/signal on (contract 3e).
   struct MtlAcquiredDrawable {
     Rc<MtlTexture>  texture = nullptr;      // CAMetalDrawable.texture
+    Rc<MtlTextureView> view = nullptr;      // full-image view (scaled present blit dst)
     MtlObjectHandle drawable = MtlNullHandle;
     MtlPresenterSync sync   = { };          // acquire (wait) / release (signal) / frameId
     uint32_t        imageIndex = 0u;

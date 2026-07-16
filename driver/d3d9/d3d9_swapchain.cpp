@@ -671,6 +671,16 @@ namespace dxvk {
     Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
     Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
 
+    // MSAA backbuffer: resolve into the single-sample surface and present
+    // from THAT (D3D9 allows a multisampled swapchain; a raw MSAA -> drawable
+    // copy is invalid in Metal and displays scrambled sample blocks).
+    Rc<MtlTexture>     resolveImage;
+    Rc<MtlTextureView> resolveView;
+    if (m_resolveBuffer != nullptr) {
+      resolveImage = m_resolveBuffer->GetCommonTexture()->GetImage();
+      resolveView  = m_resolveBuffer->GetCommonTexture()->GetSampleView(false);
+    }
+
     // Bump frame ID for the acquire below.
     m_wctx->frameId += 1;
 
@@ -680,18 +690,33 @@ namespace dxvk {
     // outstanding, blocking nextDrawable and deadlocking both threads at
     // exactly 3 frames. dxmt acquires late, on the encode thread; so do we.
     m_parent->EmitCs([
-      cPresenter = m_wctx->presenter,
-      cSrcView   = swapImageView,
-      cSrcImage  = swapImage,
-      cDevice    = m_device,
-      cFrameId   = m_wctx->frameId,
-      cParamsW   = uint32_t(m_presentParams.BackBufferWidth),
-      cParamsH   = uint32_t(m_presentParams.BackBufferHeight),
-      cSignal    = m_wctx->frameLatencySignal
+      cPresenter    = m_wctx->presenter,
+      cSrcView      = swapImageView,
+      cSrcImage     = swapImage,
+      cResolveView  = resolveView,
+      cResolveImage = resolveImage,
+      cDevice       = m_device,
+      cFrameId      = m_wctx->frameId,
+      cParamsW      = uint32_t(m_presentParams.BackBufferWidth),
+      cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
+      cSignal       = m_wctx->frameLatencySignal
     ] (MtlContext* ctx) {
+      // MSAA backbuffer -> single-sample resolve surface; everything below
+      // (dump, copy, blit) consumes the resolved image.
+      if (cResolveImage != nullptr && cSrcImage != nullptr) {
+        MtlResolveRegion region = { };
+        region.dstSubresource = { MtlAspectColor, 0u, 0u, 1u };
+        region.srcSubresource = { MtlAspectColor, 0u, 0u, 1u };
+        region.extent         = cSrcImage->info().extent;
+        ctx->resolveTexture(cResolveImage, cSrcImage, region,
+          cSrcImage->info().format, MtlResolveMode::Average, MtlResolveMode::SampleZero);
+      }
+      const Rc<MtlTexture>&     cPresentImage = cResolveImage != nullptr ? cResolveImage : cSrcImage;
+      const Rc<MtlTextureView>& cPresentView  = cResolveView  != nullptr ? cResolveView  : cSrcView;
+
       // Gated backbuffer readback (verifier) — before the present copy, on
       // the fully-rendered app backbuffer. No-op unless the trigger exists.
-      DumpBackbufferIfRequested(ctx, cDevice, cSrcImage, cParamsW, cParamsH);
+      DumpBackbufferIfRequested(ctx, cDevice, cPresentImage, cParamsW, cParamsH);
 
       // Acquire the drawable HERE (CS thread) — one thread owns the whole
       // acquire/present/release cycle.
@@ -707,20 +732,38 @@ namespace dxvk {
 
       // Copy the app's rendered back buffer into the acquired drawable
       // before presenting (D3D9 Present = backbuffer -> front/drawable).
-      if (cSrcView != nullptr && cSrcView->image != nullptr && cDrawable.texture != nullptr) {
-        /* Clamp to min(backbuffer, drawable): the CAMetalLayer drawable can
-         * be smaller than the app backbuffer, and an over-sized copy is an
-         * out-of-bounds fault that hangs the GPU. */
-        const MtlSize src = cSrcView->image->extent;
+      if (cPresentView != nullptr && cPresentView->image != nullptr && cDrawable.texture != nullptr) {
+        const MtlSize src = cPresentView->image->extent;
         const MtlSize dst = cDrawable.texture->extent;
-        MtlSize extent = {
-          std::min(src.width,  dst.width  ? dst.width  : src.width),
-          std::min(src.height, dst.height ? dst.height : src.height),
-          1u };
-        if (extent.width && extent.height) {
+        if (src.width == dst.width && src.height == dst.height) {
+          // 1:1 — native texel copy.
+          MtlSize extent = { src.width, src.height, 1u };
           ctx->copyTexture(
-            cDrawable.texture,  MtlSubresourceLayers{ }, MtlOrigin{ },
-            cSrcView->image,    MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+            cDrawable.texture,     MtlSubresourceLayers{ }, MtlOrigin{ },
+            cPresentView->image,   MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+        } else if (cDrawable.view != nullptr) {
+          /* Sizes differ: CoreAnimation window layout re-sizes drawables to
+           * the window behind our pinned drawableSize, so a raw copy would
+           * leave the image in the top-left corner. Scaled meta-blit fills
+           * the drawable regardless of its size. */
+          MtlOffset3D dstBox[2] = { { 0, 0, 0 },
+            { int32_t(dst.width), int32_t(dst.height), 1 } };
+          MtlOffset3D srcBox[2] = { { 0, 0, 0 },
+            { int32_t(src.width), int32_t(src.height), 1 } };
+          ctx->blitTextureView(cDrawable.view, dstBox, cPresentView, srcBox,
+            MtlSamplerFilter::Linear);
+        } else {
+          /* No drawable view (stub presenter): clamped copy — an over-sized
+           * copy is an out-of-bounds fault that hangs the GPU. */
+          MtlSize extent = {
+            std::min(src.width,  dst.width  ? dst.width  : src.width),
+            std::min(src.height, dst.height ? dst.height : src.height),
+            1u };
+          if (extent.width && extent.height) {
+            ctx->copyTexture(
+              cDrawable.texture,     MtlSubresourceLayers{ }, MtlOrigin{ },
+              cPresentView->image,   MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+          }
         }
       }
       // synchronizeWsi: submit the blit, then signalDrawable + present. No
@@ -782,6 +825,11 @@ namespace dxvk {
       backBuffer->ClearContainer();
 
     m_backBuffers.clear();
+
+    if (m_resolveBuffer != nullptr) {
+      m_resolveBuffer->ClearContainer();
+      m_resolveBuffer = nullptr;
+    }
   }
 
 
@@ -851,12 +899,33 @@ namespace dxvk {
       m_backBuffers.emplace_back(surface);
     }
 
+    // MSAA backbuffer: Present cannot copy a multisampled texture into the
+    // single-sample drawable (invalid in Metal — reads back as scrambled
+    // sample blocks). Create a matching single-sample surface; PresentImage
+    // resolves into it and presents from there.
+    if (m_presentParams.MultiSampleType != D3DMULTISAMPLE_NONE) {
+      D3D9_COMMON_TEXTURE_DESC resolveDesc = desc;
+      resolveDesc.MultiSample        = D3DMULTISAMPLE_NONE;
+      resolveDesc.MultisampleQuality = 0;
+      try {
+        m_resolveBuffer = new D3D9Surface(m_parent, &resolveDesc, m_parent->IsExtended(), this, nullptr);
+        m_parent->IncrementLosableCounter();
+      } catch (const DxvkError& e) {
+        DestroyBackBuffers();
+        Logger::err(e.message());
+        return D3DERR_OUTOFVIDEOMEMORY;
+      }
+    }
+
     // Initialize the image so that we can use it. Clearing to black prevents
     // garbled output for the first frame.
     small_vector<Rc<MtlTexture>, 4> images;
 
     for (size_t i = 0; i < m_backBuffers.size(); i++)
       images.push_back(m_backBuffers[i]->GetCommonTexture()->GetImage());
+
+    if (m_resolveBuffer != nullptr)
+      images.push_back(m_resolveBuffer->GetCommonTexture()->GetImage());
 
     m_parent->InjectCs([
       cImages = std::move(images)

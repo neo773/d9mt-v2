@@ -204,6 +204,8 @@ namespace dxvk::backend {
     void blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],
                          const Rc<MtlTextureView>& src, const MtlOffset3D srcBox[2],
                          MtlSamplerFilter filter) override;
+    void resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src, MtlResolveRegion region,
+                        MtlFormat format, MtlResolveMode color, MtlResolveMode stencil) override;
     void generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter) override;
 
     void initBuffer(const Rc<MtlBuffer>& buffer) override;

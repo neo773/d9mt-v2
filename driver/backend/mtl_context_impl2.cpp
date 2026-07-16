@@ -696,6 +696,72 @@ namespace dxvk::backend {
     NSObject_release(enc);
   }
 
+  void MtlContextImpl::resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
+                                      MtlResolveRegion region, MtlFormat format,
+                                      MtlResolveMode color, MtlResolveMode stencil) {
+    /* §6.5 MSAA resolve: a draw-less load=Load / store=MultisampleResolve pass
+     * on the MSAA source with the destination as resolve attachment — the
+     * TBDR-native resolve, no shader involved. Color aspect only (D3D9 depth
+     * resolves never reach this seam; the frontend rejects stretched DS blits
+     * and present sources are color). Metal's color resolve is always the
+     * sample average, which matches the one mode the frontend requests. */
+    (void)color; (void)stencil;
+    auto* d = static_cast<MtlTextureImpl*>(dst.ptr());
+    auto* s = static_cast<MtlTextureImpl*>(src.ptr());
+    if (!d || !s)
+      return;
+
+    const MtlFormatInfo* fi = lookupFormatInfo(
+      format != MtlFormat::Invalid ? format : s->format);
+    if (unlikely(fi->flags & (MtlFormatFlagDepth | MtlFormatFlagStencil))) {
+      Logger::err("MtlContextImpl::resolveTexture: depth-stencil resolve unsupported");
+      return;
+    }
+
+    /* Store-action resolve covers the whole subresource; a partial region
+     * would need a scratch resolve + region copy. Every current caller
+     * (present, StretchRect fast path) resolves the full level. */
+    const MtlExtent3D srcExtent = src->mipLevelExtent(region.srcSubresource.mipLevel);
+    if (unlikely(region.srcOffset.x || region.srcOffset.y
+              || region.dstOffset.x || region.dstOffset.y
+              || region.extent.width  < srcExtent.width
+              || region.extent.height < srcExtent.height)) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn("MtlContextImpl::resolveTexture: partial region resolved as full subresource");
+      }
+    }
+
+    if (m_pass.active)
+      closePass();
+    else
+      flushPendingClears();
+    ensureCommandBuffer();
+
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
+
+    WMTRenderPassInfo info = {};
+    info.colors[0].texture         = s->texture.tex;
+    info.colors[0].load_action     = WMTLoadActionLoad;
+    info.colors[0].store_action    = WMTStoreActionMultisampleResolve;
+    info.colors[0].level           = region.srcSubresource.mipLevel;
+    info.colors[0].slice           = region.srcSubresource.baseLayer;
+    info.colors[0].resolve_texture = d->texture.tex;
+    info.colors[0].resolve_level   = region.dstSubresource.mipLevel;
+    info.colors[0].resolve_slice   = region.dstSubresource.baseLayer;
+    info.render_target_width       = srcExtent.width;
+    info.render_target_height      = srcExtent.height;
+    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+
+    /* §4c: the resolve write happens at pass end; order it ahead of the
+     * consumer that reads the resolved texture (present copy / sample). */
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+  }
+
   bool MtlContextImpl::ensureBlitPipeline() {
     if (m_blitVs != nullptr && m_blitFs != nullptr)
       return true;

@@ -136,6 +136,11 @@ namespace dxvk {
 
     std::vector<Com<D3D9Surface, false>> m_backBuffers;
 
+    // Single-sample present source when the app requested an MSAA backbuffer:
+    // Present resolves backbuffer 0 into this, then blits/copies it to the
+    // drawable (an MSAA -> non-MSAA texture copy is invalid in Metal).
+    Com<D3D9Surface, false>   m_resolveBuffer;
+
     RECT                      m_srcRect;
     RECT                      m_dstRect;
     MtlExtent2D               m_swapchainExtent = { 0u, 0u };
