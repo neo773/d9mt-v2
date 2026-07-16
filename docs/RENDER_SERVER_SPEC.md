@@ -5,6 +5,20 @@ ONLY way to run driver code (and Metal.framework itself) native ARM64 is a
 separate helper process. Prior art: Chromium GPU process (shm command buffer +
 IOSurface), Mesa Venus (Vulkan serialized over a shm ring across a VM).
 
+## Feasibility: PROVEN (PoC, 2026-07-17)
+
+All four potential blockers verified with running code (scratchpad PoC pair,
+arm64 server + x86_64 client, plus a temporary in-wine probe since removed):
+- P1 cross-ISA shm atomics: 10k ping/pong translated<->native, 0 ordering
+  violations (acquire/release over MAP_SHARED).
+- P2 IOSurface cross-process: native Metal rendered pixels, translated client
+  IOSurfaceLookup + byte-identical checksum. NOTE: rides kIOSurfaceIsGlobal
+  (deprecated; Chromium precedent) — mach-port transfer is the fallback.
+- P3 foreign IOSurface wrapped as MTLTexture in the TRANSLATED process's own
+  Metal device, GPU blit, checksum match.
+- P4 from INSIDE a real wine process running GTA IV: posix_spawn of the
+  arm64 helper + full shm handshake + IOSurfaceLookup all succeeded.
+
 ## Processes
 
 - **client** = wine process (x86_64/Rosetta): game + d3d9.dll + winemetal.
