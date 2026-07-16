@@ -443,6 +443,19 @@ namespace dxvk::backend {
      * everything a parked entry references alive until replay; replay then
      * moves the views into m_keepAlive for the GPU lifetime. */
     struct FrameEntry {
+      FrameEntry() = default;
+      /* Moves are declared noexcept EXPLICITLY: under C++17 std::function's
+       * move ctor is not noexcept, so the implicit move here wasn't either —
+       * std::vector<FrameEntry> growth (move_if_noexcept) then chose the
+       * COPY path, deep-copying each parked CmdChunk while its head/tail/
+       * next chain still pointed into the destroyed original's blocks; the
+       * replay walked freed heap (GTA IV boot crash, "unhandled mtl4 render
+       * command type"). CmdChunk's copy ctor is deleted now (any copy is a
+       * compile error) and these noexcept moves keep vector growth on the
+       * move path. */
+      FrameEntry(FrameEntry&&) noexcept = default;
+      FrameEntry& operator = (FrameEntry&&) noexcept = default;
+
       enum class Kind : uint8_t { Render, Direct };
       Kind kind = Kind::Render;
 
