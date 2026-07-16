@@ -27,53 +27,57 @@ game thread (x86/Rosetta)          native consumer thread (ARM64, in .so)
                                             on this side)
 ```
 
-- **The seam is the `MtlContext` virtual interface** (~40 calls, POD-friendly).
-  `MtlWireContext` implements it PE-side by serializing; the real
-  `MtlContextImpl` runs unix-side.
+- **The seam is the HOT LOOP of the `MtlContext` virtual interface** — the
+  per-draw state machine (binds, state setters, clears, draws; ~23 calls).
+  `MtlWireContext` serializes those PE-side; cold calls (creates, copies,
+  blits, queries, init/upload, frame lifecycle) keep their existing direct
+  paths.
 - **Ring**: single-producer/single-consumer, PE-allocated (unix side already
   dereferences PE memory — wmtcmd precedent), acquire/release atomics
   (Rosetta preserves x86 ordering semantics). Fixed-width types ONLY +
   static_asserts on BOTH compilations (mingw x86-64 / clang arm64).
-- **Resources**: backend objects live unix-side; PE holds u64 handles via a
-  handle table. Frontend-visible metadata (extent/format/info, mapPtr for
-  shared-storage buffers) is mirrored into a PE-readable POD block at create
-  time. mapPtr works cross-side (same VA) — zero-copy Lock/upload preserved.
-- **Releases** ride the ring (ordering free). **Readbacks/waits**: consumer
-  publishes a progress counter + completed submission serial to shared
-  memory; PE waits on those (same semantics as today's serials).
+- **Resources**: the Metal objects ALREADY live unix-side behind
+  `obj_handle_t` — that is the handle system; no handle table, no ownership
+  migration. Records carry the obj_handle_t plus the fields the hot loop
+  consumes downstream (gpuResourceID/gpuAddress mirrors the PE wrappers
+  already hold, and the POD key bits: format, extent, stride, offsets).
+  No pointer-valued fields on the wire.
+- **Readbacks/waits**: consumer publishes a progress counter (its tail
+  cursor) + completed submission serial to shared memory; PE waits on those
+  (same semantics as today's serials).
 - **Native thread rules**: never call into PE code or wine internals; pure
   Metal + memory; owns its own autorelease pools; parks on its own condvar.
 
-## Phases (each independently shippable, env-gated)
+## Phases (each independently shippable; no env gating — the transport is
+## default behavior of the branch, a broken phase is reverted via git)
 
 ### Phase 0 — foundations (no behavior change)
-- `driver/mtl/mtl_wire.h`: one `#[repr(C)]`-style POD record per MtlContext
-  call + opcodes + static_asserts. Shared by driver and bridge.
+- `driver/mtl/mtl_wire.h`: one `#[repr(C)]`-style POD record per HOT-LOOP
+  MtlContext call + opcodes + static_asserts. Shared by driver and bridge.
 - Ring header: layout, atomics protocol, kick/park contract, progress counter.
-- Handle-table design note (create/destroy records, id recycling by serial).
 
-### Phase 1 — transport proof (echo mode, D9MT_WIRE=1)
+### Phase 1 — transport proof (echo mode, always on)
 - PE: `MtlWireContext` WRAPS the real context: executes locally (unchanged
-  behavior) AND serializes every call into the ring.
-- Unix: consumer thread decodes, validates (opcode bounds, handle liveness),
+  behavior) AND serializes every hot-loop call into the ring.
+- Unix: consumer thread decodes, validates (opcode bounds, record framing),
   counts, publishes progress; discards. Proves ring/atomics/kick-park under
   a real game at full draw rate with zero risk.
-- Gate: GTA plays normally with D9MT_WIRE=1; consumer stats (records/frame,
-  ring stalls) in the PROF line.
+- Gate: GTA plays normally; consumer stats (records/frame, ring stalls) in
+  the PROF line (D9MT_PROFILE — the existing profiler gate, not a new flag).
 
-### Phase 2 — backend compiles native
-- `MtlContextImpl` + deps (pso cache, upload ring, residency, submission,
-  cmd chunk→direct calls) compile arm64 into winemetal.so. Thunk calls become
-  direct ObjC; wmtcmd replay disappears on this side. Keep the PE build too
-  (same sources, two targets) until cutover.
-- Resource creation moves behind wire records returning handles; PE-side
-  MtlTexture/MtlBuffer become handle wrappers carrying mirrored info.
-- This is the heavy phase. Sub-gates per resource type.
+### Phase 2 — hot loop compiles native
+- Recompile the hot-loop state machine (prepareDraw / flushResources /
+  resolvePso + their state) into winemetal.so, consuming these records
+  natively. The Metal objects are already native behind obj_handle_t — no
+  resource-ownership migration needed; thunk calls become direct ObjC on
+  that side and the wmtcmd replay disappears for the hot loop. Keep the PE
+  build too (same sources, two targets) until cutover.
+- Sub-gates per record family (state, binds, draws).
 
-### Phase 3 — cutover (D9MT_NATIVE=1)
-- Echo mode drops the local execution: PE records only, native consumer
-  executes. Present handshake, GPU capture hook, backbuffer dump, queries
-  all verified native-side. Bisect ladder: D9MT_NATIVE=0 reverts wholesale.
+### Phase 3 — cutover
+- Echo mode drops the local execution for the hot loop: PE records only,
+  native consumer executes. Present handshake, GPU capture hook, backbuffer
+  dump, queries all verified native-side. Revert = git, per branch policy.
 
 ### Phase 4 — what native unlocks
 - Submission overlap: consumer submits pass batches while later records
@@ -86,7 +90,9 @@ game thread (x86/Rosetta)          native consumer thread (ARM64, in .so)
 ## Invariants that must hold at every phase
 - METAL 4 ONLY (SOURCE_OF_TRUTH §2).
 - Full-clean builds (`rm -rf build/driver/obj`) before any perf number.
-- Every phase behind an env flag; main always ships last-verified behavior.
+- No env flags for the transport: each phase lands as default branch
+  behavior; a broken phase is reverted via git. (The PROF wire stats stay
+  behind D9MT_PROFILE — the profiler's own pre-existing gate.)
 - Struct ABI: fixed-width fields, explicit padding, static_assert(sizeof)
   compiled on both sides.
 - No native-thread callbacks into PE; no win32 from the consumer.
