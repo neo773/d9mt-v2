@@ -70,6 +70,9 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     if (m_pass.active)
       closePass();
+    /* MetalFX scaler handles are +1-owned (bridge contract). */
+    for (auto& kv : m_fxScalers)
+      NSObject_release(kv.second);
     /* Context-lifetime visibility buffer: registered at creation, leaves
      * the residency set through the same deferred-destruction path as
      * every other allocation. */

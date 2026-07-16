@@ -712,6 +712,69 @@ namespace dxvk::backend {
     });
   }
 
+  bool MtlContextImpl::presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) {
+    static const bool enabled = std::getenv("D9MT_METALFX") != nullptr;
+    if (!enabled || m_fxUnsupported)
+      return false;
+    auto* d = static_cast<MtlTextureImpl*>(dst.ptr());
+    auto* s = static_cast<MtlTextureImpl*>(src.ptr());
+    if (!d || !s)
+      return false;
+    const MtlSize se = src->extent, de = dst->extent;
+    /* Spatial scaler is upscale-only and needs concrete dims on both ends. */
+    if (!se.width || !se.height || !de.width || !de.height
+     || se.width > de.width || se.height > de.height)
+      return false;
+
+    if (!m_fxChecked) {
+      m_fxChecked = true;
+      if (!MTLDevice_supportsFXSpatialScaler(m_device->wmtDevice())) {
+        m_fxUnsupported = true;
+        Logger::warn("MtlContextImpl: MetalFX spatial scaler unsupported on this device");
+        return false;
+      }
+    }
+
+    const std::array<uint32_t, 6> key = {
+      se.width, se.height, de.width, de.height,
+      uint32_t(src->format), uint32_t(dst->format) };
+    obj_handle_t scaler = 0u;
+    auto it = m_fxScalers.find(key);
+    if (it != m_fxScalers.end()) {
+      scaler = it->second;
+    } else {
+      WMTFXSpatialScalerInfo info = {};
+      info.color_format  = WMTPixelFormat(uint32_t(src->format));
+      info.output_format = WMTPixelFormat(uint32_t(dst->format));
+      info.input_width   = se.width;
+      info.input_height  = se.height;
+      info.output_width  = de.width;
+      info.output_height = de.height;
+      scaler = MTLDevice_newMTL4SpatialScaler(
+        m_device->wmtDevice(), m_device->wmtCompiler(), &info);
+      if (!scaler) {
+        m_fxUnsupported = true;   /* don't retry (and re-log) per present */
+        Logger::warn("MtlContextImpl: MTL4 spatial scaler creation failed — falling back to blit");
+        return false;
+      }
+      m_fxScalers.emplace(key, scaler);
+    }
+
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
+    /* The scaler READS the backbuffer: earlier passes must keep their Store
+     * (backbuffer exemption anchor, same as the present copy). */
+    noteTransferRead(s);
+    const obj_handle_t stex = s->texture.tex;
+    const obj_handle_t dtex = d->texture.tex;
+    encodeDirect([keepD = dst, keepS = src, scaler, stex, dtex]
+                 (obj_handle_t cmdbuf) {
+      MTL4CommandBuffer_encodeSpatialScale(cmdbuf, scaler, stex, dtex);
+    });
+    return true;
+  }
+
   namespace {
     /* rowAlign/sliceAlign are ALIGNMENTS (DXVK semantics), not pitches. Metal
      * wants bytesPerRow/bytesPerImage — compute the tight pitch from the

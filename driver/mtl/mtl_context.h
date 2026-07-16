@@ -219,6 +219,10 @@ namespace dxvk {
     virtual void blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],
                          const Rc<MtlTextureView>& src, const MtlOffset3D srcBox[2],
                          MtlSamplerFilter filter);                        // §6.6 meta-blit pipeline
+    // Present-path MetalFX spatial upscale (opt-in via D9MT_METALFX=1).
+    // Returns false when disabled/unsupported/ineligible — caller falls back
+    // to the sampled blit. dst must be >= src on both axes (upscale only).
+    virtual bool presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src);
     virtual void generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter);
     virtual void transformImage(const Rc<MtlTexture>& image, MtlSubresourceRange range, MtlBarrierScope scope); // mostly no-op
 

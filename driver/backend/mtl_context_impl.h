@@ -133,6 +133,7 @@
 #include <array>
 #include <cstdlib>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -615,6 +616,13 @@ namespace dxvk::backend {
     static constexpr uint32_t  kFanMaxVerts = 16386u;  /* pattern = 192 KiB of u32 */
     Rc<MtlBuffer>              m_fanIndices;
     bool ensureFanIndices();
+
+    /* MetalFX spatial upscale at present (D9MT_METALFX=1). Scalers are
+     * immutable per (in-dims, out-dims, formats) and device-lifetime; the
+     * handles are +1-owned (bridge contract) and released in the dtor. */
+    bool presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) override;
+    std::map<std::array<uint32_t, 6>, obj_handle_t> m_fxScalers;
+    bool m_fxChecked = false, m_fxUnsupported = false;
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
 
