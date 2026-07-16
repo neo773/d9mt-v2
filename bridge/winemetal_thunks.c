@@ -1881,3 +1881,25 @@ MTL4CommandBuffer_encodeSpatialScale(
   params.output = output;
   UNIX_CALL(210, &params);
 }
+
+/* --- d9mt wire transport (211..213) ----------------------------------- */
+WINEMETAL_API void
+WireRing_attach(void *base, uint64_t bytes) {
+  struct unixcall_wirering_attach params;
+  WMT_MEMPTR_SET(params.base, base);
+  params.bytes = bytes;
+  UNIX_CALL(211, &params);
+}
+
+WINEMETAL_API void
+WireRing_kick(void) {
+  uint64_t dummy = 0;
+  UNIX_CALL(212, &dummy);
+}
+
+WINEMETAL_API void
+WireRing_stats(struct WMTWireStats *out) {
+  struct unixcall_wirering_stats params;
+  WMT_MEMPTR_SET(params.out, out);
+  UNIX_CALL(213, &params);
+}

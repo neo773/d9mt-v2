@@ -2551,4 +2551,31 @@ struct wmtcmd_mtl4_barrier {
 
 WINEMETAL_API void MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head);
 
+/* ===================================================================== *
+ * d9mt wire transport (native-backend Phase 1, codes 211..213).
+ * A PE-allocated SPSC ring (layout: driver/mtl/mtl_wire.h) carries the
+ * serialized MtlContext call stream to a native consumer thread that
+ * decodes/validates/counts it (echo mode). The consumer NEVER dereferences
+ * pointer-valued record fields.
+ * ===================================================================== */
+
+struct WMTWireStats {
+  uint64_t records;       /* records consumed */
+  uint64_t bytes;         /* record bytes consumed */
+  uint64_t stalls;        /* producer ring-full spin episodes */
+  uint64_t decode_errors; /* consumer validation failures */
+};
+
+/* Hands the PE-allocated ring (control block + data, see mtl_wire.h) to the
+ * unix side and starts the consumer thread. Call once. */
+WINEMETAL_API void WireRing_attach(void *base, uint64_t bytes);
+
+/* Wakes the parked consumer. Call ONLY on the empty->nonempty transition
+ * (producer sampled tail == previous head when appending); see the kick/park
+ * protocol in mtl_wire.h. */
+WINEMETAL_API void WireRing_kick(void);
+
+/* Snapshot of the transport counters (cumulative since attach). */
+WINEMETAL_API void WireRing_stats(struct WMTWireStats *out);
+
 #endif

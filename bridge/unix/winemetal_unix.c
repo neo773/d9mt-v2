@@ -34,6 +34,7 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "../../driver/mtl/mtl_wire.h"
 
 #if DXMT_APITRACE_METAL
 #include "apitrace/metal_capi.h"
@@ -6407,6 +6408,139 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- d9mt wire transport consumer (native-backend Phase 1) --------------- *
+ * The PE side serializes every MtlContext call into a PE-allocated SPSC
+ * ring (layout + kick/park protocol: driver/mtl/mtl_wire.h). This thread
+ * decodes, validates and counts the records, publishes progress through
+ * ring->tail, and DISCARDS the content — Phase 1 proves the transport under
+ * a real game while the PE side still executes everything locally.
+ *
+ * Rules (NATIVE_BACKEND_PLAN "Native thread rules"):
+ *   - never call into PE code or wine internals; pure memory work here,
+ *   - pointer-valued record fields are OPAQUE PE addresses: NEVER deref,
+ *   - owns its own autorelease pool (none of this drains through a caller),
+ *   - parks on its own condvar; WireRing_kick signals it. */
+
+static pthread_mutex_t wire_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wire_cond = PTHREAD_COND_INITIALIZER;
+static struct d9mt_wire_ring *wire_ring; /* PE VA; valid on this side (wmtcmd precedent) */
+static pthread_t wire_thread;
+static uint64_t wire_op_counts[d9mt_wire_op_count];
+
+static void *
+wire_consumer_main(void *arg) {
+  struct d9mt_wire_ring *ring = arg;
+  uint8_t *data = (uint8_t *)ring + ring->data_offset;
+  const uint64_t cap = ring->capacity;
+  uint64_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
+
+  for (;;) {
+    /* Park. The kick takes wire_lock before signaling and the producer only
+     * skips the kick when it saw tail != previous head (still draining), so
+     * re-checking head under the lock closes the lost-wakeup window. */
+    pthread_mutex_lock(&wire_lock);
+    while (atomic_load_explicit(&ring->head, memory_order_acquire) == tail &&
+           !atomic_load_explicit(&ring->shutdown, memory_order_acquire))
+      pthread_cond_wait(&wire_cond, &wire_lock);
+    pthread_mutex_unlock(&wire_lock);
+
+    @autoreleasepool {
+      uint64_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
+      while (tail != head) {
+        uint64_t idx = tail & (cap - 1u);
+        const struct d9mt_wire_rec_hdr *hdr = (const struct d9mt_wire_rec_hdr *)(data + idx);
+        if (hdr->opcode == d9mt_wire_op_pad) {
+          /* skip-to-ring-end marker; its size field is ignored by contract */
+          tail += cap - idx;
+        } else if (hdr->opcode >= d9mt_wire_op_count || hdr->size < sizeof(*hdr) ||
+                   (hdr->size & 7u) || (uint64_t)hdr->size > cap - idx ||
+                   head - tail < (uint64_t)hdr->size) {
+          /* A malformed stream cannot be resynced (lengths chain the walk):
+           * count it and drop everything up to the published head. */
+          atomic_fetch_add_explicit(&ring->decode_errors, 1, memory_order_relaxed);
+          tail = head;
+        } else {
+          wire_op_counts[hdr->opcode] += 1;
+          atomic_fetch_add_explicit(&ring->records, 1, memory_order_relaxed);
+          atomic_fetch_add_explicit(&ring->bytes, hdr->size, memory_order_relaxed);
+          /* Phase 1: content validated for framing only, then discarded. */
+          tail += hdr->size;
+        }
+        /* Publish per record: releases ring space promptly and doubles as
+         * the PE-readable progress counter. */
+        atomic_store_explicit(&ring->tail, tail, memory_order_release);
+      }
+    }
+
+    if (atomic_load_explicit(&ring->shutdown, memory_order_acquire) &&
+        atomic_load_explicit(&ring->head, memory_order_acquire) == tail)
+      break;
+  }
+
+  {
+    uint64_t records = atomic_load_explicit(&ring->records, memory_order_relaxed);
+    fprintf(stderr, "[wire] consumer exit: records=%llu bytes=%llu decode_errors=%llu\n",
+            (unsigned long long)records,
+            (unsigned long long)atomic_load_explicit(&ring->bytes, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&ring->decode_errors, memory_order_relaxed));
+    for (unsigned op = 0; op < d9mt_wire_op_count; op++) {
+      if (wire_op_counts[op])
+        fprintf(stderr, "[wire]   op %3u: %llu\n", op, (unsigned long long)wire_op_counts[op]);
+    }
+  }
+  atomic_store_explicit(&ring->consumer_exited, 1, memory_order_release);
+  return NULL;
+}
+
+static NTSTATUS
+_WireRing_attach(void *obj) {
+  struct unixcall_wirering_attach *params = obj;
+  struct d9mt_wire_ring *ring = params->base.ptr;
+  if (wire_ring || !ring || ring->magic != D9MT_WIRE_RING_MAGIC ||
+      ring->capacity == 0 || (ring->capacity & (ring->capacity - 1u)) ||
+      ring->data_offset != sizeof(struct d9mt_wire_ring) ||
+      params->bytes < ring->data_offset + ring->capacity) {
+    fprintf(stderr, "[wire] attach REJECTED (already attached or bad ring header)\n");
+    return STATUS_SUCCESS; /* transport disabled; PE side keeps echoing locally */
+  }
+  wire_ring = ring;
+  if (pthread_create(&wire_thread, NULL, wire_consumer_main, ring)) {
+    fprintf(stderr, "[wire] attach: pthread_create failed\n");
+    wire_ring = NULL;
+    return STATUS_SUCCESS;
+  }
+  fprintf(stderr, "[wire] attached: capacity=%llu bytes\n", (unsigned long long)ring->capacity);
+  return STATUS_SUCCESS;
+}
+
+/* Registered UNWRAPPED (like NSObject_retain/release): pure pthread ops,
+ * no ObjC, and it sits on the empty->nonempty hot path. */
+static NTSTATUS
+_WireRing_kick(void *obj) {
+  (void)obj;
+  pthread_mutex_lock(&wire_lock);
+  pthread_cond_signal(&wire_cond);
+  pthread_mutex_unlock(&wire_lock);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_WireRing_stats(void *obj) {
+  struct unixcall_wirering_stats *params = obj;
+  struct WMTWireStats *out = params->out.ptr;
+  if (!out)
+    return STATUS_SUCCESS;
+  if (!wire_ring) {
+    memset(out, 0, sizeof(*out));
+    return STATUS_SUCCESS;
+  }
+  out->records = atomic_load_explicit(&wire_ring->records, memory_order_relaxed);
+  out->bytes = atomic_load_explicit(&wire_ring->bytes, memory_order_relaxed);
+  out->stalls = atomic_load_explicit(&wire_ring->stalls, memory_order_relaxed);
+  out->decode_errors = atomic_load_explicit(&wire_ring->decode_errors, memory_order_relaxed);
+  return STATUS_SUCCESS;
+}
+
 /* --- autorelease-pool dispatch wrappers --------------------------------- *
  * Wine threads have no NSAutoreleasePool, so every autoreleased object a
  * Metal/CA call produces on this side would leak for the process lifetime
@@ -6542,6 +6676,10 @@ D9MT_POOLED(_MTLDevice_supportsFXSpatialScaler)
 D9MT_POOLED(_MTLDevice_supportsFXTemporalScaler)
 D9MT_POOLED(_MTLDevice_newMTL4SpatialScaler)
 D9MT_POOLED(_MTL4CommandBuffer_encodeSpatialScale)
+/* wire transport: attach/stats pooled for consistency; kick stays raw
+ * (see _WireRing_kick comment). */
+D9MT_POOLED(_WireRing_attach)
+D9MT_POOLED(_WireRing_stats)
 D9MT_POOLED(_MTLDevice_supportsFamily)
 D9MT_POOLED(_MTLDevice_supportsPlacementSparse)
 D9MT_POOLED(_MTLDevice_supportsTextureSampleCount)
@@ -6867,8 +7005,12 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
-    &_MTLDevice_newMTL4SpatialScaler_pooled,
-    &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+    &_MTLDevice_newMTL4SpatialScaler_pooled,                       /* 209 */
+    &_MTL4CommandBuffer_encodeSpatialScale_pooled,                 /* 210 */
+    /* d9mt wire transport, lock-step in both tables */
+    &_WireRing_attach_pooled,                                      /* 211 */
+    &_WireRing_kick,                                               /* 212 */
+    &_WireRing_stats_pooled,                                       /* 213 */
 
 };
 
@@ -7097,8 +7239,12 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
-    &_MTLDevice_newMTL4SpatialScaler_pooled,
-    &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+    &_MTLDevice_newMTL4SpatialScaler_pooled,                       /* 209 */
+    &_MTL4CommandBuffer_encodeSpatialScale_pooled,                 /* 210 */
+    /* d9mt wire transport, lock-step in both tables */
+    &_WireRing_attach_pooled,                                      /* 211 */
+    &_WireRing_kick,                                               /* 212 */
+    &_WireRing_stats_pooled,                                       /* 213 */
 
 };
 #endif

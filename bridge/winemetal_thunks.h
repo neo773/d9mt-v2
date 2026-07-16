@@ -604,6 +604,17 @@ struct unixcall_mtl4_barrier {
   uint64_t visibility;
 };
 
+/* d9mt wire transport: codes 211..213, lock-step in both dispatch tables.
+ * All members 8-byte / arch-invariant: shared thunks (no thunk32 twins). */
+struct unixcall_wirering_attach {
+  struct WMTMemoryPointer base; /* struct d9mt_wire_ring* (PE allocation) */
+  uint64_t bytes;               /* total allocation size incl. control block */
+};
+
+struct unixcall_wirering_stats {
+  struct WMTMemoryPointer out; /* struct WMTWireStats* (PE memory) */
+};
+
 #pragma pack(pop)
 
 #endif
