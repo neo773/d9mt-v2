@@ -1,0 +1,37 @@
+driver/backend/mtl_context_impl.h
+  s_68632dcad39ed7::t_ad162a570138ed 207-208
+driver/mtl/mtl_presenter.h
+  s_68632dcad39ed7::t_aec74637d74491 36
+driver/d3d9/d3d9_swapchain.h
+  s_68632dcad39ed7::t_62c3b0a3c78069 139-143
+driver/d3d9/d3d9_swapchain.cpp
+  s_68632dcad39ed7::t_fe9cc900e7995b 675-676
+  s_68632dcad39ed7::t_0280b559b1dd06 674,677-683
+  s_68632dcad39ed7::t_0662e08d605067 746-748
+  s_68632dcad39ed7::t_34b3991d8688e8 828-832
+  s_68632dcad39ed7::t_6ae6cc6d74d85f 902-919,927-928
+  s_68632dcad39ed7::t_de06bd1a7c630b 693-702,704-716,719,735-736,738-740,742-745,749-766
+  s_68632dcad39ed7::t_8a7977984c0e1b 929
+driver/backend/mtl_context_impl2.cpp
+  s_68632dcad39ed7::t_8b9c763a6f245d 699-764
+driver/backend/mtl_presenter_impl.cpp
+  s_68632dcad39ed7::t_61d2a4aa8102b7 87-93
+  s_68632dcad39ed7::t_3119bb5b582b42 85-86,94-104
+  s_68632dcad39ed7::t_8ef004b6a66d72 116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2a905c3882661ce32cc640da502a2d833dcd8581",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
