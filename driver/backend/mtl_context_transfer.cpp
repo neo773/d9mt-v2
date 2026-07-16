@@ -612,17 +612,6 @@ namespace dxvk::backend {
 
   // --- transfers / blits (decision 8: MTL4 compute-encoder copies) ------------
 
-  obj_handle_t MtlContextImpl::computeEncoder() {
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseXfer);
-      closePass();
-    }
-    else
-      flushPendingClears();   /* a copy must observe folded, not-yet-drawn clears */
-    ensureCommandBuffer();
-    return MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
-  }
-
   void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages) {
     if (!encoder)
       return;
@@ -644,6 +633,17 @@ namespace dxvk::backend {
      * batched wmtcmd stream must replay first: a DIRECT encoder call may not
      * overtake draws still parked in the chunk. */
     if (m_pass.active) {
+      if (deferredPassesEnabled()) {
+        /* No live encoder — the barrier rides the wmtcmd stream so it stays
+         * ordered against the parked draws it separates (replayed by
+         * flushFramePasses in exact record order). */
+        auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_barrier>(
+          uint16_t(WMTMtl4RenderCommandBarrier));
+        cmd->after_stages  = uint64_t(WMTStageFragment);
+        cmd->before_stages = uint64_t(WMTStageAll);
+        cmd->visibility    = uint64_t(WMTVisibilityOptionDevice);
+        return;
+      }
       flushCmdChunk();
       emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
     }
@@ -655,16 +655,22 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlBufferImpl*>(src.ptr());
     if (!d || !s)
       return;
-    obj_handle_t enc = computeEncoder();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
-    MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
-      enc, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
-    /* §4c: make this copy's write visible to the later draw/copy that reads it
-     * (e.g. a DEFAULT-pool vertex buffer uploaded here then fetched by the VS). */
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const obj_handle_t sbuf = s->handle.buf;
+    const obj_handle_t dbuf = d->handle.buf;
+    encodeDirect([this, keepD = dst, keepS = src, sbuf, srcOff, dbuf, dstOff, bytes]
+                 (obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
+        enc, sbuf, srcOff, dbuf, dstOff, bytes);
+      /* §4c: make this copy's write visible to the later draw/copy that reads it
+       * (e.g. a DEFAULT-pool vertex buffer uploaded here then fetched by the VS). */
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   void MtlContextImpl::uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -678,21 +684,32 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
       return;
-    obj_handle_t enc = computeEncoder();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
+    /* This copy READS src: its earlier passes must keep their Store (also
+     * feeds the persistent transfer-read set — the present copy's source is
+     * the swapchain backbuffer, the backbuffer exemption anchor). */
+    noteTransferRead(s);
     /* Drawable-backed textures (borrowed handle, owned unset) are covered
      * by the CAMetalLayer's own residency set, queue-attached in the
      * presenter; owned textures are resident from creation. */
     WMTOrigin srcOrigin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   srcSize   = { extent.width, extent.height, extent.depth };
     WMTOrigin dstOrigin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
-    MTL4ComputeCommandEncoder_copyFromTextureToTexture(
-      enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, srcOrigin, srcSize,
-      d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, dstOrigin);
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const obj_handle_t stex = s->texture.tex;
+    const obj_handle_t dtex = d->texture.tex;
+    encodeDirect([this, keepD = dst, keepS = src, stex, dtex,
+                  srcSub, dstSub, srcOrigin, srcSize, dstOrigin]
+                 (obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_copyFromTextureToTexture(
+        enc, stex, srcSub.baseLayer, srcSub.mipLevel, srcOrigin, srcSize,
+        dtex, dstSub.baseLayer, dstSub.mipLevel, dstOrigin);
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   namespace {
@@ -726,7 +743,7 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlBufferImpl*>(src.ptr());
     if (!d || !s)
       return;
-    obj_handle_t enc = computeEncoder();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     WMTSize   size   = { extent.width, extent.height, extent.depth };
@@ -734,12 +751,19 @@ namespace dxvk::backend {
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
     computeBufferImagePitch(format != MtlFormat::Invalid ? format : d->format,
       extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
-    MTL4ComputeCommandEncoder_copyFromBufferToTexture(
-      enc, s->handle.buf, off, bytesPerRow, bytesPerImage, size,
-      d->texture.tex, dstSub.baseLayer, dstSub.mipLevel, origin);
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const obj_handle_t sbuf = s->handle.buf;
+    const obj_handle_t dtex = d->texture.tex;
+    encodeDirect([this, keepD = dst, keepS = src, sbuf, dtex, off,
+                  bytesPerRow, bytesPerImage, size, dstSub, origin]
+                 (obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_copyFromBufferToTexture(
+        enc, sbuf, off, bytesPerRow, bytesPerImage, size,
+        dtex, dstSub.baseLayer, dstSub.mipLevel, origin);
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   void MtlContextImpl::copyTextureToBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize off, MtlDeviceSize rowAlign,
@@ -749,20 +773,32 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
       return;
-    obj_handle_t enc = computeEncoder();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
+    /* Readback READS src — earlier passes on it must keep their Store. The
+     * caller's CPU wait rides the submission serial, and submit() replays
+     * the frame list before commit, so the copy always lands before the
+     * serial can complete. */
+    noteTransferRead(s);
     WMTOrigin origin = { uint64_t(srcOff.x), uint64_t(srcOff.y), uint64_t(srcOff.z) };
     WMTSize   size   = { extent.width, extent.height, extent.depth };
     MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u;
     computeBufferImagePitch(format != MtlFormat::Invalid ? format : s->format,
       extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
-    MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
-      enc, s->texture.tex, srcSub.baseLayer, srcSub.mipLevel, origin, size,
-      d->handle.buf, off, bytesPerRow, bytesPerImage);
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const obj_handle_t stex = s->texture.tex;
+    const obj_handle_t dbuf = d->handle.buf;
+    encodeDirect([this, keepD = dst, keepS = src, stex, dbuf, off,
+                  bytesPerRow, bytesPerImage, size, srcSub, origin]
+                 (obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_copyFromTextureToBuffer(
+        enc, stex, srcSub.baseLayer, srcSub.mipLevel, origin, size,
+        dbuf, off, bytesPerRow, bytesPerImage);
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   void MtlContextImpl::resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
@@ -802,16 +838,12 @@ namespace dxvk::backend {
       }
     }
 
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseBlit);
-      closePass();
-    }
-    else
-      flushPendingClears();
-    ensureCommandBuffer();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
 
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
+    /* The resolve READS the MSAA source at pass end. */
+    noteTransferRead(s);
 
     WMTRenderPassInfo info = {};
     info.colors[0].texture         = s->texture.tex;
@@ -824,13 +856,14 @@ namespace dxvk::backend {
     info.colors[0].resolve_slice   = region.dstSubresource.baseLayer;
     info.render_target_width       = srcExtent.width;
     info.render_target_height      = srcExtent.height;
-    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
-
-    /* §4c: the resolve write happens at pass end; order it ahead of the
-     * consumer that reads the resolved texture (present copy / sample). */
-    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    encodeDirect([this, keepD = dst, keepS = src, info](obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      /* §4c: the resolve write happens at pass end; order it ahead of the
+       * consumer that reads the resolved texture (present copy / sample). */
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   bool MtlContextImpl::ensureBlitPipeline() {
@@ -907,6 +940,12 @@ namespace dxvk::backend {
       /* Whole subresource: a load=Clear/store=Store mini-pass (free on TBDR,
        * and works for every renderable format) — the standalone-clear shape
        * from clearRenderTarget, targeting the caller's view and value. */
+      /* DEFERRED MODE: park the active pass first so the swap below can't
+       * hand its chunk to the mini-pass (see clearRenderTarget). */
+      if (deferredPassesEnabled() && m_pass.active) {
+        prof::bump(prof::CntPassCloseClear);
+        closePass();
+      }
       PendingPass saved = std::move(m_pass);
       m_pass = PendingPass();
       m_pass.targets.color[0] = view;
@@ -944,13 +983,7 @@ namespace dxvk::backend {
     if (!pso)
       return;
 
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseClear);
-      closePass();
-    }
-    else
-      flushPendingClears();
-    ensureCommandBuffer();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -962,9 +995,6 @@ namespace dxvk::backend {
     info.colors[0].store_action = WMTStoreActionStore;
     info.render_target_width    = mipExtent.width;
     info.render_target_height   = mipExtent.height;
-    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
-
-    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
 
     WMTViewport vp = {};
     vp.originX = double(offset.x);
@@ -973,15 +1003,16 @@ namespace dxvk::backend {
     vp.height  = double(y1 - offset.y);
     vp.znear   = 0.0;
     vp.zfar    = 1.0;
-    MTL4RenderCommandEncoder_setViewport(enc, vp);
     WMTScissorRect sc = {};
     sc.x      = offset.x;
     sc.y      = offset.y;
     sc.width  = x1 - offset.x;
     sc.height = y1 - offset.y;
-    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
 
-    /* BlitParams: uvRect unused by fillFsMain; fillColor carries the value. */
+    /* BlitParams: uvRect unused by fillFsMain; fillColor carries the value.
+     * Ring slice + blit-table write happen at RECORD time (snapshot
+     * semantics; the table is retire-by-serial so no later blit can rewrite
+     * it before the parked encoder replays). */
     float params[8] = {
       0.f, 0.f, 0.f, 0.f,
       value.color.r, value.color.g, value.color.b, value.color.a,
@@ -992,15 +1023,21 @@ namespace dxvk::backend {
 
     obj_handle_t table = selectBlitArgTable();
     MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
-    MTL4RenderCommandEncoder_setArgumentTable(
-      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
 
-    MTL4RenderCommandEncoder_drawPrimitives(
-      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
-
-    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    encodeDirect([this, keepView = view, info, pso, vp, sc, table]
+                 (obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+      MTL4RenderCommandEncoder_setViewport(enc, vp);
+      MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+      MTL4RenderCommandEncoder_setArgumentTable(
+        enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+      MTL4RenderCommandEncoder_drawPrimitives(
+        enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
     m_dirty = DirtyEverything;
   }
 
@@ -1057,13 +1094,7 @@ namespace dxvk::backend {
     }
     obj_handle_t dsso = m_device->getDepthStencilState(ds);
 
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseClear);
-      closePass();
-    }
-    else
-      flushPendingClears();
-    ensureCommandBuffer();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -1086,12 +1117,6 @@ namespace dxvk::backend {
     }
     info.render_target_width  = mipExtent.width;
     info.render_target_height = mipExtent.height;
-    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
-
-    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
-    MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
-    if (clearStencil)
-      MTL4RenderCommandEncoder_setStencilReferenceValue(enc, value.stencil);
 
     WMTViewport vp = {};
     vp.originX = double(offset.x);
@@ -1100,15 +1125,14 @@ namespace dxvk::backend {
     vp.height  = double(y1 - offset.y);
     vp.znear   = 0.0;
     vp.zfar    = 1.0;
-    MTL4RenderCommandEncoder_setViewport(enc, vp);
     WMTScissorRect sc = {};
     sc.x      = offset.x;
     sc.y      = offset.y;
     sc.width  = x1 - offset.x;
     sc.height = y1 - offset.y;
-    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
 
-    /* BlitParams: fillColor.x = clear depth (vertex z passthrough). */
+    /* BlitParams: fillColor.x = clear depth (vertex z passthrough). Record-
+     * time ring slice + blit-table write (same contract as clearImageView). */
     float params[8] = {
       0.f, 0.f, 0.f, 0.f,
       value.depth, 0.f, 0.f, 0.f,
@@ -1119,15 +1143,26 @@ namespace dxvk::backend {
 
     obj_handle_t table = selectBlitArgTable();
     MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
-    MTL4RenderCommandEncoder_setArgumentTable(
-      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
 
-    MTL4RenderCommandEncoder_drawPrimitives(
-      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
-
-    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const uint32_t stencilRef = value.stencil;
+    encodeDirect([this, keepView = view, info, pso, dsso, clearStencil,
+                  stencilRef, vp, sc, table]
+                 (obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+      MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
+      if (clearStencil)
+        MTL4RenderCommandEncoder_setStencilReferenceValue(enc, stencilRef);
+      MTL4RenderCommandEncoder_setViewport(enc, vp);
+      MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+      MTL4RenderCommandEncoder_setArgumentTable(
+        enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+      MTL4RenderCommandEncoder_drawPrimitives(
+        enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
     m_dirty = DirtyEverything;
   }
 
@@ -1232,20 +1267,16 @@ namespace dxvk::backend {
     if (!pso)
       return;                                    /* build failure already logged */
 
-    /* A blit must observe folded, not-yet-drawn clears (computeEncoder
+    /* A blit must observe folded, not-yet-drawn clears (prepareDirectEncode
      * precedent); an open pass flushes its fragment writes via closePass. */
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseBlit);
-      closePass();
-    }
-    else
-      flushPendingClears();
-    ensureCommandBuffer();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
 
     auto* dstTv = static_cast<MtlTextureViewImpl*>(dstView.ptr());
     auto* srcTv = static_cast<MtlTextureViewImpl*>(srcView.ptr());
     dstView->image->setTrackingSerial(m_currentSerial);
     srcView->image->setTrackingSerial(m_currentSerial);
+    /* The blit SAMPLES src — earlier passes on it must keep their Store. */
+    noteTransferRead(srcView->image.ptr());
     /* The view objects are typically owned only by the recorded CS lambda;
      * their Metal resource IDs must outlive this submission. */
     m_keepAlive.push_back(dstView);
@@ -1257,9 +1288,6 @@ namespace dxvk::backend {
     info.colors[0].store_action = WMTStoreActionStore;
     info.render_target_width    = dstExtent.width;
     info.render_target_height   = dstExtent.height;
-    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
-
-    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
 
     /* Viewport = dst rect: the fullscreen triangle's t [0,1] spans exactly
      * the rect, so uv interpolates uv0 -> uv1 across it (dst pixel centers
@@ -1272,16 +1300,16 @@ namespace dxvk::backend {
     vp.height  = double(dy1 - dy0);
     vp.znear   = 0.0;
     vp.zfar    = 1.0;
-    MTL4RenderCommandEncoder_setViewport(enc, vp);
     WMTScissorRect sc = {};
     sc.x      = uint32_t(dx0);
     sc.y      = uint32_t(dy0);
     sc.width  = uint32_t(dx1 - dx0);
     sc.height = uint32_t(dy1 - dy0);
-    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
 
     /* BlitParams via a fresh UploadRing slice (snapshot semantics: never
-     * rewritten under this queued blit), through the dedicated blit table. */
+     * rewritten under this queued blit), through the dedicated blit table.
+     * All table writes happen at RECORD time; retire-by-serial keeps the
+     * table untouched until the parked encoder replays. */
     float params[4] = {
       sx0 / float(srcExtent.width), sy0 / float(srcExtent.height),
       sx1 / float(srcExtent.width), sy1 / float(srcExtent.height),
@@ -1296,17 +1324,23 @@ namespace dxvk::backend {
     auto* smp = static_cast<MtlSamplerStateImpl*>(
       m_blitSamplers[filter == MtlSamplerFilter::Linear ? 1u : 0u].ptr());
     MTL4ArgumentTable_setSamplerState(table, smp->gpuResourceId, 0u);
-    MTL4RenderCommandEncoder_setArgumentTable(
-      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
 
-    MTL4RenderCommandEncoder_drawPrimitives(
-      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
-
-    /* §4c: order the blit's fragment write ahead of a later sample/copy of
-     * the dst (same contract as closePass/clearImage). */
-    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    encodeDirect([this, keepDst = dstView, keepSrc = srcView, info, pso, vp, sc, table]
+                 (obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+      MTL4RenderCommandEncoder_setViewport(enc, vp);
+      MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+      MTL4RenderCommandEncoder_setArgumentTable(
+        enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+      MTL4RenderCommandEncoder_drawPrimitives(
+        enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+      /* §4c: order the blit's fragment write ahead of a later sample/copy of
+       * the dst (same contract as closePass/clearImage). */
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
 
     /* The next D3D9 draw rebinds its own encoder state from scratch. */
     m_dirty = DirtyEverything;
@@ -1321,13 +1355,19 @@ namespace dxvk::backend {
       : tv->owned.handle();
     if (!tex)
       return;
-    obj_handle_t enc = computeEncoder();
-    if (view->image != nullptr)
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (view->image != nullptr) {
       view->image->setTrackingSerial(m_currentSerial);
-    MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+      /* mipgen READS level 0 of the texture. */
+      noteTransferRead(view->image.ptr());
+    }
+    encodeDirect([this, keepView = view, tex](obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   // --- init / upload / discard (contracts 3a,3c,3g) --------------------------
@@ -1336,12 +1376,17 @@ namespace dxvk::backend {
     auto* b = static_cast<MtlBufferImpl*>(buffer.ptr());
     if (!b)
       return;
-    obj_handle_t enc = computeEncoder();
+    prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     b->setTrackingSerial(m_currentSerial);
-    MTL4ComputeCommandEncoder_fillBuffer(enc, b->handle.buf, 0u, b->size, 0u);
-    emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    const obj_handle_t buf  = b->handle.buf;
+    const uint64_t     size = b->size;
+    encodeDirect([this, keep = buffer, buf, size](obj_handle_t cmdbuf) {
+      obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
+      MTL4ComputeCommandEncoder_fillBuffer(enc, buf, 0u, size, 0u);
+      emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   void MtlContextImpl::initImage(const Rc<MtlTexture>& image) {
@@ -1394,11 +1439,13 @@ namespace dxvk::backend {
     }
 
     /* load=Clear + store=Store clears the whole subresource with no draws. */
-    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
-    /* §4c: order the clear's fragment write ahead of a later sample/copy. */
-    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
-    MTLCommandEncoder_endEncoding(enc);
-    NSObject_release(enc);
+    encodeDirect([this, keep = image, info](obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      /* §4c: order the clear's fragment write ahead of a later sample/copy. */
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
   }
 
   void MtlContextImpl::invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) {
