@@ -15,7 +15,7 @@
 #include "mtl_blit_metallib.h"
 
 /*
- * mtl_context_impl2.cpp — part 2 of the METAL 4 MtlContextImpl (see
+ * mtl_context_transfer.cpp — part 2 of the METAL 4 MtlContextImpl (transfers/blits/resolve/queries/flush) (see
  * mtl_context_impl.h for the 9 architecture decisions). Sections: PSO resolve,
  * argument-table flush, dynamic state, transfers (compute-encoder copies),
  * init/upload/discard, queries, signals, lifetime, debug labels, and the

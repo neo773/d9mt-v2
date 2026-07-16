@@ -121,7 +121,7 @@ always writes point_size). TWO REMAINING RENDER BUGS:
    name; currently requested but unread in d3d9_shader_compiler getMetallib)
    to build a per-shader CbvIndex→AIR-slot table, and thread it to
    MtlContext binding. Guard currently skips CBVs with invalid storage
-   (mtl_context_impl2 flushResources) — that's a band-aid; the mapping is the
+   (mtl_context_transfer flushResources) — that's a band-aid; the mapping is the
    real fix. A fragment CBV (st=1 slot=0) was also binding a stale/garbage
    buffer (size=29, storage=0x6) — likely a lifetime issue on a PS constant
    buffer never Alloc'd; the reflection-driven binding (only bind CBVs the

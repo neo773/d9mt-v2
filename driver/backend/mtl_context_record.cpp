@@ -1011,6 +1011,6 @@ namespace dxvk::backend {
 
   // (resolvePso / bindArgumentTables contents / flushVertexBuffers /
   //  flushResources / flushDynamicState / transfers / init / queries / misc
-  //  continue in mtl_context_impl2.cpp to keep TU size sane)
+  //  continue in mtl_context_transfer.cpp to keep TU size sane)
 
 }

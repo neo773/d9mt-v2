@@ -110,7 +110,7 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
 fi
 
 # --- Meta-blit MSL -> metallib -> embedded byte-array header -------------------
-# blitTextureView's sampled fullscreen-triangle pipeline (mtl_context_impl2.cpp,
+# blitTextureView's sampled fullscreen-triangle pipeline (mtl_context_transfer.cpp,
 # mtl_context.h §6.6). Hand-authored MSL with entry points blitVsMain/blitFsMain
 # (Metal reserves "main"), embedded as g_blitMetallib. Regenerated when the
 # source (or this script) is newer than the header.
@@ -158,7 +158,7 @@ FLAGS=(-std=c++17 -O1 -g -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mf
 # flag is unset. Runtime is additionally gated on D9MT_PROFILE_INSTRUMENT=1 in
 # the environment (hooks return immediately otherwise).
 PROFILE_INSTRUMENT="${PROFILE_INSTRUMENT:-0}"
-INSTRUMENT_TUS=" mtl_context_impl.cpp mtl_context_impl2.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp "
+INSTRUMENT_TUS=" mtl_context_record.cpp mtl_context_transfer.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp "
 # GCC instruments pre-inline, so trivial getters (std::array::operator[],
 # Rc<>::operator->, MtlBufferSlice::defined, ...) each cost two hook calls that
 # land in their CALLER's self time (400k+ calls/10s observed in GTA IV). The
@@ -210,7 +210,7 @@ CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
 # MTLDevice_newRenderPipelineStateWithVertexDescriptor); that import symbol
 # lives in the bridge thunks and shows as an expected undefined in the
 # non-fatal d3d9.dll link until a bridge import lib is wired for shipping.
-CORE+=("$DRV"/backend/mtl_context_impl.cpp "$DRV"/backend/mtl_context_impl2.cpp \
+CORE+=("$DRV"/backend/mtl_context_record.cpp "$DRV"/backend/mtl_context_transfer.cpp \
        "$DRV"/backend/mtl_pso_cache.cpp "$DRV"/backend/mtl_presenter_impl.cpp \
        "$DRV"/backend/mtl_device_impl.cpp "$DRV"/backend/mtl_ring.cpp \
        "$DRV"/backend/mtl_submission.cpp "$DRV"/backend/mtl_residency.cpp)
