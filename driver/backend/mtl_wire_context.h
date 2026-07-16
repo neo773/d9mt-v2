@@ -152,6 +152,8 @@ namespace dxvk::backend {
     bool            m_kick    = false; /* empty->nonempty seen for the pending record */
     bool            m_hasConsumer = false; /* d9mt-serverd is draining the ring */
     uint32_t        m_pending = 0u;    /* bytes reserved by beginRecord */
+    bool            m_draining = false; /* inside emitQueuedDestroys */
+    uint64_t        m_presentSerial = 0u; /* presentFrame counter (S2) */
 
     /* Reserves size = sizeof(T) + trailing, 8-aligned, contiguous, zeroed,
      * with hdr.opcode/size filled. Returns nullptr when the transport is
@@ -161,6 +163,19 @@ namespace dxvk::backend {
     void* reserveBytes(uint16_t op, uint32_t bytes);
     void endRecord();
     bool waitForSpace(uint64_t need);
+
+    /* --- S2 cold-record emission (CS thread) -------------------------------
+     * Lazy create-at-first-wire-use: each ensure* checks the resource's
+     * wireId (0 = not on the wire yet), emits the create record and assigns
+     * the id — so a create always precedes the first record referencing the
+     * resource, with no cross-thread ring producers. Destroys arrive from
+     * arbitrary-thread destructors via wire::queueDestroy (mtl_wire_emit.h)
+     * and are drained at the top of reserveBytes. */
+    bool     ensureBufferCreated(const MtlBufferSlice& slice);
+    uint64_t ensureTextureCreated(const Rc<MtlTexture>& image);
+    void     ensureShaderCreated(const Rc<MtlShaderFunction>& fn);
+    void     ensureSamplerCreated(const Rc<MtlSamplerState>& sampler);
+    void     emitQueuedDestroys();
 
     static void fillBufferRef(d9mt_wire_buffer_ref& dst, const MtlBufferSlice& slice);
     static void fillRtRef(d9mt_wire_rt_ref& dst, const Rc<MtlTextureView>& view);

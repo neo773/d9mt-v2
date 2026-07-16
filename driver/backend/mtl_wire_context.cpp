@@ -10,9 +10,13 @@
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <new>
+#include <utility>
+#include <vector>
 
 #include "mtl_device_impl.h"
+#include "mtl_wire_emit.h"
 
 #include "../../bridge/winemetal.h"
 #include "../util/log/log.h"
@@ -30,6 +34,39 @@ namespace dxvk::backend {
 
     /* True once WireRing_attach has been issued (profiler stats source). */
     std::atomic<bool> g_wireAttached = { false };
+
+    /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
+
+    /* Monotonic wire identity (spec: client-assigned u64). 0 = "no wire
+     * identity"; ids start at 1. */
+    std::atomic<uint64_t> g_nextWireId = { 1u };
+
+    /* destroy_resource queue: filled by arbitrary-thread destructors,
+     * drained by the CS producer at the top of reserveBytes. Bounded: once
+     * the transport is dead nothing drains, so overflow clears the queue
+     * (the server is gone or will resync via handle-map misses). */
+    std::mutex g_destroyMutex;
+    std::vector<std::pair<uint64_t, uint64_t>> g_pendingDestroys;
+    std::atomic<bool> g_destroysPending = { false };
+    constexpr size_t kMaxPendingDestroys = 65536u;
+
+    /* Current backbuffer image (app thread writes from PresentImage; CS
+     * producer reads). Rc keeps it alive across the hand-off. */
+    std::mutex g_backbufferMutex;
+    Rc<MtlTexture> g_backbuffer;
+
+    Rc<MtlTexture> currentBackbuffer() {
+      std::lock_guard<std::mutex> lock(g_backbufferMutex);
+      return g_backbuffer;
+    }
+
+    /* PROF: local presents vs server-produced frames (wire::presentObserved). */
+    std::atomic<uint64_t> g_localPresents = { 0u };
+    std::atomic<uint64_t> g_srvPace = { 0u };
+
+    /* create_shader chunking: metallib payloads exceed the uint16 record
+     * size; keep chunks comfortably under the 0xFFF8 reserve cap. */
+    constexpr uint32_t kShaderChunkBytes = 0xE000u;
   }
 
   MtlWireContext::MtlWireContext(const Rc<MtlDevice>& device, Rc<MtlContext>&& inner)
@@ -144,6 +181,13 @@ namespace dxvk::backend {
     if (!m_active)
       return nullptr;
 
+    /* S2: drain queued destroy_resource records first — a destroy is queued
+     * only after the resource's last possible use, so emitting it before the
+     * NEXT record preserves use-before-destroy order on the wire (and
+     * destroy-before-recreate for reused handle values). */
+    if (!m_draining && g_destroysPending.load(std::memory_order_acquire))
+      emitQueuedDestroys();
+
     bytes = (bytes + 7u) & ~7u;
     if (bytes > 0xFFF8u) /* uint16 size field; no hot record comes close */
       return nullptr;
@@ -225,6 +269,157 @@ namespace dxvk::backend {
     }
   }
 
+  /* --- S2 cold-record emission (CS thread; see mtl_wire_context.h) --------- */
+
+  void MtlWireContext::emitQueuedDestroys() {
+    m_draining = true;
+    std::vector<std::pair<uint64_t, uint64_t>> pending;
+    { std::lock_guard<std::mutex> lock(g_destroyMutex);
+      pending.swap(g_pendingDestroys);
+      g_destroysPending.store(false, std::memory_order_release);
+    }
+    for (const auto& d : pending) {
+      auto* r = beginRecord<d9mt_wire_rec_destroy_resource>(d9mt_wire_op_destroy_resource);
+      if (!r)
+        break; /* transport died mid-drain; the rest is moot */
+      r->wire_id = d.first;
+      r->client_handle = d.second;
+      endRecord();
+    }
+    m_draining = false;
+  }
+
+  bool MtlWireContext::ensureBufferCreated(const MtlBufferSlice& slice) {
+    const Rc<MtlAllocation>& storage = slice.storage();
+    if (storage == nullptr)
+      return false;
+    if (storage->wireId)
+      return true;
+    auto* r = beginRecord<d9mt_wire_rec_create_buffer>(d9mt_wire_op_create_buffer);
+    if (!r)
+      return false;
+    /* id assigned only on successful emission: a 0 wireId resource simply
+     * never resolves server-side (defined: dummy-bound). */
+    storage->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    r->wire_id = storage->wireId;
+    r->client_handle = storage->handle.buf;
+    r->size = storage->size;
+    r->usage = 0u;       /* informational; not tracked at slice level */
+    r->cpu_access = 0u;
+    r->heap_offset = 0u; /* S3: shared-heap placement */
+    endRecord();
+    return true;
+  }
+
+  uint64_t MtlWireContext::ensureTextureCreated(const Rc<MtlTexture>& image) {
+    if (image == nullptr)
+      return 0u;
+    if (image->wireId)
+      return image->wireId;
+    /* All driver textures are MtlTextureImpl (device + presenter); its
+     * `info` member is the ORIGINAL MtlImageCreateInfo (MtlUsage bits +
+     * cube), which the record mirrors. */
+    auto* impl = static_cast<MtlTextureImpl*>(image.ptr());
+    auto* r = beginRecord<d9mt_wire_rec_create_texture>(d9mt_wire_op_create_texture);
+    if (!r)
+      return 0u;
+    image->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    r->wire_id = image->wireId;
+    r->client_handle = image->texture.tex;
+    r->type = uint32_t(impl->info.type);
+    r->format = uint32_t(impl->info.format != MtlFormat::Invalid
+      ? impl->info.format : image->info().format);
+    r->width = impl->info.extent.width ? impl->info.extent.width
+                                       : image->info().extent.width;
+    r->height = impl->info.extent.height ? impl->info.extent.height
+                                         : image->info().extent.height;
+    r->depth = impl->info.extent.depth ? impl->info.extent.depth : 1u;
+    r->mip_levels = impl->info.mipLevels;
+    r->array_layers = impl->info.arrayLayers;
+    r->sample_count = impl->info.sampleCount;
+    r->usage = uint32_t(impl->info.usage);
+    r->cube = impl->info.cube ? 1u : 0u;
+    endRecord();
+    return image->wireId;
+  }
+
+  void MtlWireContext::ensureShaderCreated(const Rc<MtlShaderFunction>& fn) {
+    if (fn == nullptr || fn->wireId)
+      return;
+    if (!m_active || fn->wireMetallib.empty()) {
+      /* transport dead (or nothing to send): drop the byte copy for good */
+      std::vector<uint8_t>().swap(fn->wireMetallib);
+      return;
+    }
+    const std::vector<uint8_t>& bytes = fn->wireMetallib;
+    const uint64_t id = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    const uint32_t abCount = uint32_t(fn->abWords.size());
+    uint64_t off = 0u;
+    bool ok = true;
+    while (off < bytes.size()) {
+      const uint32_t chunk = bytes.size() - off > kShaderChunkBytes
+        ? kShaderChunkBytes : uint32_t(bytes.size() - off);
+      const uint32_t abBytes = off == 0u ? ((abCount * 2u + 7u) & ~7u) : 0u;
+      auto* r = beginRecord<d9mt_wire_rec_create_shader>(
+        d9mt_wire_op_create_shader, abBytes + ((chunk + 7u) & ~7u));
+      if (!r) {
+        ok = false;
+        break;
+      }
+      r->wire_id = id;
+      r->client_handle = fn->library;
+      r->stage = uint32_t(fn->stage);
+      r->ab = fn->abWords.empty() ? 0u : 1u;
+      r->total_size = bytes.size();
+      r->chunk_offset = off;
+      r->chunk_size = chunk;
+      r->ab_word_count = off == 0u ? abCount : 0u;
+      r->ab_table_index = fn->abTableIndex;
+      std::memcpy(r->cbv_slot_map, fn->cbvSlotMap.data(), 8u);
+      const char* entry = fn->entryName ? fn->entryName : "main";
+      std::strncpy(r->entry, entry, sizeof(r->entry) - 1u);
+      auto* tail = reinterpret_cast<uint8_t*>(r + 1);
+      if (off == 0u) {
+        for (uint32_t i = 0u; i < abCount; i++) {
+          tail[i * 2u]      = uint8_t(fn->abWords[i].kind);
+          tail[i * 2u + 1u] = fn->abWords[i].reg;
+        }
+      }
+      std::memcpy(tail + abBytes, bytes.data() + off, chunk);
+      endRecord();
+      off += chunk;
+    }
+    if (ok)
+      fn->wireId = id;
+    std::vector<uint8_t>().swap(fn->wireMetallib);
+  }
+
+  void MtlWireContext::ensureSamplerCreated(const Rc<MtlSamplerState>& sampler) {
+    if (sampler == nullptr || sampler->wireId)
+      return;
+    auto* impl = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
+    auto* r = beginRecord<d9mt_wire_rec_create_sampler>(d9mt_wire_op_create_sampler);
+    if (!r)
+      return;
+    sampler->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    r->wire_id = sampler->wireId;
+    r->client_handle = sampler->sampler;
+    r->mag_filter = uint32_t(impl->key.magFilter);
+    r->min_filter = uint32_t(impl->key.minFilter);
+    r->mip_mode = uint32_t(impl->key.mipMode);
+    r->address_u = uint32_t(impl->key.addressU);
+    r->address_v = uint32_t(impl->key.addressV);
+    r->address_w = uint32_t(impl->key.addressW);
+    r->max_anisotropy = impl->key.maxAnisotropy;
+    r->mip_lod_bias = impl->key.mipLodBias;
+    r->min_lod = impl->key.minLod;
+    r->max_lod = impl->key.maxLod;
+    r->compare_op = uint32_t(impl->key.compareOp);
+    r->compare_enable = impl->key.compareEnable ? 1u : 0u;
+    r->border_color = uint32_t(impl->key.borderColor);
+    endRecord();
+  }
+
   /* --- lifecycle / submission (cold: forward only) ------------------------- */
 
   void MtlWireContext::beginRecording() {
@@ -244,6 +439,20 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::synchronizeWsi(MtlPresenterSync sync) {
+    /* S2: THE present marker. One presentFrame per present, carrying the
+     * client's monotonic serial + the backbuffer image's wire id; the server
+     * commits its frame, publishes {slot, serial} in status v2 and rotates
+     * its IOSurface slot. Emitted BEFORE the forward so the server sees the
+     * frame boundary at the same stream position the client executes it. */
+    if (m_active) {
+      Rc<MtlTexture> bb = currentBackbuffer();
+      uint64_t bbId = bb != nullptr ? ensureTextureCreated(bb) : 0u;
+      if (auto* r = beginRecord<d9mt_wire_rec_present_frame>(d9mt_wire_op_present_frame)) {
+        r->frame_serial = ++m_presentSerial;
+        r->backbuffer_wire_id = bbId;
+        endRecord();
+      }
+    }
     m_inner->synchronizeWsi(sync);
   }
 
@@ -258,6 +467,11 @@ namespace dxvk::backend {
   /* --- shaders & pipeline state -------------------------------------------- */
 
   void MtlWireContext::bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) {
+    /* S2: first bind emits the chunked create_shader (metallib bytes +
+     * cbvSlotMap/abWords metadata, all final by bind time) and frees the
+     * client-side byte copy either way. */
+    if (fn != nullptr && m_ring != nullptr)
+      ensureShaderCreated(fn);
     if (auto* r = beginRecord<d9mt_wire_rec_bind_shader>(d9mt_wire_op_bind_shader)) {
       r->stage = uint32_t(stage);
       r->library = fn != nullptr ? fn->library : 0u;
@@ -426,6 +640,8 @@ namespace dxvk::backend {
   /* --- slot-based argument-table binding ------------------------------------ */
 
   void MtlWireContext::bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) {
+    if (m_active)
+      ensureBufferCreated(slice);
     if (auto* r = beginRecord<d9mt_wire_rec_bind_vertex_buffer>(d9mt_wire_op_bind_vertex_buffer)) {
       r->binding = binding;
       r->stride = stride;
@@ -447,6 +663,8 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) {
+    if (m_active)
+      ensureBufferCreated(slice);
     if (auto* r = beginRecord<d9mt_wire_rec_bind_index_buffer>(d9mt_wire_op_bind_index_buffer)) {
       fillBufferRef(r->buf, slice);
       r->index_type = uint32_t(type);
@@ -456,6 +674,8 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::bindUniformBuffer(MtlStageMask stages, uint32_t slot, MtlBufferSlice&& slice) {
+    if (m_active)
+      ensureBufferCreated(slice);
     if (auto* r = beginRecord<d9mt_wire_rec_bind_uniform_buffer>(d9mt_wire_op_bind_uniform_buffer)) {
       r->stages = stages;
       r->slot = slot;
@@ -496,6 +716,8 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) {
+    if (m_active && sampler != nullptr)
+      ensureSamplerCreated(sampler);
     if (auto* r = beginRecord<d9mt_wire_rec_bind_sampler>(d9mt_wire_op_bind_sampler)) {
       r->stages = stages;
       r->slot = slot;
@@ -529,6 +751,38 @@ namespace dxvk::backend {
       r->feedback_loop = feedbackLoop;
       endRecord();
     }
+
+    /* S2 twin (op 30): attachments named by IMAGE wire id so the server can
+     * resolve them; the client's backbuffer is flagged for IOSurface
+     * substitution. Creates emit first (ensureTextureCreated), so the by-id
+     * record only ever references known ids. */
+    if (m_active) {
+      Rc<MtlTexture> bb = currentBackbuffer();
+      auto fillIdRef = [&](d9mt_wire_rt_id_ref& dst, const Rc<MtlTextureView>& view) {
+        dst = d9mt_wire_rt_id_ref();
+        if (view == nullptr || view->image == nullptr)
+          return;
+        dst.image_wire_id = ensureTextureCreated(view->image);
+        if (bb != nullptr && view->image.ptr() == bb.ptr())
+          dst.flags |= D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        dst.format = uint32_t(view->key.format);
+        const MtlImageInfo& info = view->image->info();
+        dst.width = info.extent.width;
+        dst.height = info.extent.height;
+        dst.sample_count = info.sampleCount;
+        dst.base_mip = view->key.baseMip;
+        dst.base_layer = view->key.baseLayer;
+      };
+      if (auto* r = beginRecord<d9mt_wire_rec_set_render_targets_by_id>(
+            d9mt_wire_op_set_render_targets_by_id)) {
+        for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++)
+          fillIdRef(r->color[i], targets.color[i]);
+        fillIdRef(r->depth_stencil, targets.depthStencil);
+        r->feedback_loop = feedbackLoop;
+        endRecord();
+      }
+    }
+
     m_inner->bindRenderTargets(std::move(targets), feedbackLoop);
   }
 
@@ -589,6 +843,29 @@ namespace dxvk::backend {
       r->value.stencil = value.stencil;
       endRecord();
     }
+
+    /* S2 twin (op 32): clear named by IMAGE wire id (op 22 carries the view
+     * handle, which has no server identity). */
+    if (m_active && view != nullptr && view->image != nullptr) {
+      uint64_t id = ensureTextureCreated(view->image);
+      Rc<MtlTexture> bb = currentBackbuffer();
+      if (auto* r = beginRecord<d9mt_wire_rec_clear_render_target_by_id>(
+            d9mt_wire_op_clear_render_target_by_id)) {
+        r->image_wire_id = id;
+        if (bb != nullptr && view->image.ptr() == bb.ptr())
+          r->flags |= D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        r->clear_aspects = clear;
+        r->discard_aspects = discard;
+        r->value.color[0] = value.color.r;
+        r->value.color[1] = value.color.g;
+        r->value.color[2] = value.color.b;
+        r->value.color[3] = value.color.a;
+        r->value.depth = value.depth;
+        r->value.stencil = value.stencil;
+        endRecord();
+      }
+    }
+
     m_inner->clearRenderTarget(view, clear, value, discard);
   }
 
@@ -703,12 +980,49 @@ namespace dxvk::backend {
 
 }
 
+/* --- S2 cross-file wire surface (mtl_wire_emit.h) --------------------------- */
+namespace dxvk::backend::wire {
+
+  void queueDestroy(uint64_t wireId, uint64_t clientHandle) {
+    std::lock_guard<std::mutex> lock(g_destroyMutex);
+    if (g_pendingDestroys.size() >= kMaxPendingDestroys) {
+      /* nothing is draining (transport dead) — cap the queue */
+      g_pendingDestroys.clear();
+    }
+    g_pendingDestroys.emplace_back(wireId, clientHandle);
+    g_destroysPending.store(true, std::memory_order_release);
+  }
+
+  void noteBackbuffer(const Rc<MtlTexture>& image) {
+    std::lock_guard<std::mutex> lock(g_backbufferMutex);
+    g_backbuffer = image;
+  }
+
+  void presentObserved() {
+    const uint64_t local =
+      g_localPresents.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    if (!g_wireAttached.load(std::memory_order_acquire))
+      return;
+    WMTWireStats s = { };
+    WireRing_stats(&s);
+    /* S2 pacing gate: server produced frame serial >= (local serial - 1)
+     * counts as "kept pace" for this present. */
+    if (s.server_frame_serial + 1u >= local)
+      g_srvPace.fetch_add(1u, std::memory_order_relaxed);
+  }
+
+}
+
 /* --- PROF-line wire stats (declared in mtl_profiler.h) ---------------------
  * Called once per 256-frame profiler window; pulls the cumulative counters
  * via the WireRing_stats thunk and reports window deltas (decodeErr stays
  * cumulative — it must remain 0). hb is the server heartbeat delta over the
  * window (~100 Hz while the server lives; 0 = no server / dead server);
- * srvErr is the server's cumulative status error code (0 = ok). */
+ * srvErr is the server's cumulative status error code (0 = ok).
+ * S2 additions: srvFrames = presentFrame records the server EXECUTED this
+ * window (should track the local present rate); srvPace = cumulative
+ * presents where the server's frame serial was >= local-1 at present time;
+ * srvExecErr = the server's cumulative executor error count. */
 namespace dxvk::backend::prof {
 
   void wireAppendProfStats(std::string& line) {
@@ -721,7 +1035,10 @@ namespace dxvk::backend::prof {
       " stalls=", s.stalls - prev.stalls,
       " decodeErr=", s.decode_errors,
       " hb=", s.heartbeat - prev.heartbeat,
-      " srvErr=", s.server_error);
+      " srvErr=", s.server_error,
+      " srvFrames=", s.server_frames - prev.server_frames,
+      " srvPace=", g_srvPace.load(std::memory_order_relaxed),
+      " srvExecErr=", s.server_exec_errors);
     prev = s;
   }
 

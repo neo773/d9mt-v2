@@ -215,6 +215,11 @@ namespace dxvk {
     void*           mapPtr     = nullptr;   // shared-storage CPU pointer
     uint64_t        gpuAddress = 0u;
     MtlDeviceSize   size       = 0;
+    // render-server S2 identity: 0 until the CS thread's wire producer emits
+    // a create_buffer record at first wire use (MtlWireContext). Written and
+    // read on the CS thread; the destructor (any thread) only reads it —
+    // ordered by the final Rc release.
+    uint64_t        wireId     = 0u;
   };
 
   class MtlDevice;
@@ -319,6 +324,8 @@ namespace dxvk {
     MtlFormat        format         = MtlFormat::Invalid;
     MtlSize          extent         = { };
     MtlImageInfo     m_info         = { };
+    // render-server S2 identity (see MtlAllocation::wireId).
+    uint64_t         wireId         = 0u;
 
     const MtlImageInfo& info() const { return m_info; }
 
@@ -359,6 +366,8 @@ namespace dxvk {
   class MtlSamplerState : public MtlResource {
   public:
     MtlObjectHandle sampler = MtlNullHandle;   // id<MTLSamplerState> token
+    // render-server S2 identity (see MtlAllocation::wireId).
+    uint64_t        wireId  = 0u;
   };
 
 

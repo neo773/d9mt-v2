@@ -14,6 +14,7 @@
 
 #include "d3d9_window.h"
 
+#include "../backend/mtl_wire_emit.h"
 #include "../util/util_time.h"
 
 #include <cstdio>
@@ -676,6 +677,10 @@ namespace dxvk {
     Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
     Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
 
+    // render-server S2: name the backbuffer for the wire producer (the CS
+    // thread flags matching render targets + stamps presentFrame records).
+    backend::wire::noteBackbuffer(swapImage);
+
     // MSAA backbuffer: resolve into the single-sample surface and present
     // from THAT (D3D9 allows a multisampled swapchain; a raw MSAA -> drawable
     // copy is invalid in Metal and displays scrambled sample blocks).
@@ -791,6 +796,11 @@ namespace dxvk {
     m_parent->FlushCsChunk();
 
     SyncFrameLatency();
+
+    // render-server S2: AFTER the local present work — sample the server's
+    // produced-frame serial against the local present count (PROF srvFrames/
+    // srvPace; nothing visual changes in S2, the gate is frame RATE).
+    backend::wire::presentObserved();
 
     // BLIT/COPY present model (both windowed AND fullscreen): PresentImage copies
     // back buffer 0 -> the freshly-acquired CAMetalLayer drawable every frame, so

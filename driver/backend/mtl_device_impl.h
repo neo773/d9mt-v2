@@ -22,6 +22,7 @@
 #include "mtl_residency.h"
 #include "mtl_ring.h"
 #include "mtl_submission.h"
+#include "mtl_wire_emit.h"
 
 namespace dxvk::backend {
 
@@ -102,6 +103,10 @@ namespace dxvk::backend {
   public:
     WmtSampler owned;
     uint64_t   gpuResourceId = 0u;
+    /* render-server S2: the creation key, kept so the wire producer can emit
+     * create_sampler lazily at first bindSampler (the server rebuilds the
+     * sampler from the key — sampler objects have no byte payload). */
+    MtlSamplerKey key = { };
   };
 
   class MtlDeviceImpl : public MtlDevice {
@@ -212,6 +217,11 @@ namespace dxvk::backend {
    * Drawable wrappers own nothing (borrowed handle, no residencyDevice) and
    * fall through; owned textures ride the deferred-destruction queue. */
   inline MtlTextureImpl::~MtlTextureImpl() {
+    /* render-server S2: destroy queued BEFORE the Metal object can be
+     * released (deferred destruction below) — so the server-side destroy
+     * always precedes any create that reuses the handle value. */
+    if (wireId)
+      wire::queueDestroy(wireId, texture.tex);
     if (residencyDevice && owned) {
       residencyDevice->residency().allocDestroyed(
         owned.detach(), nullptr,

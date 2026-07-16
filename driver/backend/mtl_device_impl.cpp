@@ -144,6 +144,10 @@ namespace dxvk::backend {
   }
 
   MtlAllocationImpl::~MtlAllocationImpl() {
+    /* render-server S2: queue the destroy BEFORE the Metal object's
+     * (deferred) release — server-side destroy precedes any handle reuse. */
+    if (wireId)
+      wire::queueDestroy(wireId, handle.buf);
     if (residencyDevice) {
       /* Deferred destruction (mtl_residency.h invariant 3): the tracker
        * removes the set entry, releases the Metal buffer and frees the
@@ -347,6 +351,7 @@ namespace dxvk::backend {
     sampler->owned = WmtSampler::adopt(handle);
     sampler->sampler = MtlObjectHandle(handle);
     sampler->gpuResourceId = samplerInfo.gpu_resource_id;
+    sampler->key = key;   /* S2 wire: create_sampler payload at first bind */
 
     std::lock_guard<std::mutex> lock(m_samplerMutex);
     return m_samplerCache.emplace(hash, sampler).first->second;
@@ -418,6 +423,15 @@ namespace dxvk::backend {
     auto fn = new MtlShaderFunction();
     fn->stage   = stage;
     fn->library = MtlObjectHandle(library);
+    /* render-server S2: keep a copy of the metallib bytes until the first
+     * bindShader — the CS wire producer emits them as chunked create_shader
+     * records (the caller's transient buffer dies right after this call, and
+     * the shader metadata — cbvSlotMap/abWords/entryName — is only applied
+     * AFTER this returns, so emission cannot happen here). MtlWireContext
+     * frees the copy after emitting. */
+    fn->wireMetallib.assign(
+      static_cast<const uint8_t*>(metallib),
+      static_cast<const uint8_t*>(metallib) + size);
     return fn;
   }
 

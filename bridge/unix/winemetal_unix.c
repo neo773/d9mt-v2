@@ -6681,6 +6681,14 @@ _WireRing_stats(void *obj) {
   if (wire_status) {
     out->heartbeat = atomic_load_explicit(&wire_status->heartbeat, memory_order_relaxed);
     out->server_error = atomic_load_explicit(&wire_status->error, memory_order_relaxed);
+    /* status v2 (render-server S2): zero on a pre-S2 server (version==0) */
+    if (atomic_load_explicit(&wire_status->version, memory_order_acquire) >= 2u) {
+      out->server_frames = atomic_load_explicit(&wire_status->frames, memory_order_relaxed);
+      out->server_frame_serial =
+          atomic_load_explicit(&wire_status->frame_serial, memory_order_relaxed);
+      out->server_exec_errors =
+          atomic_load_explicit(&wire_status->exec_errors, memory_order_relaxed);
+    }
   }
   return STATUS_SUCCESS;
 }

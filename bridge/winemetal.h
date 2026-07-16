@@ -2566,6 +2566,10 @@ struct WMTWireStats {
   uint64_t decode_errors; /* consumer validation failures */
   uint64_t heartbeat;     /* server liveness counter (~100 Hz); 0 = no server */
   uint64_t server_error;  /* server/d9mt_status.h enum d9mt_status_error; 0 = ok */
+  /* --- render-server S2 (status v2 mirrors; 0 on a pre-S2 server) --- */
+  uint64_t server_frames;       /* presentFrame records executed */
+  uint64_t server_frame_serial; /* client serial of the last executed present */
+  uint64_t server_exec_errors;  /* executor non-fatal error count */
 };
 
 enum WMTWireAttachMode {

@@ -79,6 +79,15 @@ namespace dxvk {
     };
     uint8_t             abTableIndex = 21u;
     std::vector<AbWord> abWords;
+
+    // render-server S2: wire identity (0 until the CS wire producer emits
+    // create_shader at the first bindShader) + a client-side copy of the
+    // metallib bytes kept ONLY until that emission (the wire record needs
+    // the payload; createShaderFunction's transient buffer is gone by bind
+    // time). MtlWireContext clears it after emitting (or immediately when
+    // the transport is inactive).
+    uint64_t             wireId = 0u;
+    std::vector<uint8_t> wireMetallib;
   };
 
   class MtlCommandBuffer : public RcObject { };   // MTL4CommandBuffer
