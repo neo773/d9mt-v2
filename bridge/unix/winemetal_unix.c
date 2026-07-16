@@ -3608,6 +3608,37 @@ _MTLCommandBuffer_encodeSpatialScale(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* Metal 4 spatial scaler: descriptor shared with the MTL3 path, but the
+ * scaler object is created against an MTL4Compiler and encodes into an
+ * MTL4CommandBuffer. */
+static NTSTATUS
+_MTLDevice_newMTL4SpatialScaler(void *obj) {
+  struct unixcall_mtldevice_new_mtl4fxspatialscaler *params = obj;
+  MTLFXSpatialScalerDescriptor *desc = [[MTLFXSpatialScalerDescriptor alloc] init];
+  const struct WMTFXSpatialScalerInfo *info = params->info.ptr;
+  desc.colorTextureFormat = to_metal_pixel_format(info->color_format);
+  desc.outputTextureFormat = to_metal_pixel_format(info->output_format);
+  desc.inputWidth = info->input_width;
+  desc.inputHeight = info->input_height;
+  desc.outputWidth = info->output_width;
+  desc.outputHeight = info->output_height;
+  params->ret = (obj_handle_t)[desc newMTL4SpatialScalerWithDevice:(id<MTLDevice>)params->device
+                                                          compiler:(id<MTL4Compiler>)params->compiler];
+  [desc release];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandBuffer_encodeSpatialScale(void *obj) {
+  struct unixcall_mtl4commandbuffer_spatial_scale *params = obj;
+  id<MTL4CommandBuffer> cmdbuf = (id<MTL4CommandBuffer>)params->cmdbuf;
+  id<MTL4FXSpatialScaler> scaler = (id<MTL4FXSpatialScaler>)params->scaler;
+  scaler.colorTexture = (id<MTLTexture>)params->color;
+  scaler.outputTexture = (id<MTLTexture>)params->output;
+  [scaler encodeToCommandBuffer:cmdbuf];
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _NSString_string(void *obj) {
   struct unixcall_nsstring_string *params = obj;
@@ -6509,6 +6540,8 @@ D9MT_POOLED(_MTLDevice_sparseTileSize)
 D9MT_POOLED(_MTLDevice_supportsBCTextureCompression)
 D9MT_POOLED(_MTLDevice_supportsFXSpatialScaler)
 D9MT_POOLED(_MTLDevice_supportsFXTemporalScaler)
+D9MT_POOLED(_MTLDevice_newMTL4SpatialScaler)
+D9MT_POOLED(_MTL4CommandBuffer_encodeSpatialScale)
 D9MT_POOLED(_MTLDevice_supportsFamily)
 D9MT_POOLED(_MTLDevice_supportsPlacementSparse)
 D9MT_POOLED(_MTLDevice_supportsTextureSampleCount)
@@ -6834,6 +6867,9 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
+    &_MTLDevice_newMTL4SpatialScaler_pooled,
+    &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+
 };
 
 #ifndef DXMT_NATIVE
@@ -7061,5 +7097,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
     &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
+    &_MTLDevice_newMTL4SpatialScaler_pooled,
+    &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+
 };
 #endif

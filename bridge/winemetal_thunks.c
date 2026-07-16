@@ -1858,3 +1858,26 @@ MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcm
   WMT_MEMPTR_SET(params.cmd_head, cmd_head);
   UNIX_CALL(208, &params);
 }
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newMTL4SpatialScaler(obj_handle_t device, obj_handle_t compiler, const struct WMTFXSpatialScalerInfo *info) {
+  struct unixcall_mtldevice_new_mtl4fxspatialscaler params;
+  params.device = device;
+  params.compiler = compiler;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = NULL_OBJECT_HANDLE;
+  UNIX_CALL(209, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MTL4CommandBuffer_encodeSpatialScale(
+    obj_handle_t cmdbuf, obj_handle_t scaler, obj_handle_t color, obj_handle_t output
+) {
+  struct unixcall_mtl4commandbuffer_spatial_scale params;
+  params.cmdbuf = cmdbuf;
+  params.scaler = scaler;
+  params.color = color;
+  params.output = output;
+  UNIX_CALL(210, &params);
+}
