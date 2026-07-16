@@ -1,0 +1,19 @@
+server/HANDOFF-S2.md
+  s_68632dcad39ed7::t_b8fb127c565cc0 1-195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "e81f4a981a4aabd1f08dc0e6607e74810dc67d1f",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
