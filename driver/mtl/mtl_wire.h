@@ -150,7 +150,23 @@ enum d9mt_wire_op {
   d9mt_wire_op_draw = 23,
   d9mt_wire_op_draw_indexed = 24,
 
-  d9mt_wire_op_count = 25
+  /* --- Phase S2 (render-server executor) COLD records — APPENDED ONLY.
+   * Resource identity for S2: records carry BOTH a client-assigned monotonic
+   * u64 `wire_id` (docs/RENDER_SERVER_SPEC.md — server-side identity) AND the
+   * client-process obj_handle_t (`client_handle`) that the EXISTING hot
+   * records (bind_*, buffer_refs) reference — the server resolves hot-record
+   * references through client_handle and by-id records (destroy /
+   * setRenderTargetsById / presentFrame) through wire_id. */
+  d9mt_wire_op_create_buffer = 25,
+  d9mt_wire_op_create_texture = 26,
+  d9mt_wire_op_create_shader = 27,
+  d9mt_wire_op_create_sampler = 28,
+  d9mt_wire_op_destroy_resource = 29,
+  d9mt_wire_op_set_render_targets_by_id = 30,
+  d9mt_wire_op_present_frame = 31,
+  d9mt_wire_op_clear_render_target_by_id = 32,
+
+  d9mt_wire_op_count = 33
 };
 
 /* --- record header -------------------------------------------------------
@@ -461,5 +477,159 @@ struct d9mt_wire_rec_draw_indexed {
   uint32_t _pad0;
 };
 D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_draw_indexed) == 16);
+
+/* --- Phase S2 cold records (opcodes 25..32) --------------------------------
+ * Emitted lazily on the CS thread at first wire USE of a resource (binds /
+ * render-target binds), except destroy_resource which is queued from
+ * arbitrary-thread destructors and drained CS-side before the next record —
+ * so a create always precedes any reference and a destroy always follows the
+ * last one. S2: NO buffer/texture CONTENT crosses (server buffers are
+ * zero-filled, textures empty); constants ride push_data payloads. */
+
+/* client_handle = the obj_handle_t of the backing id<MTLBuffer> — the value
+ * d9mt_wire_buffer_ref.buffer carries. One record per PHYSICAL backing
+ * (Discard renames mint a new backing = a new record).
+ * heap_offset: S3 shared-heap placement; always 0 in S2 (reserved). */
+struct d9mt_wire_rec_create_buffer {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint64_t size;
+  uint32_t usage;      /* MtlUsage bits (informational) */
+  uint32_t cpu_access; /* MtlCpuAccess (informational; server allocates private) */
+  uint64_t heap_offset;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_create_buffer) == 48);
+
+/* client_handle = obj_handle_t of the id<MTLTexture> (MtlTextureHandle.tex).
+ * POD mirror of MtlImageCreateInfo. */
+struct d9mt_wire_rec_create_texture {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint32_t type;   /* MtlImageType */
+  uint32_t format; /* MtlFormat (== WMTPixelFormat == MTLPixelFormat value) */
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t mip_levels;
+  uint32_t array_layers;
+  uint32_t sample_count;
+  uint32_t usage; /* MtlUsage bits */
+  uint32_t cube;  /* bool */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_create_texture) == 64);
+
+/* client_handle = obj_handle_t of the id<MTLLibrary> — the value
+ * d9mt_wire_rec_bind_shader.library carries. metallib byte streams exceed the
+ * uint16 record size, so the payload is CHUNKED: each record carries
+ * [chunk_offset, chunk_offset+chunk_size) of total_size; the server creates
+ * the library once the last byte lands. Trailing payload layout:
+ *   chunk_offset == 0: ab_word_count AB words (2 bytes each: u8 kind per
+ *     MtlShaderFunction::AbWordKind, u8 reg), padded to 8, THEN chunk_size
+ *     metallib bytes;
+ *   chunk_offset  > 0: chunk_size metallib bytes only.
+ * cbv_slot_map: MtlShaderFunction::cbvSlotMap (-1 = undeclared); for AB
+ * shaders (ab_word_count > 0) values are AB word indices. */
+struct d9mt_wire_rec_create_shader {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint32_t stage; /* MtlShaderStage */
+  uint32_t ab;    /* bool: argument-buffer binding model */
+  uint64_t total_size;
+  uint64_t chunk_offset;
+  uint32_t chunk_size;
+  uint32_t ab_word_count;
+  uint32_t ab_table_index;
+  uint32_t _pad0;
+  int8_t cbv_slot_map[8];
+  char entry[32]; /* NUL-terminated AIR entry point */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_create_shader) == 104);
+
+/* client_handle = obj_handle_t of the id<MTLSamplerState> — the value
+ * d9mt_wire_rec_bind_sampler.sampler carries. POD mirror of MtlSamplerKey. */
+struct d9mt_wire_rec_create_sampler {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+  uint32_t mag_filter;
+  uint32_t min_filter;
+  uint32_t mip_mode;
+  uint32_t address_u;
+  uint32_t address_v;
+  uint32_t address_w;
+  uint32_t max_anisotropy;
+  float mip_lod_bias;
+  float min_lod;
+  float max_lod;
+  uint32_t compare_op;
+  uint32_t compare_enable;
+  uint32_t border_color;
+  uint32_t _pad0;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_create_sampler) == 80);
+
+struct d9mt_wire_rec_destroy_resource {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id;
+  uint64_t client_handle;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_destroy_resource) == 24);
+
+#define D9MT_WIRE_RT_FLAG_BACKBUFFER 0x1u /* server substitutes its IOSurface slot */
+
+/* A render-target attachment named by the IMAGE's wire_id (not the view —
+ * views have no wire identity in S2; base_mip/base_layer carry the view's
+ * subresource selection). */
+struct d9mt_wire_rt_id_ref {
+  uint64_t image_wire_id; /* 0 = unbound */
+  uint32_t flags;         /* D9MT_WIRE_RT_FLAG_* */
+  uint32_t format;        /* view format (MtlFormat) */
+  uint32_t width;
+  uint32_t height;
+  uint32_t sample_count;
+  uint32_t base_mip;
+  uint32_t base_layer;
+  uint32_t _pad0;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rt_id_ref) == 40);
+
+/* Emitted immediately after every bind_render_targets (op 10) from the same
+ * call; the S2 server executes THIS one and counts op 10. */
+struct d9mt_wire_rec_set_render_targets_by_id {
+  struct d9mt_wire_rec_hdr hdr;
+  struct d9mt_wire_rt_id_ref color[4];
+  struct d9mt_wire_rt_id_ref depth_stencil;
+  uint32_t feedback_loop;
+  uint32_t _pad0;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_set_render_targets_by_id) == 216);
+
+/* Emitted from the present path (synchronizeWsi, once per present).
+ * frame_serial is the client's monotonic present counter (1-based); the
+ * server closes the frame, commits, rotates its IOSurface slot and publishes
+ * {slot, frame_serial} in status v2 (server/d9mt_status.h). */
+struct d9mt_wire_rec_present_frame {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t frame_serial;
+  uint64_t backbuffer_wire_id; /* 0 = unknown (no present blit source seen yet) */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_present_frame) == 24);
+
+/* Emitted immediately after every clearRenderTarget record (op 22) from the
+ * same call; the S2 server executes THIS one (op 22 carries only the view
+ * handle, which has no server identity) and counts op 22. */
+struct d9mt_wire_rec_clear_render_target_by_id {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t image_wire_id;
+  uint32_t flags; /* D9MT_WIRE_RT_FLAG_* */
+  uint32_t clear_aspects;
+  uint32_t discard_aspects;
+  uint32_t _pad0;
+  struct d9mt_wire_clear_value value;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_render_target_by_id) == 56);
 
 #endif /* D9MT_MTL_WIRE_H */

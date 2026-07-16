@@ -27,6 +27,21 @@
  *   offset  36  u32      _pad0
  *   offset  40  u32[8]   iosurface_id      IOSurfaceID per swapchain slot (0 = empty)
  *   offset  72  u64[8]   iosurface_serial  generation/frame serial per slot
+ *
+ * --- v2 (render-server Phase S2, ADDITIVE — first 136 bytes unchanged) ----
+ *   offset 136  u32      version           2 (release-stored by the server at
+ *                                          boot, before epoch; 0 = pre-S2 server)
+ *   offset 140  u32      present_slot      IOSurface slot of the LAST presented
+ *                                          frame (valid once frames > 0)
+ *   offset 144  u64      frame_serial      client present serial of the last
+ *                                          executed presentFrame record
+ *   offset 152  u64      frames            presentFrame records executed
+ *   offset 160  u64      encoders          MTL4 render encoders opened
+ *   offset 168  u64      draws_executed    draws encoded into a pass
+ *   offset 176  u64      draws_skipped     draws dropped (no PSO/shader/target)
+ *   offset 184  u64      psos_built        MTL4Compiler pipeline builds
+ *   offset 192  u64      exec_errors       non-fatal executor errors (never
+ *                                          crashes the stream; see executor.mm)
  */
 
 #ifdef __cplusplus
@@ -60,6 +75,8 @@ enum d9mt_status_error {
   d9mt_status_err_clear_verify = 5  /* GPU clear readback mismatch */
 };
 
+#define D9MT_STATUS_VERSION 2u
+
 struct d9mt_status {
   d9mt_status_au64 epoch;            /*   0 */
   d9mt_status_au64 heartbeat;        /*   8 */
@@ -69,9 +86,19 @@ struct d9mt_status {
   uint32_t _pad0;                    /*  36 */
   d9mt_status_au32 iosurface_id[D9MT_STATUS_SLOTS];     /* 40 */
   d9mt_status_au64 iosurface_serial[D9MT_STATUS_SLOTS]; /* 72 */
+  /* --- v2 (Phase S2) --- */
+  d9mt_status_au32 version;          /* 136 */
+  d9mt_status_au32 present_slot;     /* 140 */
+  d9mt_status_au64 frame_serial;     /* 144 */
+  d9mt_status_au64 frames;           /* 152 */
+  d9mt_status_au64 encoders;         /* 160 */
+  d9mt_status_au64 draws_executed;   /* 168 */
+  d9mt_status_au64 draws_skipped;    /* 176 */
+  d9mt_status_au64 psos_built;       /* 184 */
+  d9mt_status_au64 exec_errors;      /* 192 */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 136);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 200);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -79,5 +106,14 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, completed_serial) == 24);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, error) == 32);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, iosurface_id) == 40);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, iosurface_serial) == 72);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, version) == 136);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, present_slot) == 140);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, frame_serial) == 144);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, frames) == 152);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, encoders) == 160);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_executed) == 168);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_skipped) == 176);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, psos_built) == 184);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, exec_errors) == 192);
 
 #endif /* D9MT_SERVER_STATUS_H */
