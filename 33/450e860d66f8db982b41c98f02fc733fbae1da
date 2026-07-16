@@ -1,0 +1,58 @@
+bridge/winemetal_thunks.c
+  s_9dc0f2092159a8::t_9073b6c4140ce8 1887-1888,1892-1893,1895,1897-1898
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_71a86ba930aa2a 1157-1192
+  s_9dc0f2092159a8::t_f6bcfd9b57ba12 21-22
+  s_9dc0f2092159a8::t_ff7fa696e5d1a5 130-140,144-147,152-159
+  s_9dc0f2092159a8::t_13e20370fb69be 203-208
+  s_9dc0f2092159a8::t_0522015ffa8bfa 30-44
+  s_9dc0f2092159a8::t_4743eb1c510713 84-106
+  s_9dc0f2092159a8::t_b775ae34eab603 175-176
+  s_9dc0f2092159a8::t_bf81fcdc2c3dc8 240,254-258
+  s_9dc0f2092159a8::t_029afe3baf9ab1 381-384,400,402-408,412-530
+  s_9dc0f2092159a8::t_1f849482b96e3b 869-875,887-892,904-909,922-931,943-950,966-969
+  s_9dc0f2092159a8::t_7ebb47bcbe3af8 1362-1365
+  s_9dc0f2092159a8::t_ad38c4071e2d80 160,1228-1246,1252-1258
+  s_9dc0f2092159a8::t_6f5afbef0a3560 219-225,231,238-239,241-253,261-263
+  s_9dc0f2092159a8::t_08ae585fb59d23 161
+  s_9dc0f2092159a8::t_ec1db25737b195 531
+server/d9mt_status.h
+  s_9dc0f2092159a8::t_17af4083a060ab 89
+  s_9dc0f2092159a8::t_1acbe60df9bcf4 134-137
+  s_9dc0f2092159a8::t_a07ec44faeb2ca 110-114,117
+  s_9dc0f2092159a8::t_89d61453982b8b 45-55
+bridge/winemetal.h
+  s_9dc0f2092159a8::t_e188cb3923427e 2573-2578
+  s_9dc0f2092159a8::t_d8519cfcf643f5 2590-2604
+bridge/winemetal_thunks.h
+  s_9dc0f2092159a8::t_d2cba5feb418dd 612-614,616
+bridge/unix/winemetal_unix.c
+  s_9dc0f2092159a8::t_6d457d0519631c 6688,6690-6692
+  s_9dc0f2092159a8::t_4317692b760eb3 6612-6643
+  s_9dc0f2092159a8::t_6629220fc4e861 6733-6734,6741-6751
+  s_9dc0f2092159a8::t_5f181063f6585d 6451-6452,6458
+  s_9dc0f2092159a8::t_75dbec068fd9d9 6525-6528,6539-6540,6543-6544,6547-6552
+driver/mtl/mtl_wire.h
+  s_9dc0f2092159a8::t_6645137f4ba470 169-177
+  s_9dc0f2092159a8::t_c0c82901549d9d 643-749
+driver/backend/mtl_wire_context.h
+  s_9dc0f2092159a8::t_d7ec5ba1f34c84 200,206-217
+  s_9dc0f2092159a8::t_b643318a8529ac 158-182
+  s_9dc0f2092159a8::t_d13d5bbe7ec5a9 218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "33450e860d66f8db982b41c98f02fc733fbae1da",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
