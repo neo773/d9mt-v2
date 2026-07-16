@@ -1,0 +1,19 @@
+server/README.md
+  s_68632dcad39ed7::t_7abcffd2634f81 1-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "5e76bf4dbef0427b15fde6755d890d2ec27daf9f",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
