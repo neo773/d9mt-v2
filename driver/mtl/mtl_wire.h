@@ -35,10 +35,16 @@
  * anywhere; the consumer dereferences nothing in Phase 1.
  *
  * ---------------------------------------------------------------------------
- * RING (single producer = PE CS thread, single consumer = unix wire thread)
+ * RING (single producer = PE CS thread, single consumer = d9mt-serverd, the
+ * native arm64 render-server process — docs/RENDER_SERVER_SPEC.md Phase S1)
  *
- * Memory is ONE PE allocation handed across via WireRing_attach(base, bytes):
+ * Memory is ONE page-aligned PE region handed across via
+ * WireRing_attach(base, bytes):
  *   [ struct d9mt_wire_ring (192 B control block) ][ data: capacity bytes ]
+ * The unix side relocates it into the MAP_SHARED file $TMPDIR/d9mt-<pid>/ring
+ * (mmap MAP_FIXED over the same VA) and spawns the server; when no server is
+ * available it stays plain memory with NO consumer and the producer's
+ * ring-full degradation applies (stalls -> permanent forward-only).
  * capacity is a power of two. head/tail are FREE-RUNNING byte counters
  * (never wrapped); a cursor's ring index is (cursor & (capacity-1)).
  *
@@ -58,21 +64,19 @@
  * consumer advances tail by (capacity - (tail & mask)) — the pad record's
  * size field is ignored (the skip can exceed uint16).
  *
- * KICK / PARK PROTOCOL (no lost wakeups):
- *   - The consumer parks on a pthread condvar. Before parking it takes the
- *     wire mutex and RE-CHECKS head != tail (and !shutdown) under the lock.
- *   - The producer calls WireRing_kick() — which takes the same mutex and
- *     signals — ONLY on the empty->nonempty transition: at record-write
- *     time it sampled tail == previous head (consumer had drained
- *     everything). Any record published after the consumer's locked
- *     re-check therefore came with a kick; any record published before is
- *     seen by the re-check. Over-kicking (consumer still draining) is
- *     harmless.
- *   - SHUTDOWN: PE sets ring->shutdown = 1 (release) and kicks; the
- *     consumer drains what remains, publishes tail, sets consumer_exited=1
- *     (release) and returns. The PE side waits (bounded) for
- *     consumer_exited before freeing the ring memory, and leaks the ring
- *     on timeout rather than freeing under a live consumer.
+ * KICK / PARK PROTOCOL:
+ *   - S1: the cross-process consumer parks on a 1 ms poll (no kick channel
+ *     over the process boundary yet — server/README.md caveats), so
+ *     WireRing_kick() is currently a no-op. The producer still calls it
+ *     ONLY on the empty->nonempty transition (at record-write time it
+ *     sampled tail == previous head), keeping the protocol intact for the
+ *     S2 kick channel (pipe/kqueue/futex).
+ *   - SHUTDOWN: PE writes the Detach record, sets ring->shutdown = 1
+ *     (release) and kicks; the server drains what remains, publishes tail
+ *     (mirrored into status.progress), sets consumer_exited=1 (release) and
+ *     exits. The PE side then calls WireRing_detach() — bounded < 1 s: wait
+ *     <=500 ms for the drain, SIGTERM + reap the server if still alive,
+ *     unlink the shm dir — and only after that releases the ring region.
  * ---------------------------------------------------------------------------
  */
 

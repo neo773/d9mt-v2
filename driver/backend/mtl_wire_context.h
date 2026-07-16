@@ -139,7 +139,10 @@ namespace dxvk::backend {
 
     Rc<MtlContext> m_inner;
 
-    /* ring (only the claiming instance has these non-null) */
+    /* ring (only the claiming instance has these non-null). m_ringMem is a
+     * page-aligned VirtualAlloc region; WireRing_attach maps the MAP_SHARED
+     * `ring` file over it (render-server Phase S1) or leaves it plain
+     * memory when no server could be spawned (m_hasConsumer = false). */
     uint8_t*        m_ringMem = nullptr;
     d9mt_wire_ring* m_ring    = nullptr;
     uint8_t*        m_data    = nullptr;
@@ -147,6 +150,7 @@ namespace dxvk::backend {
     uint64_t        m_head    = 0u;    /* local producer cursor mirror */
     bool            m_active  = false; /* serializing */
     bool            m_kick    = false; /* empty->nonempty seen for the pending record */
+    bool            m_hasConsumer = false; /* d9mt-serverd is draining the ring */
     uint32_t        m_pending = 0u;    /* bytes reserved by beginRecord */
 
     /* Reserves size = sizeof(T) + trailing, 8-aligned, contiguous, zeroed,

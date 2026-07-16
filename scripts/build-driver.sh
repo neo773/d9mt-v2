@@ -452,3 +452,17 @@ else
 fi
 
 echo "=== [driver] build OK ==="
+
+# --- render server (Phase S1, docs/RENDER_SERVER_SPEC.md "Build") -----------
+# NON-FATAL by design: the driver build result above must not change on
+# machines without the server tree or when the server build/test gate fails.
+if [ -d "$V2/server" ] && [ -f "$V2/scripts/build-server.sh" ]; then
+  echo "=== [driver] render server (non-fatal) ==="
+  if bash "$V2/scripts/build-server.sh"; then
+    echo "=== [driver] render server build OK ==="
+  else
+    echo "WARNING: build-server.sh failed (non-fatal; driver build unaffected)" >&2
+  fi
+else
+  echo "[driver] server/ not present; skipping render-server build"
+fi

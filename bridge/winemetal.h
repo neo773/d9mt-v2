@@ -2552,11 +2552,11 @@ struct wmtcmd_mtl4_barrier {
 WINEMETAL_API void MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head);
 
 /* ===================================================================== *
- * d9mt wire transport (native-backend Phase 1, codes 211..213).
- * A PE-allocated SPSC ring (layout: driver/mtl/mtl_wire.h) carries the
- * serialized MtlContext call stream to a native consumer thread that
- * decodes/validates/counts it (echo mode). The consumer NEVER dereferences
- * pointer-valued record fields.
+ * d9mt wire transport (render-server Phase S1, codes 211..214).
+ * An SPSC ring (layout: driver/mtl/mtl_wire.h) carries the serialized
+ * MtlContext call stream to the native arm64 render server `d9mt-serverd`
+ * (docs/RENDER_SERVER_SPEC.md), which decodes/validates/counts it (echo
+ * mode). The consumer NEVER dereferences pointer-valued record fields.
  * ===================================================================== */
 
 struct WMTWireStats {
@@ -2564,18 +2564,40 @@ struct WMTWireStats {
   uint64_t bytes;         /* record bytes consumed */
   uint64_t stalls;        /* producer ring-full spin episodes */
   uint64_t decode_errors; /* consumer validation failures */
+  uint64_t heartbeat;     /* server liveness counter (~100 Hz); 0 = no server */
+  uint64_t server_error;  /* server/d9mt_status.h enum d9mt_status_error; 0 = ok */
 };
 
-/* Hands the PE-allocated ring (control block + data, see mtl_wire.h) to the
- * unix side and starts the consumer thread. Call once. */
-WINEMETAL_API void WireRing_attach(void *base, uint64_t bytes);
+enum WMTWireAttachMode {
+  WMTWireAttachFailed = 0, /* no transport at all: caller releases the region */
+  WMTWireAttachServer = 1, /* ring relocated into shm; d9mt-serverd consuming */
+  WMTWireAttachLocal = 2,  /* no server: plain memory with NO consumer, ever —
+                            * the producer's ring-full degradation applies */
+};
 
-/* Wakes the parked consumer. Call ONLY on the empty->nonempty transition
- * (producer sampled tail == previous head when appending); see the kick/park
- * protocol in mtl_wire.h. */
+/* Relocates the PE-VirtualAlloc'd, page-aligned ring region (control block +
+ * data, see mtl_wire.h) into a MAP_SHARED file mapped MAP_FIXED over the SAME
+ * address, creates the shm dir ($TMPDIR/d9mt-<pid>/: `ring` + `status`),
+ * spawns d9mt-serverd and waits <=3 s for its epoch. Returns the attach mode
+ * (enum WMTWireAttachMode). The pointer stays valid in every mode; on
+ * WMTWireAttachFailed the caller must release it, otherwise it releases it
+ * only AFTER WireRing_detach. Call once. */
+WINEMETAL_API uint32_t WireRing_attach(void *base, uint64_t bytes);
+
+/* Producer's empty->nonempty notification (tail == previous head sampled at
+ * append; see mtl_wire.h). S1: a no-op — the server parks on a 1 ms poll and
+ * the local fallback has no consumer — kept so the producer protocol is
+ * unchanged when an S2 kick channel lands. */
 WINEMETAL_API void WireRing_kick(void);
 
-/* Snapshot of the transport counters (cumulative since attach). */
+/* Snapshot of the transport counters (cumulative since attach) plus the
+ * server heartbeat/error from the status block (zero when no server). */
 WINEMETAL_API void WireRing_stats(struct WMTWireStats *out);
+
+/* Teardown, bounded < 1 s: waits <=500 ms for the server to drain
+ * (consumer_exited / progress == head), SIGTERMs + reaps it if still alive,
+ * unlinks the shm dir. Call AFTER writing the Detach record + shutdown flag
+ * and BEFORE releasing the ring region. */
+WINEMETAL_API void WireRing_detach(void);
 
 #endif

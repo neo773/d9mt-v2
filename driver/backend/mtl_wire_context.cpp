@@ -40,27 +40,45 @@ namespace dxvk::backend {
       return;
     }
 
+    /* Page-aligned region (VirtualAlloc, not new[]): the unix side of
+     * WireRing_attach relocates it into a MAP_SHARED `ring` file mapped
+     * MAP_FIXED over this exact VA — the pointer stays valid for this
+     * (possibly 32-bit) PE process while the arm64 server maps the same
+     * file. See docs/RENDER_SERVER_SPEC.md, Phase S1. */
     const uint64_t total = sizeof(d9mt_wire_ring) + WireRingCapacity;
-    m_ringMem = new (std::nothrow) uint8_t[total];
+    m_ringMem = static_cast<uint8_t*>(::VirtualAlloc(nullptr, SIZE_T(total),
+      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!m_ringMem) {
       Logger::err("MtlWireContext: ring allocation failed, forwarding only");
       return;
     }
 
-    std::memset(m_ringMem, 0, sizeof(d9mt_wire_ring));
+    const uint32_t mode = WireRing_attach(m_ringMem, total);
+    if (mode == WMTWireAttachFailed) {
+      ::VirtualFree(m_ringMem, 0, MEM_RELEASE);
+      m_ringMem = nullptr;
+      Logger::err("MtlWireContext: wire attach failed, forwarding only");
+      return;
+    }
+
+    /* The unix side initialized the control block (in the shm file or, on
+     * fallback, in this plain region). The producer code is identical in
+     * both modes. */
     m_ring = reinterpret_cast<d9mt_wire_ring*>(m_ringMem);
-    m_ring->magic = D9MT_WIRE_RING_MAGIC;
-    m_ring->capacity = WireRingCapacity;
-    m_ring->data_offset = sizeof(d9mt_wire_ring);
     m_data = m_ringMem + sizeof(d9mt_wire_ring);
     m_cap = WireRingCapacity;
     m_head = 0u;
     m_active = true;
+    m_hasConsumer = mode == WMTWireAttachServer;
 
-    WireRing_attach(m_ringMem, total);
     g_wireAttached.store(true, std::memory_order_release);
-    Logger::info(str::format("MtlWireContext: wire transport attached, ring=",
-      WireRingCapacity >> 20, " MiB (echo mode)"));
+    if (m_hasConsumer) {
+      Logger::info(str::format("MtlWireContext: render server attached, shm ring=",
+        WireRingCapacity >> 20, " MiB (echo mode)"));
+    } else {
+      Logger::warn(str::format("MtlWireContext: no render server, local ring=",
+        WireRingCapacity >> 20, " MiB with no consumer (disables on first ring-full)"));
+    }
   }
 
   MtlWireContext::~MtlWireContext() {
@@ -74,21 +92,13 @@ namespace dxvk::backend {
     m_ring->shutdown.store(1u, std::memory_order_release);
     WireRing_kick();
 
-    /* Bounded wait for the consumer to publish its exit; on timeout the
-     * ring memory is deliberately LEAKED — freeing under a live consumer
-     * thread is a use-after-free at process teardown. */
-    bool exited = false;
-    for (uint32_t i = 0u; i < 2000u; i++) {
-      if (m_ring->consumer_exited.load(std::memory_order_acquire)) {
-        exited = true;
-        break;
-      }
-      ::Sleep(1);
-    }
-    if (exited)
-      delete[] m_ringMem;
-    else
-      Logger::warn("MtlWireContext: consumer did not exit, leaking ring");
+    /* Unix side, bounded < 1 s: waits <=500 ms for the server to drain
+     * (consumer_exited / progress == head), SIGTERMs + reaps it if still
+     * alive, unlinks the shm dir. Only after that is the region released —
+     * its munmap drops the last reference to the unlinked ring file. */
+    g_wireAttached.store(false, std::memory_order_release);
+    WireRing_detach();
+    ::VirtualFree(m_ringMem, 0, MEM_RELEASE);
     m_ringMem = nullptr;
     m_ring = nullptr;
     m_active = false;
@@ -106,6 +116,15 @@ namespace dxvk::backend {
      * bounded wait so a dead consumer degrades to forward-only instead of
      * hanging the CS thread. */
     m_ring->stalls.fetch_add(1u, std::memory_order_relaxed);
+
+    /* No server attached (WMTWireAttachLocal): nothing will EVER consume, so
+     * a full ring is final — degrade to forward-only immediately instead of
+     * spinning out the bound. */
+    if (!m_hasConsumer) {
+      Logger::warn("MtlWireContext: ring full with no consumer, disabling wire transport");
+      m_active = false;
+      return false;
+    }
     WireRing_kick();
 
     for (uint32_t spin = 0u; spin < (1u << 20); spin++) {
@@ -687,7 +706,9 @@ namespace dxvk::backend {
 /* --- PROF-line wire stats (declared in mtl_profiler.h) ---------------------
  * Called once per 256-frame profiler window; pulls the cumulative counters
  * via the WireRing_stats thunk and reports window deltas (decodeErr stays
- * cumulative — it must remain 0). */
+ * cumulative — it must remain 0). hb is the server heartbeat delta over the
+ * window (~100 Hz while the server lives; 0 = no server / dead server);
+ * srvErr is the server's cumulative status error code (0 = ok). */
 namespace dxvk::backend::prof {
 
   void wireAppendProfStats(std::string& line) {
@@ -698,7 +719,9 @@ namespace dxvk::backend::prof {
     line += str::format(" | wire: rec=", s.records - prev.records,
       " bytes=", s.bytes - prev.bytes,
       " stalls=", s.stalls - prev.stalls,
-      " decodeErr=", s.decode_errors);
+      " decodeErr=", s.decode_errors,
+      " hb=", s.heartbeat - prev.heartbeat,
+      " srvErr=", s.server_error);
     prev = s;
   }
 

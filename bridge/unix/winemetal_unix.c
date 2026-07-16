@@ -6408,119 +6408,260 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- d9mt wire transport consumer (native-backend Phase 1) --------------- *
- * The PE side serializes every MtlContext call into a PE-allocated SPSC
- * ring (layout + kick/park protocol: driver/mtl/mtl_wire.h). This thread
- * decodes, validates and counts the records, publishes progress through
- * ring->tail, and DISCARDS the content — Phase 1 proves the transport under
- * a real game while the PE side still executes everything locally.
+/* --- d9mt wire transport client (render-server Phase S1) ----------------- *
+ * docs/RENDER_SERVER_SPEC.md. The PE side serializes every hot MtlContext
+ * call into an SPSC ring (layout: driver/mtl/mtl_wire.h). Since Phase S1 the
+ * ring no longer lives on the heap with an in-process consumer thread:
+ * WireRing_attach relocates it into a MAP_SHARED file and posix_spawns the
+ * native arm64 helper `d9mt-serverd` (server/), which consumes the records
+ * cross-process and publishes progress/heartbeat/error through a second
+ * shared `status` file (server/d9mt_status.h).
  *
- * Rules (NATIVE_BACKEND_PLAN "Native thread rules"):
- *   - never call into PE code or wine internals; pure memory work here,
- *   - pointer-valued record fields are OPAQUE PE addresses: NEVER deref,
- *   - owns its own autorelease pool (none of this drains through a caller),
- *   - parks on its own condvar; WireRing_kick signals it. */
+ * Address-space contract: the PE producer is 32-bit-capable (i686 d3d9.dll),
+ * so the ring must stay at a PE-visible VA. The PE side VirtualAllocs the
+ * ring region and passes it in; this side maps the ring FILE over that exact
+ * region with mmap(MAP_SHARED|MAP_FIXED) — same pointer, now file-backed.
+ * The existing producer code writes into shared memory unchanged.
+ *
+ * Shared dir: $TMPDIR/d9mt-<pid>/ with files `ring` (192 B control block +
+ * capacity) and `status` (136 B), created here, unlinked at detach.
+ *
+ * MANDATORY FALLBACK: if the server binary is missing, spawn fails, or
+ * epoch!=1 within 3 s, ONE warn line is logged, the files are unlinked, the
+ * region is restored to plain anonymous memory and the attach reports
+ * WMTWireAttachLocal: a ring with NO consumer, ever. The PE producer's
+ * ring-full degradation (stalls counter -> permanent forward-only) keeps the
+ * driver working exactly as before. */
 
-static pthread_mutex_t wire_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t wire_cond = PTHREAD_COND_INITIALIZER;
-static struct d9mt_wire_ring *wire_ring; /* PE VA; valid on this side (wmtcmd precedent) */
-static pthread_t wire_thread;
-static uint64_t wire_op_counts[d9mt_wire_op_count];
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include "../../server/d9mt_status.h"
 
-static void *
-wire_consumer_main(void *arg) {
-  struct d9mt_wire_ring *ring = arg;
-  uint8_t *data = (uint8_t *)ring + ring->data_offset;
-  const uint64_t cap = ring->capacity;
-  uint64_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
+extern char **environ;
 
-  for (;;) {
-    /* Park. The kick takes wire_lock before signaling and the producer only
-     * skips the kick when it saw tail != previous head (still draining), so
-     * re-checking head under the lock closes the lost-wakeup window. */
-    pthread_mutex_lock(&wire_lock);
-    while (atomic_load_explicit(&ring->head, memory_order_acquire) == tail &&
-           !atomic_load_explicit(&ring->shutdown, memory_order_acquire))
-      pthread_cond_wait(&wire_cond, &wire_lock);
-    pthread_mutex_unlock(&wire_lock);
+static struct d9mt_wire_ring *wire_ring; /* PE VA: shm-mapped (server) or PE anon (local) */
+static uint64_t wire_ring_total;         /* control block + capacity, bytes */
+static struct d9mt_status *wire_status;  /* unix-side mapping of the status file */
+static pid_t wire_server_pid;
+static uint32_t wire_mode; /* enum WMTWireAttachMode */
+static char wire_dir[PATH_MAX];
+static char wire_ring_path[PATH_MAX];
+static char wire_status_path[PATH_MAX];
 
-    @autoreleasepool {
-      uint64_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
-      while (tail != head) {
-        uint64_t idx = tail & (cap - 1u);
-        const struct d9mt_wire_rec_hdr *hdr = (const struct d9mt_wire_rec_hdr *)(data + idx);
-        if (hdr->opcode == d9mt_wire_op_pad) {
-          /* skip-to-ring-end marker; its size field is ignored by contract */
-          tail += cap - idx;
-        } else if (hdr->opcode >= d9mt_wire_op_count || hdr->size < sizeof(*hdr) ||
-                   (hdr->size & 7u) || (uint64_t)hdr->size > cap - idx ||
-                   head - tail < (uint64_t)hdr->size) {
-          /* A malformed stream cannot be resynced (lengths chain the walk):
-           * count it and drop everything up to the published head. */
-          atomic_fetch_add_explicit(&ring->decode_errors, 1, memory_order_relaxed);
-          tail = head;
-        } else {
-          wire_op_counts[hdr->opcode] += 1;
-          atomic_fetch_add_explicit(&ring->records, 1, memory_order_relaxed);
-          atomic_fetch_add_explicit(&ring->bytes, hdr->size, memory_order_relaxed);
-          /* Phase 1: content validated for framing only, then discarded. */
-          tail += hdr->size;
-        }
-        /* Publish per record: releases ring space promptly and doubles as
-         * the PE-readable progress counter. */
-        atomic_store_explicit(&ring->tail, tail, memory_order_release);
-      }
-    }
+static uint64_t
+wire_now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 
-    if (atomic_load_explicit(&ring->shutdown, memory_order_acquire) &&
-        atomic_load_explicit(&ring->head, memory_order_acquire) == tail)
-      break;
+static void
+wire_init_header(struct d9mt_wire_ring *ring, uint64_t capacity) {
+  memset(ring, 0, sizeof(*ring));
+  ring->magic = D9MT_WIRE_RING_MAGIC;
+  ring->capacity = capacity;
+  ring->data_offset = sizeof(*ring);
+}
+
+/* Server binary resolution order (RENDER_SERVER_SPEC + task brief):
+ *   1. $D9MT_SERVERD_PATH (dev trees)
+ *   2. next to winemetal.so (dladdr on this function)
+ *   3. /usr/local/lib/d9mt/d9mt-serverd
+ * Returns the source tag of the first executable candidate, NULL if none. */
+static const char *
+wire_find_serverd(char out[PATH_MAX]) {
+  const char *env = getenv("D9MT_SERVERD_PATH");
+  if (env && *env) {
+    snprintf(out, PATH_MAX, "%s", env);
+    if (access(out, X_OK) == 0)
+      return "env D9MT_SERVERD_PATH";
   }
-
-  {
-    uint64_t records = atomic_load_explicit(&ring->records, memory_order_relaxed);
-    fprintf(stderr, "[wire] consumer exit: records=%llu bytes=%llu decode_errors=%llu\n",
-            (unsigned long long)records,
-            (unsigned long long)atomic_load_explicit(&ring->bytes, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&ring->decode_errors, memory_order_relaxed));
-    for (unsigned op = 0; op < d9mt_wire_op_count; op++) {
-      if (wire_op_counts[op])
-        fprintf(stderr, "[wire]   op %3u: %llu\n", op, (unsigned long long)wire_op_counts[op]);
+  Dl_info info;
+  if (dladdr((void *)&wire_find_serverd, &info) && info.dli_fname) {
+    snprintf(out, PATH_MAX, "%s", info.dli_fname);
+    char *slash = strrchr(out, '/');
+    if (slash) {
+      snprintf(slash + 1, (size_t)(PATH_MAX - (slash + 1 - out)), "d9mt-serverd");
+      if (access(out, X_OK) == 0)
+        return "next to winemetal.so";
     }
   }
-  atomic_store_explicit(&ring->consumer_exited, 1, memory_order_release);
+  snprintf(out, PATH_MAX, "/usr/local/lib/d9mt/d9mt-serverd");
+  if (access(out, X_OK) == 0)
+    return "/usr/local/lib/d9mt";
   return NULL;
+}
+
+/* Create + size <dir>/<name>, optionally map it. When fixed_at is non-NULL
+ * the file is mapped MAP_FIXED over that region (the PE ring VA); otherwise
+ * anywhere. Returns the mapping (or NULL), path copied into out_path. */
+static void *
+wire_create_map(const char *name, size_t bytes, void *fixed_at, char out_path[PATH_MAX]) {
+  snprintf(out_path, PATH_MAX, "%s/%s", wire_dir, name);
+  int fd = open(out_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0)
+    return NULL;
+  if (ftruncate(fd, (off_t)bytes) != 0) {
+    close(fd);
+    return NULL;
+  }
+  int flags = MAP_SHARED | (fixed_at ? MAP_FIXED : 0);
+  void *p = mmap(fixed_at, bytes, PROT_READ | PROT_WRITE, flags, fd, 0);
+  close(fd); /* the mapping keeps the file alive */
+  return p == MAP_FAILED ? NULL : p;
+}
+
+/* Undo a partially-built shm setup: unlink files, drop the status mapping,
+ * restore plain anonymous memory over the PE ring region (never unmap it —
+ * the PE side owns that VA and will keep producing into it). */
+static void
+wire_teardown_shm(void *base, uint64_t total) {
+  if (wire_status) {
+    munmap(wire_status, sizeof(struct d9mt_status));
+    wire_status = NULL;
+  }
+  if (wire_ring_path[0])
+    unlink(wire_ring_path);
+  if (wire_status_path[0])
+    unlink(wire_status_path);
+  if (wire_dir[0])
+    rmdir(wire_dir);
+  wire_ring_path[0] = wire_status_path[0] = wire_dir[0] = 0;
+  if (base)
+    mmap(base, total, PROT_READ | PROT_WRITE,
+         MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
 }
 
 static NTSTATUS
 _WireRing_attach(void *obj) {
   struct unixcall_wirering_attach *params = obj;
-  struct d9mt_wire_ring *ring = params->base.ptr;
-  if (wire_ring || !ring || ring->magic != D9MT_WIRE_RING_MAGIC ||
-      ring->capacity == 0 || (ring->capacity & (ring->capacity - 1u)) ||
-      ring->data_offset != sizeof(struct d9mt_wire_ring) ||
-      params->bytes < ring->data_offset + ring->capacity) {
-    fprintf(stderr, "[wire] attach REJECTED (already attached or bad ring header)\n");
-    return STATUS_SUCCESS; /* transport disabled; PE side keeps echoing locally */
+  uint8_t *base = params->base.ptr;
+  params->mode = WMTWireAttachFailed;
+
+  const long page = sysconf(_SC_PAGESIZE);
+  const uint64_t total = params->bytes;
+  const uint64_t cap = total > sizeof(struct d9mt_wire_ring)
+                     ? total - sizeof(struct d9mt_wire_ring) : 0;
+  if (wire_ring || !base || !cap || (cap & (cap - 1u)) ||
+      ((uintptr_t)base & (uintptr_t)(page - 1))) {
+    fprintf(stderr, "[wire] attach REJECTED (already attached or bad region)\n");
+    return STATUS_SUCCESS; /* transport disabled; PE frees the region */
   }
-  wire_ring = ring;
-  if (pthread_create(&wire_thread, NULL, wire_consumer_main, ring)) {
-    fprintf(stderr, "[wire] attach: pthread_create failed\n");
-    wire_ring = NULL;
-    return STATUS_SUCCESS;
+
+  char exe[PATH_MAX];
+  const char *src = wire_find_serverd(exe);
+  if (!src) {
+    fprintf(stderr, "[wire] WARN: no d9mt-serverd (checked $D9MT_SERVERD_PATH, "
+                    "next to winemetal.so, /usr/local/lib/d9mt) — local ring, "
+                    "no consumer\n");
+    goto local;
   }
-  fprintf(stderr, "[wire] attached: capacity=%llu bytes\n", (unsigned long long)ring->capacity);
+
+  {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp)
+      tmp = "/tmp";
+    size_t len = strlen(tmp);
+    snprintf(wire_dir, sizeof(wire_dir), "%s%sd9mt-%d", tmp,
+             (len && tmp[len - 1] == '/') ? "" : "/", (int)getpid());
+  }
+  if (mkdir(wire_dir, 0700) != 0 && errno != EEXIST) {
+    fprintf(stderr, "[wire] WARN: mkdir(%s): %s — local ring, no consumer\n",
+            wire_dir, strerror(errno));
+    wire_dir[0] = 0;
+    goto local;
+  }
+
+  /* Relocate the ring: map the file over the PE region (same VA). */
+  if (wire_create_map("ring", (size_t)total, base, wire_ring_path) != base) {
+    fprintf(stderr, "[wire] WARN: ring shm map failed (%s) — local ring, no consumer\n",
+            strerror(errno));
+    wire_teardown_shm(base, total);
+    goto local;
+  }
+  wire_status = wire_create_map("status", sizeof(struct d9mt_status), NULL,
+                                wire_status_path);
+  if (!wire_status) {
+    fprintf(stderr, "[wire] WARN: status shm map failed (%s) — local ring, no consumer\n",
+            strerror(errno));
+    wire_teardown_shm(base, total);
+    goto local;
+  }
+  wire_init_header((struct d9mt_wire_ring *)base, cap);
+
+  {
+    pid_t pid = 0;
+    char *argv[3] = {exe, wire_dir, NULL};
+    int rc = posix_spawn(&pid, exe, NULL, NULL, argv, environ);
+    if (rc != 0) {
+      fprintf(stderr, "[wire] WARN: posix_spawn(%s): %s — local ring, no consumer\n",
+              exe, strerror(rc));
+      wire_teardown_shm(base, total);
+      goto local;
+    }
+
+    /* Handshake: epoch=1 is release-stored LAST by the server. 3 s budget,
+     * early-out if the child dies first. */
+    int ready = 0;
+    for (uint32_t i = 0; i < 3000u; i++) {
+      if (atomic_load_explicit(&wire_status->epoch, memory_order_acquire) == 1) {
+        ready = 1;
+        break;
+      }
+      int st;
+      if (waitpid(pid, &st, WNOHANG) == pid) {
+        pid = 0;
+        break;
+      }
+      usleep(1000);
+    }
+    if (!ready) {
+      uint32_t err = atomic_load_explicit(&wire_status->error, memory_order_acquire);
+      fprintf(stderr, "[wire] WARN: d9mt-serverd not ready in 3s (pid=%d err=%u) "
+                      "— local ring, no consumer\n", (int)pid, err);
+      if (pid) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+      }
+      wire_teardown_shm(base, total);
+      goto local;
+    }
+    wire_server_pid = pid;
+  }
+
+  wire_ring = (struct d9mt_wire_ring *)base;
+  wire_ring_total = total;
+  wire_mode = WMTWireAttachServer;
+  params->mode = WMTWireAttachServer;
+  fprintf(stderr, "[wire] render server attached: pid=%d dir=%s exe=%s (via %s) "
+                  "capacity=%llu bytes\n",
+          (int)wire_server_pid, wire_dir, exe, src, (unsigned long long)cap);
+  return STATUS_SUCCESS;
+
+local:
+  /* Mandatory fallback: plain memory, NO consumer. The producer degrades on
+   * ring-full (stalls -> permanent forward-only); driver behaves as today. */
+  wire_init_header((struct d9mt_wire_ring *)base, cap);
+  wire_ring = (struct d9mt_wire_ring *)base;
+  wire_ring_total = total;
+  wire_mode = WMTWireAttachLocal;
+  params->mode = WMTWireAttachLocal;
   return STATUS_SUCCESS;
 }
 
-/* Registered UNWRAPPED (like NSObject_retain/release): pure pthread ops,
- * no ObjC, and it sits on the empty->nonempty hot path. */
+/* Cross-process the kick has no channel yet (the server parks on a 1 ms
+ * poll — server/README.md S1 caveats), and the local fallback has no
+ * consumer at all: no-op either way. Kept registered so the producer's
+ * empty->nonempty protocol is unchanged; TODO(S2): real kick channel. */
 static NTSTATUS
 _WireRing_kick(void *obj) {
   (void)obj;
-  pthread_mutex_lock(&wire_lock);
-  pthread_cond_signal(&wire_cond);
-  pthread_mutex_unlock(&wire_lock);
   return STATUS_SUCCESS;
 }
 
@@ -6530,14 +6671,73 @@ _WireRing_stats(void *obj) {
   struct WMTWireStats *out = params->out.ptr;
   if (!out)
     return STATUS_SUCCESS;
-  if (!wire_ring) {
-    memset(out, 0, sizeof(*out));
+  memset(out, 0, sizeof(*out));
+  if (!wire_ring)
     return STATUS_SUCCESS;
-  }
   out->records = atomic_load_explicit(&wire_ring->records, memory_order_relaxed);
   out->bytes = atomic_load_explicit(&wire_ring->bytes, memory_order_relaxed);
   out->stalls = atomic_load_explicit(&wire_ring->stalls, memory_order_relaxed);
   out->decode_errors = atomic_load_explicit(&wire_ring->decode_errors, memory_order_relaxed);
+  if (wire_status) {
+    out->heartbeat = atomic_load_explicit(&wire_status->heartbeat, memory_order_relaxed);
+    out->server_error = atomic_load_explicit(&wire_status->error, memory_order_relaxed);
+  }
+  return STATUS_SUCCESS;
+}
+
+/* Teardown (PE dtor wrote the Detach record + shutdown flag first):
+ *   1. <=500 ms: wait for the server to drain (consumer_exited, or
+ *      status.progress == ring.head),
+ *   2. SIGTERM if still alive, reap with the remaining budget,
+ *   3. SIGKILL as last resort. Total bound < 1 s.
+ * Then unlink the shm files + dir. The ring VA itself is PE-owned
+ * (VirtualAlloc) and is released by the PE side AFTER this call — its munmap
+ * drops the last reference to the already-unlinked ring file. */
+static NTSTATUS
+_WireRing_detach(void *obj) {
+  (void)obj;
+  if (!wire_ring)
+    return STATUS_SUCCESS;
+  if (wire_mode == WMTWireAttachServer) {
+    const uint64_t t0 = wire_now_ms();
+    while (wire_now_ms() - t0 < 500u) {
+      if (atomic_load_explicit(&wire_ring->consumer_exited, memory_order_acquire))
+        break;
+      if (wire_status &&
+          atomic_load_explicit(&wire_status->progress, memory_order_acquire) ==
+          atomic_load_explicit(&wire_ring->head, memory_order_acquire))
+        break;
+      usleep(1000);
+    }
+    if (wire_server_pid) {
+      int st = 0;
+      pid_t r = waitpid(wire_server_pid, &st, WNOHANG);
+      if (r == 0) {
+        kill(wire_server_pid, SIGTERM);
+        while (wire_now_ms() - t0 < 950u) {
+          r = waitpid(wire_server_pid, &st, WNOHANG);
+          if (r != 0)
+            break;
+          usleep(1000);
+        }
+        if (r == 0) {
+          fprintf(stderr, "[wire] detach: serverd unresponsive, SIGKILL\n");
+          kill(wire_server_pid, SIGKILL);
+          usleep(1000);
+          waitpid(wire_server_pid, &st, WNOHANG);
+        }
+      }
+      wire_server_pid = 0;
+    }
+    fprintf(stderr, "[wire] detached: records=%llu bytes=%llu decode_errors=%llu\n",
+            (unsigned long long)atomic_load_explicit(&wire_ring->records, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&wire_ring->bytes, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&wire_ring->decode_errors, memory_order_relaxed));
+    wire_teardown_shm(NULL, 0); /* unlink files + dir, drop status mapping */
+  }
+  wire_ring = NULL;
+  wire_ring_total = 0;
+  wire_mode = WMTWireAttachFailed;
   return STATUS_SUCCESS;
 }
 
@@ -6676,8 +6876,8 @@ D9MT_POOLED(_MTLDevice_supportsFXSpatialScaler)
 D9MT_POOLED(_MTLDevice_supportsFXTemporalScaler)
 D9MT_POOLED(_MTLDevice_newMTL4SpatialScaler)
 D9MT_POOLED(_MTL4CommandBuffer_encodeSpatialScale)
-/* wire transport: attach/stats pooled for consistency; kick stays raw
- * (see _WireRing_kick comment). */
+/* wire transport: attach/stats pooled for consistency; kick and detach stay
+ * raw (pure POSIX, no ObjC — see their comments). */
 D9MT_POOLED(_WireRing_attach)
 D9MT_POOLED(_WireRing_stats)
 D9MT_POOLED(_MTLDevice_supportsFamily)
@@ -7011,6 +7211,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WireRing_attach_pooled,                                      /* 211 */
     &_WireRing_kick,                                               /* 212 */
     &_WireRing_stats_pooled,                                       /* 213 */
+    &_WireRing_detach,                                             /* 214 */
 
 };
 
@@ -7245,6 +7446,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WireRing_attach_pooled,                                      /* 211 */
     &_WireRing_kick,                                               /* 212 */
     &_WireRing_stats_pooled,                                       /* 213 */
+    &_WireRing_detach,                                             /* 214 */
 
 };
 #endif
