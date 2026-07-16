@@ -1,0 +1,53 @@
+driver/backend/mtl_context_record.cpp
+  s_68632dcad39ed7::t_c33d5694a320c7 687
+  s_68632dcad39ed7::t_ce8f67b5ba9b80 734
+  s_68632dcad39ed7::t_d2c374e080ca6b 359-361,363-369
+  s_68632dcad39ed7::t_4bb285ae861ddf 378-388
+  s_68632dcad39ed7::t_51456b9dab54b4 195-196,198
+  s_68632dcad39ed7::t_c738f1f9af6359 330-331,333
+  s_68632dcad39ed7::t_11ce3f4bbb245c 468
+  s_68632dcad39ed7::t_5b7d86f3757ca9 488
+  s_68632dcad39ed7::t_bb6fe140bc5571 767-768,770,786-787,789
+  s_68632dcad39ed7::t_3b1f6b8745dd7c 376,389,391
+  s_68632dcad39ed7::t_58fd89c6e1b1a7 370-375,377
+driver/backend/mtl_presenter_impl.cpp
+  s_68632dcad39ed7::t_54857e8ae38043 158-169,173-174
+  s_68632dcad39ed7::t_41fbb1db509f88 64-66,68-72
+driver/backend/mtl_profiler.h
+  s_68632dcad39ed7::t_2d9aca54876a06 138-144
+  s_68632dcad39ed7::t_b1684aa933fe69 69-76
+driver/backend/mtl_context_impl.h
+  s_68632dcad39ed7::t_f35f8e12b1a4c5 520-528,530,534-540
+  s_68632dcad39ed7::t_8a38195ff38f4b 529,531-533
+driver/d3d9/d3d9_swapchain.cpp
+  s_68632dcad39ed7::t_d5a5c730826240 511,516,526,529,534
+driver/backend/mtl_context_transfer.cpp
+  s_68632dcad39ed7::t_8c94c682dfdebf 95-130
+  s_68632dcad39ed7::t_95cc5617ef12d5 947-948,950
+  s_68632dcad39ed7::t_a6567c6f358463 1060-1061,1063
+  s_68632dcad39ed7::t_60574eec5f3f62 616-617,619
+  s_68632dcad39ed7::t_ea00a101dbed07 916
+  s_68632dcad39ed7::t_ac06b37d2fb796 1364-1365,1367
+  s_68632dcad39ed7::t_8b9153cf49cfd8 203-207
+  s_68632dcad39ed7::t_1a8e4e40f9d391 805-806,808
+  s_68632dcad39ed7::t_b7b67c3a0f83df 1237-1238,1240
+  s_68632dcad39ed7::t_603b3474cacc64 131
+bridge/unix/winemetal_unix.c
+  s_68632dcad39ed7::t_328241b0925405 3741-3754,3756,3760-3773
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "acc227045263fdaa9a8c7fa48320e9a23f883ec4",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
