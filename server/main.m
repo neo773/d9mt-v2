@@ -5,6 +5,9 @@
  * client (wine/x86_64) with argv[1] = the shm directory it created:
  *   <dir>/ring    d9mt_wire_ring control block + data (driver/mtl/mtl_wire.h)
  *   <dir>/status  struct d9mt_status (server/d9mt_status.h), server-written
+ *   <dir>/heap    OPTIONAL (Phase S3): d9mt_wire_heap header + bulk data —
+ *                 texture/buffer content regions (mtl_wire.h). A client
+ *                 without a heap simply never emits upload records.
  *
  * usage: d9mt-serverd <shm-dir> [width height]     (default 2992x1934)
  *
@@ -94,6 +97,23 @@ main(int argc, char **argv) {
     return 2;
   }
 
+  /* Phase S3: the shared heap is OPTIONAL (older client / heap alloc failed
+   * client-side). A bad header is treated as no-heap, not fatal — content
+   * simply never crosses and upload records (which then never arrive) would
+   * be dropped. */
+  size_t heap_bytes = 0;
+  struct d9mt_wire_heap *heap =
+      map_file(dir, "heap", sizeof(struct d9mt_wire_heap), &heap_bytes);
+  if (heap && (heap->magic != D9MT_WIRE_HEAP_MAGIC || heap->capacity == 0 ||
+               (heap->capacity & (heap->capacity - 1u)) ||
+               heap->data_offset != D9MT_WIRE_HEAP_DATA_OFFSET ||
+               heap_bytes < heap->data_offset + heap->capacity)) {
+    fprintf(stderr, "[serverd] bad heap header, running without content heap\n");
+    munmap(heap, heap_bytes);
+    heap = NULL;
+    heap_bytes = 0;
+  }
+
   /* QoS discipline (P-core-preferred): every frame-critical server thread —
    * this one runs the ring consumer AND the executor's encode work — must
    * declare USER_INTERACTIVE at start, or macOS schedules the helper like a
@@ -108,7 +128,7 @@ main(int argc, char **argv) {
      * (MTL4 stack + the GPU liveness clear + status v2 version field). */
     rc = d9mt_iosurface_pool_init(status, width, height);
     if (!rc)
-      rc = d9mt_executor_init(status);
+      rc = d9mt_executor_init(status, heap, (uint64_t)heap_bytes);
   }
   if (rc)
     return 2; /* status->error already set */

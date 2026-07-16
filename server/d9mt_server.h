@@ -40,16 +40,22 @@ id<MTLDevice> d9mt_pool_device(void);
 id<MTLTexture> d9mt_pool_texture(int slot);
 #endif
 
-/* executor.mm: the Phase S2 record executor — a native, direct-ObjC METAL 4
- * port of the driver backend's hot-loop state machine (state folding, PSO
- * cache via MTL4Compiler, argument tables, pass management, draw encoding).
- * Opaque handle; single-threaded (called only from the consumer thread).
+/* executor.mm: the Phase S2/S3 record executor — a native, direct-ObjC
+ * METAL 4 port of the driver backend's hot-loop state machine (state folding,
+ * async PSO cache via MTL4Compiler, argument tables, pass management, draw
+ * encoding, shared-heap content uploads).
+ * Opaque handle; single-threaded (called only from the consumer thread) —
+ * except PSO completion handlers and the frame-completion listener, which
+ * only touch their own entry + status atomics.
  *   init:   MTL4 queue/compiler/event setup + the IOSurface liveness clear
- *           (sets status->error + returns nonzero on failure).
+ *           (sets status->error + returns nonzero on failure). heap may be
+ *           NULL (no shared heap: uploads never arrive / are dropped);
+ *           heap_bytes is the FULL mapped file size (header + data).
  *   record: execute one wire record (never fails the stream; problems count
  *           into status v2 exec_errors / draws_skipped).
  *   finish: close any open pass/frame, commit, bounded GPU drain. */
-int d9mt_executor_init(struct d9mt_status *status);
+int d9mt_executor_init(struct d9mt_status *status, struct d9mt_wire_heap *heap,
+                       uint64_t heap_bytes);
 void d9mt_executor_record(const struct d9mt_wire_rec_hdr *hdr);
 void d9mt_executor_finish(void);
 

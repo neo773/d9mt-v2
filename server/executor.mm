@@ -1,5 +1,5 @@
 /*
- * executor.mm — d9mt-serverd Phase S2 record executor.
+ * executor.mm — d9mt-serverd Phase S2/S3 record executor.
  *
  * A native, DIRECT-ObjC METAL 4 ONLY (docs/SOURCE_OF_TRUTH.md §2) port of the
  * driver backend's hot-loop state machine (driver/backend/mtl_context_impl.h
@@ -26,8 +26,36 @@
  *  - errors NEVER kill the stream: they count into status v2
  *    exec_errors/draws_skipped and the affected work is dropped.
  *
+ * Phase S3 delta:
+ *  - ASYNC PSO builds: MTL4Compiler completion-handler tasks. The consumer
+ *    thread NEVER blocks on a compile — draws whose PSO is still in flight
+ *    are skipped and counted (status v3 draws_skipped_pending_pso) until the
+ *    handler lands the pipeline. This is what keeps ring consumption flowing
+ *    through a boot-time shader storm (the S2 sync builds stalled the ring
+ *    until the client's watchdog killed the transport).
+ *  - CONTENT crosses via the shared heap (mtl_wire.h d9mt_wire_heap):
+ *    upload_buffer/upload_texture records name heap regions; the server
+ *    memcpys the region into its upload slab ring (native arm64 copy) and
+ *    blits from the slab inside an MTL4ComputeCommandEncoder that closes
+ *    before the next render pass. NOTE a zero-copy design
+ *    (newBufferWithBytesNoCopy over the whole heap mapping) was tried and
+ *    is UNSOUND: Metal wires the pages at wrap time, when the sparse file
+ *    still resolves to zero-fill pages — client writes that fault in fresh
+ *    pagecache pages later are never seen by the GPU mapping (verified:
+ *    CPU-visible bytes, GPU blits zeros). The slab copy also frees the heap
+ *    region IMMEDIATELY: the ack generation (heap->consumed + status v3
+ *    heap_consumed) advances at record execution, no GPU tracking needed.
+ *  - texture binds resolve REAL textures: bind_texture_by_id names the image
+ *    by wire id; the dummy substitution remains only for unresolved ids and
+ *    content-less textures (undefined private storage stays unsampled).
+ *  - frame publication is GPU-completion-gated: {present_slot, frame_serial,
+ *    frames} are stored from an MTLSharedEventListener block when the
+ *    frame's serial signals — status frame_serial now means "pixels done".
+ *
  * Threading: single-threaded, called only from the consumer thread (which
- * runs at QOS_CLASS_USER_INTERACTIVE — set in main.m).
+ * runs at QOS_CLASS_USER_INTERACTIVE — set in main.m); PSO completion
+ * handlers and the frame-completion listener touch ONLY their captured
+ * entry/status atomics.
  */
 
 #import <Foundation/Foundation.h>
@@ -76,6 +104,8 @@ constexpr uint32_t kUploadSlabBytes = 2u << 20;
  * bridge casts these straight into MTLStages/MTL4VisibilityOptions, so the
  * numbers ARE the SDK values. */
 constexpr uint64_t kStageFragment = 1ull << 1;
+constexpr uint64_t kStageDispatch = 1ull << 27;
+constexpr uint64_t kStageBlit = 1ull << 28;
 constexpr uint64_t kStageAll = 0x7fffffffffffffffull;
 constexpr uint64_t kVisibilityDevice = 1ull << 0;
 
@@ -144,6 +174,15 @@ struct Shader {
   std::vector<std::pair<uint8_t, uint8_t>> abWords; /* {kind, reg} */
 };
 
+/* Texture-view cache key (bind_texture_by_id view bits). */
+struct TexViewKey {
+  uint32_t format = 0, viewType = 0;
+  uint32_t baseMip = 0, mipCount = 0, baseLayer = 0, layerCount = 0;
+  bool operator==(const TexViewKey& o) const {
+    return std::memcmp(this, &o, sizeof(o)) == 0;
+  }
+};
+
 struct Resource {
   enum Kind { KindBuffer, KindTexture, KindSampler, KindShader } kind;
   uint64_t wireId = 0;
@@ -152,6 +191,13 @@ struct Resource {
   id<MTLTexture> texture = nil;
   id<MTLSamplerState> sampler = nil;
   std::shared_ptr<Shader> shader;
+  /* S3: true once the server holds REAL bytes (heap upload landed) or the
+   * texture was rendered to server-side. Content-less private textures stay
+   * dummy-bound — their storage is undefined. */
+  bool hasContent = false;
+  /* S3: format/subresource views minted for bind_texture_by_id (small; a
+   * texture rarely has more than a couple of live view keys). */
+  std::vector<std::pair<TexViewKey, id<MTLTexture>>> views;
 };
 
 struct PendingShader {
@@ -190,6 +236,16 @@ struct PsoKeyEq {
   }
 };
 
+/* Async PSO cache entry (S3). The consumer thread creates it in state
+ * Building and kicks an MTL4Compiler completion-handler task; the handler
+ * (compiler thread) writes `pso` THEN release-stores the state. The consumer
+ * acquire-loads state before touching pso. Failed builds park at Failed
+ * forever (no retry storm — same policy as the S2 nil cache). */
+struct PsoEntry {
+  id<MTLRenderPipelineState> pso = nil;
+  std::atomic<uint32_t> state = { 0 }; /* 0 building, 1 ready, 2 failed */
+};
+
 /* --- folded state (mirrors MtlContextImpl's fold members) ------------------- */
 
 struct Stream {
@@ -208,6 +264,8 @@ struct CbvBinding {
 struct StageState {
   CbvBinding cbvs[8];
   bool texBound[kMaxTexSlots] = {};
+  /* S3: resolved REAL texture (or view) per slot; nil = dummy-bound. */
+  id<MTLTexture> textures[kMaxTexSlots] = {};
   id<MTLSamplerState> samplers[kMaxTexSlots] = {};
   uint8_t pushData[4096] = {};
   uint32_t pushExtent = 0;
@@ -253,8 +311,18 @@ struct Exec {
   id<MTL4CommandQueue> queue = nil;
   id<MTL4Compiler> compiler = nil;
   id<MTLSharedEvent> event = nil; /* completion timeline (decision 5 port) */
+  MTLSharedEventListener* listener = nil; /* S3: completion-gated publication */
   uint64_t serial = 0;            /* serial of the CURRENT recording cmdbuf */
   uint64_t lastSubmitted = 0;
+
+  /* S3 shared heap (mtl_wire.h d9mt_wire_heap): server-side mapping; upload
+   * records memcpy regions into the slab ring and blit from there (see the
+   * header comment for why zero-copy wrapping is unsound). */
+  struct d9mt_wire_heap* heap = nullptr;
+
+  /* S3 transfer encoder: open between passes for heap blits, closed (with a
+   * producer barrier) before the next render pass / submit. */
+  id<MTL4ComputeCommandEncoder> xfer = nil;
 
   id<MTL4CommandAllocator> allocators[3] = {};
   uint64_t allocSerial[3] = {};
@@ -271,6 +339,9 @@ struct Exec {
   /* GPU-lifetime keepalive for destroyed resources (deferred destruction:
    * the GPU may still read a buffer whose destroy record already arrived). */
   std::vector<std::pair<uint64_t, id>> retire;
+  /* same, for objects that never joined the residency set (texture views —
+   * their parent's allocation is the resident one). */
+  std::vector<std::pair<uint64_t, id>> retireNoRes;
 
   /* dummies: defined sampling/fetch for unresolvable binds */
   id<MTLBuffer> dummyBuffer = nil;   /* 64 KiB zeroed */
@@ -313,7 +384,7 @@ struct Exec {
   float lastBlendColor[4] = {};
 
   /* caches */
-  std::unordered_map<PsoKey, id<MTLRenderPipelineState>, PsoKeyHash, PsoKeyEq> psoCache;
+  std::unordered_map<PsoKey, std::shared_ptr<PsoEntry>, PsoKeyHash, PsoKeyEq> psoCache;
   std::unordered_map<std::string, id<MTLDepthStencilState>> dssoCache;
 
   /* argument tables (retire-by-serial ring, rotated once per pass) */
@@ -328,8 +399,6 @@ struct Exec {
 
   uint32_t presentSlot = 0;
   uint64_t backbufferWireId = 0;
-
-  bool warnedPsoFail = false;
 };
 
 Exec* g = nullptr;
@@ -388,9 +457,11 @@ static void ensureCmdbuf() {
 }
 
 static void closePass();
+static void closeXfer();
 
 static void submitFrame() {
   closePass();
+  closeXfer();
   if (!g->cmdbuf)
     return;
   [g->cmdbuf endCommandBuffer];
@@ -416,6 +487,50 @@ static void submitFrame() {
     }
   }
   g->retire.resize(w);
+  w = 0;
+  for (size_t i = 0; i < g->retireNoRes.size(); i++) {
+    if (g->retireNoRes[i].first > completed)
+      g->retireNoRes[w++] = g->retireNoRes[i];
+  }
+  g->retireNoRes.resize(w);
+}
+
+/* --- S3 transfer encoder + heap acks ----------------------------------------- */
+
+/* The slab copy detaches the GPU from the heap region, so a region is
+ * reusable the moment its record executes: publish the generation into the
+ * heap header (the producer's space check) and status v3 (observability).
+ * Generations are monotonic in stream order. */
+static void heapAck(uint64_t generation) {
+  atomic_store_explicit(&g->heap->consumed, generation, memory_order_release);
+  atomic_store_explicit(&g->status->heap_consumed, generation, memory_order_relaxed);
+}
+
+/* Open (or reuse) the between-passes MTL4ComputeCommandEncoder heap blits
+ * encode into. An active render pass closes first — upload records sit at
+ * exactly this stream position client-side too (prepareDirectEncode). */
+static id<MTL4ComputeCommandEncoder> ensureXfer() {
+  if (g->xfer)
+    return g->xfer;
+  if (g->pass.active)
+    closePass();
+  ensureCmdbuf();
+  g->xfer = [g->cmdbuf computeCommandEncoder];
+  if (!g->xfer)
+    execError("computeCommandEncoder failed");
+  return g->xfer;
+}
+
+static void closeXfer() {
+  if (!g->xfer)
+    return;
+  /* §4c producer barrier: order the blit writes ahead of every later queue
+   * stage (mirror of the client's emitProducerBarrier on transfer encoders). */
+  [g->xfer barrierAfterStages:(MTLStages)(kStageBlit | kStageDispatch)
+            beforeQueueStages:(MTLStages)kStageAll
+            visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+  [g->xfer endEncoding];
+  g->xfer = nil;
 }
 
 /* --- upload ring (push data / AB word slices) -------------------------------- */
@@ -423,6 +538,8 @@ static void submitFrame() {
 struct RingSlice {
   void* cpu = nullptr;
   uint64_t gpu = 0;
+  id<MTLBuffer> buf = nil; /* S3: blit sources need buffer + offset */
+  uint64_t off = 0;
 };
 
 static RingSlice ringAlloc(uint64_t size, uint64_t align) {
@@ -442,7 +559,7 @@ static RingSlice ringAlloc(uint64_t size, uint64_t align) {
     g->slabCursor = (g->slabCursor + scan) % g->slabs.size();
     s.used = off + size;
     s.serial = g->serial;
-    return { (uint8_t*)s.buf.contents + off, s.buf.gpuAddress + off };
+    return { (uint8_t*)s.buf.contents + off, s.buf.gpuAddress + off, s.buf, off };
   }
   uint64_t bytes = size > kUploadSlabBytes ? size : kUploadSlabBytes;
   id<MTLBuffer> buf = [g->device newBufferWithLength:bytes
@@ -458,7 +575,7 @@ static RingSlice ringAlloc(uint64_t size, uint64_t align) {
   s.serial = g->serial;
   g->slabs.push_back(s);
   g->slabCursor = g->slabs.size() - 1;
-  return { buf.contents, buf.gpuAddress };
+  return { buf.contents, buf.gpuAddress, buf, 0 };
 }
 
 /* --- argument tables (decision 3 port; rotate once per pass) ----------------- */
@@ -510,6 +627,7 @@ static void materializePass() {
   if (g->pass.active)
     return;
   ensureCmdbuf();
+  closeXfer(); /* pending heap blits must order ahead of this pass */
 
   MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
   for (uint32_t i = 0; i < 4; i++) {
@@ -603,7 +721,12 @@ static uint64_t strHash(const std::string& s) {
   return h;
 }
 
-static id<MTLRenderPipelineState> resolvePso() {
+/* S3: NEVER blocks. Cache hit returns the pipeline (nil for a failed build);
+ * a miss kicks an ASYNC MTL4Compiler task and reports pending — the caller
+ * skips the draw (counted draws_skipped_pending_pso) and retries at the next
+ * draw, keeping ring consumption flowing through compile storms. */
+static id<MTLRenderPipelineState> resolvePso(bool* pending) {
+  *pending = false;
   if (!g->vs || !g->vs->library)
     return nil;
 
@@ -659,8 +782,14 @@ static id<MTLRenderPipelineState> resolvePso() {
   key.a2c = g->msaa.alpha_to_coverage ? 1u : 0u;
 
   auto it = g->psoCache.find(key);
-  if (it != g->psoCache.end())
-    return it->second; /* may be nil: failed build cached to avoid retry storms */
+  if (it != g->psoCache.end()) {
+    const uint32_t state = it->second->state.load(std::memory_order_acquire);
+    if (state == 0) {
+      *pending = true;
+      return nil; /* compile in flight — skip, retry next draw */
+    }
+    return it->second->pso; /* nil when failed: cached to avoid retry storms */
+  }
 
   MTL4RenderPipelineDescriptor* desc = [[MTL4RenderPipelineDescriptor alloc] init];
 
@@ -719,23 +848,34 @@ static id<MTLRenderPipelineState> resolvePso() {
    * rejects that against an explicit topology class (mtl_pso_cache.cpp). */
   desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassUnspecified;
 
-  NSError* err = nil;
-  id<MTLRenderPipelineState> pso =
-      [g->compiler newRenderPipelineStateWithDescriptor:desc
-                                    compilerTaskOptions:nil
-                                                  error:&err];
-  if (pso) {
-    atomic_fetch_add_explicit(&g->status->psos_built, 1, memory_order_relaxed);
-  } else {
-    execError("pipeline build failed");
-    if (!g->warnedPsoFail) {
-      g->warnedPsoFail = true;
-      fprintf(stderr, "[serverd] first PSO failure: %s\n",
-              err ? err.localizedDescription.UTF8String : "(no error)");
+  /* ASYNC build (S3): the completion handler runs on a compiler thread and
+   * touches ONLY the entry + status atomics; the consumer thread observes
+   * the result via the acquire/release state handshake. */
+  auto entry = std::make_shared<PsoEntry>();
+  g->psoCache.emplace(key, entry);
+  atomic_fetch_add_explicit(&g->status->psos_pending, 1, memory_order_relaxed);
+  struct d9mt_status* status = g->status;
+  [g->compiler newRenderPipelineStateWithDescriptor:desc
+                                compilerTaskOptions:nil
+                                  completionHandler:^(id<MTLRenderPipelineState> pso,
+                                                      NSError* err) {
+    if (pso) {
+      entry->pso = pso;
+      entry->state.store(1, std::memory_order_release);
+      atomic_fetch_add_explicit(&status->psos_built, 1, memory_order_relaxed);
+    } else {
+      entry->state.store(2, std::memory_order_release);
+      atomic_fetch_add_explicit(&status->exec_errors, 1, memory_order_relaxed);
+      static std::atomic<bool> warned = { false };
+      bool expected = false;
+      if (warned.compare_exchange_strong(expected, true))
+        fprintf(stderr, "[serverd] first PSO failure: %s\n",
+                err ? err.localizedDescription.UTF8String : "(no error)");
     }
-  }
-  g->psoCache.emplace(key, pso); /* nil cached too */
-  return pso;
+    atomic_fetch_sub_explicit(&status->psos_pending, 1, memory_order_relaxed);
+  }];
+  *pending = true;
+  return nil;
 }
 
 /* --- depth-stencil state cache (port of getDepthStencilState) ---------------- */
@@ -822,7 +962,9 @@ static void flushBindings() {
               v = g->dummyBuffer.gpuAddress;
             break;
           case 1: /* Texture */
-            v = g->dummyTexture.gpuResourceID._impl;
+            v = (e.second < kMaxTexSlots && b.textures[e.second])
+                    ? b.textures[e.second].gpuResourceID._impl
+                    : g->dummyTexture.gpuResourceID._impl;
             break;
           case 2: /* Sampler */
             v = (e.second < kMaxTexSlots && b.samplers[e.second])
@@ -847,8 +989,10 @@ static void flushBindings() {
       [table setAddress:addr atIndex:(uint32_t)airSlot];
     }
     for (uint32_t slot = 0; slot < kMaxTexSlots; slot++) {
-      /* every slot defined: dummy for bound-but-unresolvable AND unbound */
-      [table setTexture:g->dummyTexture.gpuResourceID atIndex:slot];
+      /* every slot defined: real texture when bind_texture_by_id resolved
+       * one (S3), dummy for unresolvable AND unbound */
+      id<MTLTexture> tex = b.textures[slot] ? b.textures[slot] : g->dummyTexture;
+      [table setTexture:tex.gpuResourceID atIndex:slot];
       id<MTLSamplerState> smp = b.samplers[slot] ? b.samplers[slot] : g->dummySampler;
       [table setSamplerState:smp.gpuResourceID atIndex:slot];
     }
@@ -947,9 +1091,15 @@ static bool prepareDraw() {
 
   id<MTLRenderPipelineState> pso = nil;
   if (g->dirtyPso || !g->lastPso) {
-    pso = resolvePso();
+    bool pending = false;
+    pso = resolvePso(&pending);
     if (!pso) {
+      /* dirtyPso stays set: the next draw re-resolves (the pending compile
+       * may have landed by then). The consumer NEVER waits here. */
       atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
+      if (pending)
+        atomic_fetch_add_explicit(&g->status->draws_skipped_pending_pso, 1,
+                                  memory_order_relaxed);
       return false;
     }
     if (pso != g->lastPso) {
@@ -1176,10 +1326,164 @@ static void handleDestroy(const d9mt_wire_rec_destroy_resource* r) {
     g->retire.emplace_back(retireAfter, res->buffer);
   if (res->texture)
     g->retire.emplace_back(retireAfter, res->texture);
+  for (auto& v : res->views)
+    if (v.second)
+      g->retireNoRes.emplace_back(retireAfter, v.second);
   if (res->clientHandle)
     g->byHandle.erase(res->clientHandle);
   if (res->wireId)
     g->byWire.erase(res->wireId);
+}
+
+/* --- S3: shared-heap content uploads + real texture binds --------------------- */
+
+/* Resolve a heap region to a CPU pointer in the server's mapping. */
+static const uint8_t* heapRegion(uint64_t offset, uint64_t size) {
+  if (!g->heap || !size)
+    return nullptr;
+  const uint64_t cap = g->heap->capacity;
+  const uint64_t idx = offset & (cap - 1u);
+  if (size > cap || idx + size > cap)
+    return nullptr; /* regions never straddle the wrap by contract */
+  return (const uint8_t*)g->heap + g->heap->data_offset + idx;
+}
+
+static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
+  auto res = r->client_handle ? lookupHandle(r->client_handle) : lookupWire(r->wire_id);
+  if (!res || !res->buffer)
+    return; /* create failed / never crossed — same policy as binds */
+  const uint8_t* src = heapRegion(r->heap_offset, r->size);
+  if (!src) {
+    execError("upload_buffer: bad heap region");
+    return;
+  }
+  if (r->dst_offset + r->size > res->buffer.length) {
+    execError("upload_buffer: out of range");
+    return;
+  }
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  if (!enc)
+    return;
+  RingSlice rs = ringAlloc(r->size, 256);
+  if (!rs.cpu) {
+    execError("upload_buffer: slab alloc failed");
+    return;
+  }
+  std::memcpy(rs.cpu, src, (size_t)r->size);
+  heapAck(r->heap_generation); /* region free the moment the copy is taken */
+  [enc copyFromBuffer:rs.buf
+         sourceOffset:(NSUInteger)rs.off
+             toBuffer:res->buffer
+    destinationOffset:(NSUInteger)r->dst_offset
+                 size:(NSUInteger)r->size];
+  res->hasContent = true;
+  atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
+}
+
+static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
+  auto res = r->client_handle ? lookupHandle(r->client_handle) : lookupWire(r->wire_id);
+  if (!res || !res->texture)
+    return;
+  const uint8_t* src = heapRegion(r->heap_offset, r->data_size);
+  if (!src) {
+    execError("upload_texture: bad heap region");
+    return;
+  }
+  id<MTLTexture> tex = res->texture;
+  if (r->mip >= tex.mipmapLevelCount || r->layer >= tex.arrayLength * (tex.textureType == MTLTextureTypeCube || tex.textureType == MTLTextureTypeCubeArray ? 6 : 1)) {
+    execError("upload_texture: subresource out of range");
+    return;
+  }
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  if (!enc)
+    return;
+  RingSlice rs = ringAlloc(r->data_size, 256);
+  if (!rs.cpu) {
+    execError("upload_texture: slab alloc failed");
+    return;
+  }
+  std::memcpy(rs.cpu, src, (size_t)r->data_size);
+  heapAck(r->heap_generation);
+  MTLSize sz = MTLSizeMake(r->width ? r->width : 1, r->height ? r->height : 1,
+                           r->depth ? r->depth : 1);
+  MTLOrigin origin = MTLOriginMake(r->x, r->y, r->z);
+  [enc copyFromBuffer:rs.buf
+         sourceOffset:(NSUInteger)rs.off
+    sourceBytesPerRow:(NSUInteger)r->row_pitch
+  sourceBytesPerImage:(NSUInteger)r->slice_pitch
+           sourceSize:sz
+            toTexture:tex
+     destinationSlice:(NSUInteger)r->layer
+     destinationLevel:(NSUInteger)r->mip
+    destinationOrigin:origin];
+  res->hasContent = true;
+  atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
+}
+
+/* Resolve the bound view: the base texture when the key is trivial, else a
+ * cached newTextureViewWithPixelFormat view. Unmintable views fall back to
+ * the base texture (defined, possibly wrong-format sampling — better than
+ * the dummy for content). view_type reinterpretation (e.g. cube-as-2D) is
+ * NOT modeled beyond level/slice ranges — S3 leftover. */
+static id<MTLTexture> resolveTexView(const std::shared_ptr<Resource>& res,
+                                     const d9mt_wire_rec_bind_texture_by_id* r) {
+  id<MTLTexture> tex = res->texture;
+  MTLPixelFormat fmt = pixelFormat(r->format);
+  const NSUInteger levels = tex.mipmapLevelCount;
+  const bool cube = tex.textureType == MTLTextureTypeCube ||
+                    tex.textureType == MTLTextureTypeCubeArray;
+  const NSUInteger slices = tex.arrayLength * (cube ? 6 : 1);
+  const bool wholeMips =
+      r->base_mip == 0 && (r->mip_count == 0 || r->mip_count >= levels);
+  const bool wholeLayers =
+      r->base_layer == 0 && (r->layer_count == 0 || r->layer_count >= slices);
+  if ((fmt == tex.pixelFormat || fmt == MTLPixelFormatInvalid) && wholeMips && wholeLayers)
+    return tex;
+  if (r->base_mip >= levels || r->base_layer >= slices)
+    return tex;
+
+  TexViewKey key;
+  key.format = r->format;
+  key.viewType = r->view_type;
+  key.baseMip = r->base_mip;
+  key.mipCount = r->mip_count;
+  key.baseLayer = r->base_layer;
+  key.layerCount = r->layer_count;
+  for (auto& v : res->views)
+    if (v.first == key)
+      return v.second ? v.second : tex;
+
+  NSUInteger mipN = r->mip_count ? r->mip_count : (NSUInteger)(levels - r->base_mip);
+  if (r->base_mip + mipN > levels)
+    mipN = levels - r->base_mip;
+  NSUInteger layerN = r->layer_count ? r->layer_count : (NSUInteger)(slices - r->base_layer);
+  if (r->base_layer + layerN > slices)
+    layerN = slices - r->base_layer;
+  id<MTLTexture> view =
+      [tex newTextureViewWithPixelFormat:(fmt == MTLPixelFormatInvalid ? tex.pixelFormat : fmt)
+                             textureType:tex.textureType
+                                  levels:NSMakeRange(r->base_mip, mipN)
+                                  slices:NSMakeRange(r->base_layer, layerN)];
+  res->views.emplace_back(key, view); /* nil cached too (no retry churn) */
+  return view ? view : tex;
+}
+
+static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
+  id<MTLTexture> tex = nil;
+  if (r->image_wire_id) {
+    auto res = lookupWire(r->image_wire_id);
+    /* content gate: a wire texture with no uploads and no server-side render
+     * has UNDEFINED private storage — the dummy stays (defined sampling). */
+    if (res && res->texture && res->hasContent)
+      tex = resolveTexView(res, r);
+  }
+  for (uint32_t st = 0; st < 2; st++) {
+    if (r->stages & (1u << st) && r->slot < kMaxTexSlots) {
+      g->stages[st].textures[r->slot] = tex;
+      g->stages[st].texBound[r->slot] = r->image_wire_id != 0;
+    }
+  }
+  g->dirtyBindings = true;
 }
 
 static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id* r) {
@@ -1223,8 +1527,10 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
       return;
     }
     auto res = lookupWire(ref.image_wire_id);
-    if (res && res->texture)
+    if (res && res->texture) {
       out.tex = res->texture;
+      res->hasContent = true; /* server-side render defines the storage */
+    }
     /* unresolved: named-but-nil — draws needing it are skipped */
   };
   for (uint32_t i = 0; i < 4; i++)
@@ -1285,6 +1591,7 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
     target.format = res->texture.pixelFormat;
     target.named = true;
     target.wireId = r->image_wire_id;
+    res->hasContent = true; /* the clear defines the storage */
   }
 
   if (g->pass.active)
@@ -1315,16 +1622,37 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
 }
 
 static void handlePresent(const d9mt_wire_rec_present_frame* r) {
-  uint32_t slot = g->presentSlot;
+  const uint32_t slot = g->presentSlot;
   submitFrame();
   g->backbufferWireId = r->backbuffer_wire_id;
 
-  atomic_store_explicit(&g->status->present_slot, slot, memory_order_relaxed);
-  atomic_store_explicit(&g->status->frame_serial, r->frame_serial,
-                        memory_order_release);
-  atomic_fetch_add_explicit(&g->status->frames, 1, memory_order_relaxed);
-  atomic_store_explicit(&g->status->completed_serial, completedSerial(),
-                        memory_order_relaxed);
+  /* S3: GPU-completion-gated publication (S2 flag 3). {present_slot,
+   * frame_serial, frames} are stored ONLY once the frame's serial signals on
+   * the shared-event timeline — a client reading frame_serial == N may
+   * consume slot's IOSurface knowing the pixels are done. The listener queue
+   * is serial, and serials are registered in increasing order, so the
+   * publications stay monotonic. */
+  const uint64_t submitted = g->lastSubmitted;
+  const uint64_t frameSerial = r->frame_serial;
+  struct d9mt_status* status = g->status;
+  if (submitted && completedSerial() < submitted && g->listener) {
+    [g->event notifyListener:g->listener
+                     atValue:submitted
+                       block:^(id<MTLSharedEvent> ev, uint64_t value) {
+      (void)ev;
+      atomic_store_explicit(&status->present_slot, slot, memory_order_relaxed);
+      atomic_store_explicit(&status->completed_serial, value, memory_order_relaxed);
+      atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
+      atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
+    }];
+  } else {
+    /* nothing in flight (empty frame or already completed): publish inline */
+    atomic_store_explicit(&status->present_slot, slot, memory_order_relaxed);
+    atomic_store_explicit(&status->completed_serial, completedSerial(),
+                          memory_order_relaxed);
+    atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
+    atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
+  }
 
   g->presentSlot = (g->presentSlot + 1) % D9MT_SERVER_SURFACES;
   /* fresh frame: the pending pass carries the OLD slot's backbuffer texture;
@@ -1485,7 +1813,8 @@ static int livenessClear() {
 /* --- C ABI (d9mt_server.h) ------------------------------------------------------ */
 
 extern "C" int
-d9mt_executor_init(struct d9mt_status* status) {
+d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
+                   uint64_t heap_bytes) {
   g = new Exec();
   g->status = status;
   /* fold-state defaults MUST mirror the client's (mtl_types.h defaults) —
@@ -1520,6 +1849,19 @@ d9mt_executor_init(struct d9mt_status* status) {
                           memory_order_release);
     return 1;
   }
+  /* S3: frame-completion listener (GPU-gated status publication). The queue
+   * is frame-critical: USER_INTERACTIVE like every server thread (main.m). */
+  dispatch_queue_t lq = dispatch_queue_create(
+      "d9mt.frame-complete",
+      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+                                              QOS_CLASS_USER_INTERACTIVE, 0));
+  g->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:lq];
+
+  /* S3: content heap. CPU mapping only — upload records memcpy regions into
+   * the slab ring (see the header comment for why a whole-file
+   * newBufferWithBytesNoCopy wrap is unsound over a sparse shared file). */
+  if (heap && heap_bytes >= heap->data_offset + heap->capacity)
+    g->heap = heap;
 
   MTLResidencySetDescriptor* rdesc = [[MTLResidencySetDescriptor alloc] init];
   rdesc.initialCapacity = 256;
@@ -1600,6 +1942,17 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       break;
     case d9mt_wire_op_clear_render_target_by_id:
       handleClearById((const d9mt_wire_rec_clear_render_target_by_id*)hdr);
+      break;
+
+    /* --- S3 content / view records --- */
+    case d9mt_wire_op_upload_buffer:
+      handleUploadBuffer((const d9mt_wire_rec_upload_buffer*)hdr);
+      break;
+    case d9mt_wire_op_upload_texture:
+      handleUploadTexture((const d9mt_wire_rec_upload_texture*)hdr);
+      break;
+    case d9mt_wire_op_bind_texture_by_id:
+      handleBindTextureById((const d9mt_wire_rec_bind_texture_by_id*)hdr);
       break;
 
     /* --- hot-loop state (folded) --- */
