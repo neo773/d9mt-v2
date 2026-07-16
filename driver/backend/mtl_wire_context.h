@@ -18,9 +18,11 @@
  * transport is reverted via git, not flags.
  *
  * Threading: all MtlContext calls arrive on the CS thread (single
- * producer). Only the FIRST MtlWireContext in the process claims the ring
- * (multi-device games create several contexts); later instances forward
- * without serializing.
+ * producer). One MtlWireContext at a time claims the ring (concurrent
+ * contexts forward without serializing); destruction RELEASES the claim so
+ * the D3D9 boot pattern — throwaway caps device destroyed before the real
+ * device — re-attaches with a fresh server instead of killing the wire for
+ * the process (S3 v3).
  *
  * Phase 2 recompiles the hot-loop state machine natively against these
  * records; the Metal objects are already unix-side behind obj_handle_t, so

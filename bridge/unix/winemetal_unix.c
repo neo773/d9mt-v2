@@ -6433,6 +6433,8 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
  * ring-full degradation (stalls counter -> permanent forward-only) keeps the
  * driver working exactly as before. */
 
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -6499,6 +6501,47 @@ wire_find_serverd(char out[PATH_MAX]) {
   if (access(out, X_OK) == 0)
     return "/usr/local/lib/d9mt";
   return NULL;
+}
+
+/* S3 v3: boot-time orphan sweep. A client that dies without detach leaks
+ * its shm dir forever (nobody unlinks on a crash — the S1 flag). At attach
+ * time, unlink every $TMPDIR/d9mt-<pid>[-seq] dir whose creator pid is DEAD
+ * (kill(pid,0) => ESRCH). Skips our own pid (live re-attach dirs of THIS
+ * process were already unlinked by detach), non-numeric names (d9mt-test-*)
+ * and anything whose liveness is ambiguous (EPERM). NOT the full
+ * client-death watchdog — just the cheap boot cleanup. */
+static void
+wire_sweep_orphans(const char *tmp) {
+  DIR *d = opendir(tmp);
+  if (!d)
+    return;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strncmp(e->d_name, "d9mt-", 5) != 0)
+      continue;
+    const char *p = e->d_name + 5;
+    if (!isdigit((unsigned char)*p))
+      continue;
+    char *end = NULL;
+    long pid = strtol(p, &end, 10);
+    if (pid <= 0 || (end && *end != 0 && *end != '-'))
+      continue;
+    if ((pid_t)pid == getpid())
+      continue;
+    if (kill((pid_t)pid, 0) == 0 || errno != ESRCH)
+      continue; /* alive (or unknowable) — leave it */
+    static const char *files[] = {"ring", "status", "heap"};
+    char path[PATH_MAX];
+    for (unsigned i = 0; i < 3; i++) {
+      snprintf(path, sizeof(path), "%s/%s/%s", tmp, e->d_name, files[i]);
+      unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/%s", tmp, e->d_name);
+    if (rmdir(path) == 0)
+      fprintf(stderr, "[wire] swept orphaned shm dir %s (pid %ld dead)\n",
+              e->d_name, pid);
+  }
+  closedir(d);
 }
 
 /* Create + size <dir>/<name>, optionally map it. When fixed_at is non-NULL
@@ -6578,12 +6621,18 @@ _WireRing_attach(void *obj) {
   }
 
   {
+    /* S3 v3: attach sequence in the dir name — device churn (throwaway
+     * boot devices) re-attaches with a FRESH dir + fresh server; a stale
+     * dir from an unfinished teardown can never collide. */
+    static unsigned wire_attach_seq; /* unix side, process lifetime */
+    const unsigned seq = wire_attach_seq++;
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !*tmp)
       tmp = "/tmp";
     size_t len = strlen(tmp);
-    snprintf(wire_dir, sizeof(wire_dir), "%s%sd9mt-%d", tmp,
-             (len && tmp[len - 1] == '/') ? "" : "/", (int)getpid());
+    wire_sweep_orphans(tmp);
+    snprintf(wire_dir, sizeof(wire_dir), "%s%sd9mt-%d-%u", tmp,
+             (len && tmp[len - 1] == '/') ? "" : "/", (int)getpid(), seq);
   }
   if (mkdir(wire_dir, 0700) != 0 && errno != EEXIST) {
     fprintf(stderr, "[wire] WARN: mkdir(%s): %s — local ring, no consumer\n",

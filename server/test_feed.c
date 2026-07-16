@@ -317,6 +317,113 @@ create_file(const char *dir, const char *name, size_t bytes, void **out) {
   return 0;
 }
 
+/* S3 v3 device-churn prelude: the D3D9 boot pattern — a THROWAWAY device
+ * attaches, emits a few records, and runs the FULL client teardown (detach
+ * record, drain, unlink, dir removal) — after which the real device must be
+ * able to attach again with a fresh server and pass the complete gate. The
+ * caller (main) runs the whole existing scenario as the SECOND attach. */
+static int
+churn_prelude(const char *server_bin) {
+  const char *tmp = getenv("TMPDIR");
+  char dir[900];
+  snprintf(dir, sizeof(dir), "%s/d9mt-test-XXXXXX", tmp ? tmp : "/tmp");
+  if (!mkdtemp(dir))
+    FAIL("churn mkdtemp: %s", strerror(errno));
+
+  void *ring_mem, *status_mem, *heap_mem;
+  if (create_file(dir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP,
+                  &ring_mem) ||
+      create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
+      create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
+                  &heap_mem))
+    return 1;
+  g_ring = ring_mem;
+  g_data = (uint8_t *)ring_mem + sizeof(struct d9mt_wire_ring);
+  struct d9mt_status *status = status_mem;
+  g_heap = heap_mem;
+  g_heap_data = (uint8_t *)heap_mem + D9MT_WIRE_HEAP_DATA_OFFSET;
+
+  g_ring->capacity = RING_CAP;
+  g_ring->data_offset = sizeof(struct d9mt_wire_ring);
+  g_ring->magic = D9MT_WIRE_RING_MAGIC;
+  g_heap->capacity = HEAP_CAP;
+  g_heap->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+  g_heap->magic = D9MT_WIRE_HEAP_MAGIC;
+
+  /* a few records — the throwaway device does almost nothing */
+  for (uint32_t i = 0; i < 20; i++) {
+    struct d9mt_wire_rec_set_stencil_reference sr = {
+        {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
+    emit(&sr, sizeof(sr));
+    struct d9mt_wire_rec_set_blend_color bc = {
+        {d9mt_wire_op_set_blend_color, sizeof(bc), 0}, {1.f, 0.f, 0.f, 1.f}};
+    emit(&bc, sizeof(bc));
+  }
+  const uint64_t produced = g_head;
+
+  pid_t pid;
+  char *sargv[] = {(char *)server_bin, dir, "640", "480", NULL};
+  int rc = posix_spawn(&pid, server_bin, NULL, NULL, sargv, environ);
+  if (rc)
+    FAIL("churn posix_spawn: %s", strerror(rc));
+  for (int i = 0;; i++) {
+    if (atomic_load_explicit(&status->epoch, memory_order_acquire) == 1)
+      break;
+    int st;
+    if (waitpid(pid, &st, WNOHANG) == pid)
+      FAIL("churn: server died before ready (status 0x%x)", st);
+    if (i >= 1000)
+      FAIL("churn: timeout waiting for epoch==1");
+    usleep(10000);
+  }
+  if (wait_u64(&status->progress, produced, 5000))
+    FAIL("churn: progress stalled");
+
+  /* FULL teardown — exactly what a destroyed device does */
+  struct d9mt_wire_rec_nul detach = {{d9mt_wire_op_detach, 8, 0}};
+  emit(&detach, sizeof(detach));
+  int st = -1, exited = 0;
+  for (int i = 0; i < 500; i++) {
+    if (waitpid(pid, &st, WNOHANG) == pid) {
+      exited = 1;
+      break;
+    }
+    usleep(10000);
+  }
+  if (!exited)
+    FAIL("churn: server did not exit after detach");
+  if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+    FAIL("churn: server exit status 0x%x", st);
+  if (atomic_load_explicit(&g_ring->consumer_exited, memory_order_acquire) != 1)
+    FAIL("churn: consumer_exited not set");
+
+  char p[1024];
+  snprintf(p, sizeof(p), "%s/ring", dir);
+  unlink(p);
+  snprintf(p, sizeof(p), "%s/status", dir);
+  unlink(p);
+  snprintf(p, sizeof(p), "%s/heap", dir);
+  unlink(p);
+  rmdir(dir);
+  munmap(ring_mem, sizeof(struct d9mt_wire_ring) + RING_CAP);
+  munmap(status_mem, sizeof(struct d9mt_status));
+  munmap(heap_mem, D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP);
+
+  /* reset ALL producer state: the second attach starts from scratch */
+  g_ring = NULL;
+  g_data = NULL;
+  g_heap = NULL;
+  g_heap_data = NULL;
+  g_head = 0;
+  g_records = 0;
+  g_producer_waits = 0;
+  g_heap_head = 0;
+  g_heap_waits = 0;
+  printf("[test_feed] churn: throwaway lifecycle clean "
+         "(attach -> %u records -> full teardown, exit 0)\n", 41);
+  return 0;
+}
+
 int
 main(int argc, char **argv) {
   if (argc < 2) {
@@ -324,6 +431,12 @@ main(int argc, char **argv) {
     return 2;
   }
   const char *server_bin = argv[1];
+
+  /* 0. device churn: throwaway lifecycle first — everything below runs as
+   * the SECOND attach of this process (the real device after a caps probe) */
+  if (churn_prelude(server_bin))
+    return 1;
+  printf("[test_feed] SECOND attach: running the full gate\n");
 
   /* 1. shm dir + files */
   const char *tmp = getenv("TMPDIR");

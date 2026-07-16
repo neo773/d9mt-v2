@@ -47,7 +47,10 @@ namespace dxvk::backend {
      * the dead-server safety net stays. */
     constexpr uint32_t WireStallWindows = 5u;
 
-    /* Only one ring per process; later contexts forward without recording. */
+    /* One ring at a time; a second LIVE context forwards without recording.
+     * S3 v3: the claiming context's dtor RELEASES the claim (device churn:
+     * a throwaway boot device must not kill the wire for the process), so a
+     * later context re-attaches with a fresh server. */
     std::atomic<bool> g_wireClaimed = { false };
 
     /* True once WireRing_attach has been issued (profiler stats source). */
@@ -211,6 +214,25 @@ namespace dxvk::backend {
       m_heap = nullptr;
     }
     m_active = false;
+
+    /* S3 v3: RELEASE the claim — device churn (D3D9 boot pattern: throwaway
+     * caps device destroyed before the real device) must not kill the wire
+     * for the process. The next MtlWireContext re-attaches from scratch:
+     * fresh ring/heap regions, fresh shm dir (attach-seq suffix), fresh
+     * d9mt-serverd (<1 s boot). Cross-epoch state is cleared here: queued
+     * destroys reference resources the NEXT server never saw (its resource
+     * table starts empty), and the backbuffer Rc pins a dead device's image.
+     * Resource wireIds are per-device objects and die with the device; a
+     * (theoretical) survivor would carry a stale id and simply never resolve
+     * server-side — defined, dummy-bound. */
+    { std::lock_guard<std::mutex> lock(g_destroyMutex);
+      g_pendingDestroys.clear();
+      g_destroysPending.store(false, std::memory_order_release);
+    }
+    { std::lock_guard<std::mutex> lock(g_backbufferMutex);
+      g_backbuffer = nullptr;
+    }
+    g_wireClaimed.store(false, std::memory_order_release);
   }
 
   /* --- ring producer ------------------------------------------------------ */
@@ -1421,6 +1443,10 @@ namespace dxvk::backend::prof {
     if (g_wireAttached.load(std::memory_order_acquire))
       WireRing_stats(&s);
     static WMTWireStats prev = { };
+    /* S3 v3: a re-attach (device churn) restarts the counters — reset the
+     * delta baseline instead of printing underflowed windows */
+    if (s.records < prev.records)
+      prev = WMTWireStats();
     line += str::format(" | wire: rec=", s.records - prev.records,
       " bytes=", s.bytes - prev.bytes,
       " stalls=", s.stalls - prev.stalls,

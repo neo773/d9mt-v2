@@ -254,6 +254,56 @@ with psos_pending=0, exec_errors=0, ring stalls=0; detach acked
 - NEW: pending-upload stash keys on the IMAGE (Rc keeps it alive); a game
   that uploads once and never re-binds relies on the per-present sweep.
 
+## V3 — device churn (the throwaway boot device) + orphan sweep
+
+Real-game retest of v2 found a failure EARLIER in the timeline than the v2
+fixes: GTA IV creates a throwaway D3D9 device at boot (caps enumeration),
+destroys it, then creates its real device. The S1-era design had (a) the
+claiming MtlWireContext's dtor run FULL teardown (Detach + SIGTERM +
+unlink) and (b) a once-per-process ring claim — so the temp device's death
+killed the server cleanly and the real device could never attach (evidence:
+server exited, shm dir cleanly unlinked, zero stall warnings, game booted
+wireless).
+
+Fix (option a — release + respawn; the server boots <1 s):
+- **Claim release** (mtl_wire_context.cpp dtor): after WireRing_detach +
+  region frees, the dtor clears cross-epoch state (queued destroys — the
+  next server's resource table starts empty; the backbuffer Rc — it pins a
+  dead device's image) and release-stores `g_wireClaimed = false`. The next
+  MtlWireContext attaches from scratch: fresh VirtualAlloc regions, fresh
+  spawn. Resource wireIds are per-device objects and die with the device; a
+  theoretical survivor carries a stale id and stays dummy-bound (defined).
+- **Attach sequence dirs** (winemetal_unix.c): the shm dir is now
+  `$TMPDIR/d9mt-<pid>-<seq>` (per-process attach counter) so churn can never
+  collide with a stale dir. The unix attach/detach state machine already
+  reset all its globals on detach — re-attach worked unix-side; only the PE
+  claim and the dir name needed changing. PROF resets its delta baseline
+  when counters regress (new server = counters restart).
+- **Boot-time orphan sweep** (wire_sweep_orphans, called per attach): every
+  `$TMPDIR/d9mt-<pid>[-seq]` dir whose creator pid is DEAD (kill(pid,0) =>
+  ESRCH) gets its ring/status/heap unlinked + rmdir. Skips our own pid,
+  non-numeric names (d9mt-test-*), and EPERM-ambiguous pids. This is the
+  cheap cleanup for the v1 flag-9 leak, NOT the full client-death watchdog
+  (EVFILT_PROC remains open — a client CRASH still leaks the live server
+  process until someone attaches again and sweeps, or the ~10 Hz ring-stat
+  check fires).
+
+Gate: test_feed gained the churn prelude — attach, 41 records, FULL client
+teardown (detach record, drain wait, unlink, rmdir, exit-0 check), then the
+ENTIRE existing gate (storm + flood included) runs as the SECOND attach of
+the same process. PASSING; build-bridge PASS; full-clean build-driver PASS.
+
+V3 honest flags:
+- test_feed spawns servers itself, so the churn gate proves the SERVER's
+  second-lifecycle handling; the PE-side claim release + unix re-attach
+  sequence is compile-verified and code-reviewed (the unix globals were
+  already detach-reset) but its end-to-end proof is the next real-game run.
+- Wire ids keep growing across attaches (g_nextWireId never resets) — by
+  design, ids are meaningless to a fresh server as long as creates precede
+  uses, which the lazy create-at-first-use invariant guarantees.
+- The sweep trusts pid liveness: a pid-reused-by-another-process dir would
+  survive (kill(pid,0)==0). Bounded leak, same as before.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

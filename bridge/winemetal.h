@@ -2587,11 +2587,14 @@ enum WMTWireAttachMode {
 
 /* Relocates the PE-VirtualAlloc'd, page-aligned ring region (control block +
  * data, see mtl_wire.h) into a MAP_SHARED file mapped MAP_FIXED over the SAME
- * address, creates the shm dir ($TMPDIR/d9mt-<pid>/: `ring` + `status` +
- * `heap`), spawns d9mt-serverd and waits <=3 s for its epoch. Returns the
- * attach mode (enum WMTWireAttachMode). The pointers stay valid in every
- * mode; on WMTWireAttachFailed the caller must release them, otherwise it
- * releases them only AFTER WireRing_detach. Call once.
+ * address, creates the shm dir ($TMPDIR/d9mt-<pid>-<seq>/: `ring` +
+ * `status` + `heap`; seq = per-process attach counter — device churn
+ * re-attaches into a FRESH dir with a FRESH server), spawns d9mt-serverd
+ * and waits <=3 s for its epoch. Dead clients' leftover d9mt-* dirs are
+ * swept at attach. Returns the attach mode (enum WMTWireAttachMode). The
+ * pointers stay valid in every mode; on WMTWireAttachFailed the caller must
+ * release them, otherwise it releases them only AFTER WireRing_detach.
+ * Callable again after WireRing_detach (attach/detach pairs).
  *
  * S3 shared heap: heap_base/heap_bytes name a second page-aligned PE region
  * (d9mt_wire_heap header + data, mtl_wire.h) relocated into the sparse
