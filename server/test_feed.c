@@ -57,7 +57,7 @@
 extern char **environ;
 
 #define RING_CAP (8u << 20)
-#define HEAP_CAP (1u << 20)
+#define HEAP_CAP (8u << 20)
 #define FAIL(...)                                                              \
   do {                                                                         \
     fprintf(stderr, "FAIL: " __VA_ARGS__);                                     \
@@ -117,7 +117,13 @@ emit(const void *rec, uint16_t size) {
 }
 
 /* Heap bump allocator (mirror of the client contract: 256-aligned regions,
- * never straddling the wrap; generation = free-running END cursor). */
+ * never straddling the wrap; generation = free-running END cursor). Unlike
+ * the real client (which stashes/drops on a full heap), the test WAITS for
+ * the server's consumed ack — pushing 300 MB through an 8 MiB heap is the
+ * direct assertion that acks keep flowing under load. A bounded timeout
+ * fails loudly (acks stalled = the S3 v2 regression). */
+static uint64_t g_heap_waits; /* full-heap episodes (backpressure worked) */
+
 static uint64_t
 heap_put(const void *bytes, uint64_t size, uint64_t *gen) {
   uint64_t need = (size + 255u) & ~255ull;
@@ -125,6 +131,20 @@ heap_put(const void *bytes, uint64_t size, uint64_t *gen) {
   uint64_t idx = start & (HEAP_CAP - 1u);
   if (need > HEAP_CAP - idx)
     start += HEAP_CAP - idx;
+  for (int i = 0, waited = 0;; i++) {
+    uint64_t consumed = atomic_load_explicit(&g_heap->consumed, memory_order_acquire);
+    if (start + need - consumed <= HEAP_CAP)
+      break;
+    if (!waited) {
+      g_heap_waits++;
+      waited = 1;
+    }
+    if (i >= 15000) {
+      fprintf(stderr, "FAIL: heap ack wait timed out (server acks not flowing)\n");
+      exit(1);
+    }
+    usleep(1000);
+  }
   memcpy(g_heap_data + (start & (HEAP_CAP - 1u)), bytes, size);
   g_heap_head = start + need;
   atomic_store_explicit(&g_heap->head, g_heap_head, memory_order_release);
@@ -217,6 +237,28 @@ emit_present(uint64_t serial) {
   emit(&pf, sizeof(pf));
 }
 
+static void
+emit_upload_tex(uint64_t wire_id, uint64_t handle, uint32_t w, uint32_t h,
+                const void *bytes, uint64_t size, uint32_t row_pitch) {
+  uint64_t gen = 0;
+  uint64_t hoff = heap_put(bytes, size, &gen);
+  struct d9mt_wire_rec_upload_texture ut;
+  memset(&ut, 0, sizeof(ut));
+  ut.hdr.opcode = d9mt_wire_op_upload_texture;
+  ut.hdr.size = sizeof(ut);
+  ut.wire_id = wire_id;
+  ut.client_handle = handle;
+  ut.width = w;
+  ut.height = h;
+  ut.depth = 1;
+  ut.row_pitch = row_pitch;
+  ut.format = 80; /* BGRA8Unorm */
+  ut.heap_offset = hoff;
+  ut.heap_generation = gen;
+  ut.data_size = size;
+  emit(&ut, sizeof(ut));
+}
+
 /* Poll a status u64 until it reaches `want` (acquire). 10 ms steps. */
 static int
 wait_u64(d9mt_status_au64 *field, uint64_t want, int timeout_ms) {
@@ -226,6 +268,35 @@ wait_u64(d9mt_status_au64 *field, uint64_t want, int timeout_ms) {
     usleep(10000);
   }
   return 1;
+}
+
+/* Draw-wave convergence (async creates + async PSOs): a draw wave both
+ * PROMOTES ready libraries and KICKS pending PSO compiles — nothing lands a
+ * pipeline until a draw attempts it (real games draw every frame, so this
+ * self-heals; the test mimics that). Emits waves of one-draw pairs until a
+ * FULL wave executes. Returns waves used, or -1 on timeout. */
+static int
+draw_wave_converge(struct d9mt_status *status, uint64_t *frame,
+                   uint64_t base_handle, uint32_t pairs, int max_waves) {
+  for (int w = 1; w <= max_waves; w++) {
+    uint64_t before =
+        atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+    emit_backbuffer_rt();
+    emit_clear(0.f, 0.f, 0.f);
+    for (uint32_t i = 0; i < pairs; i++) {
+      emit_bind_shader(0, base_handle + 2 * i);
+      emit_bind_shader(1, base_handle + 2 * i + 1);
+      emit_draws(1);
+    }
+    emit_present(++*frame);
+    if (wait_u64(&status->frames, *frame, 30000))
+      return -1;
+    if (atomic_load_explicit(&status->draws_executed, memory_order_relaxed) -
+            before == pairs)
+      return w;
+    usleep(50000); /* let the create worker / compiler land more */
+  }
+  return -1;
 }
 
 static int
@@ -439,21 +510,34 @@ main(int argc, char **argv) {
     printf("[test_feed] F1: presented with %" PRIu64 " pending-PSO skips "
            "(consumer never blocked)\n", skip_pso);
 
-    if (wait_u64(&status->psos_built, 1, 30000))
-      FAIL("timeout waiting for psos_built>=1");
-    emit_backbuffer_rt();
-    emit_clear(0.f, 0.f, 1.f);
-    emit_draws(50);
-    emit_present(++frame);
-    if (wait_u64(&status->frames, frame, 15000))
-      FAIL("timeout waiting for frames>=%" PRIu64, frame);
-    uint64_t execd = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
-    if (execd < 50)
-      FAIL("draws_executed=%" PRIu64 " want >=50 after compile landed", execd);
+    /* converge: draw waves until the async library build + PSO compile land
+     * (a wave is what kicks each stage — see draw_wave_converge) */
+    int redWaves = -1;
+    for (int w = 1; w <= 30; w++) {
+      uint64_t before =
+          atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+      emit_backbuffer_rt();
+      emit_clear(0.f, 0.f, 1.f);
+      emit_draws(50);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("timeout waiting for frames>=%" PRIu64, frame);
+      if (atomic_load_explicit(&status->draws_executed, memory_order_relaxed) -
+              before == 50) {
+        redWaves = w;
+        break;
+      }
+      usleep(50000);
+    }
+    if (redWaves < 0)
+      FAIL("red draws never landed (library/PSO async pipeline stuck)");
+    if (atomic_load_explicit(&status->psos_built, memory_order_relaxed) < 1)
+      FAIL("psos_built=0 after executed draws");
     if (atomic_load_explicit(&status->frame_serial, memory_order_acquire) != frame)
       FAIL("frame_serial=%" PRIu64 " want %" PRIu64,
            (uint64_t)atomic_load_explicit(&status->frame_serial, memory_order_relaxed),
            frame);
+    uint64_t execd = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
 
     /* pixel proof, read ONCE with no poll: publication is completion-gated */
     uint32_t slot = atomic_load_explicit(&status->present_slot, memory_order_acquire);
@@ -535,23 +619,9 @@ main(int argc, char **argv) {
 
     emit_shader(102, 0xA003, 0, "vsTex", lib, lib_size);
     emit_shader(103, 0xA004, 1, "fsTex", lib, lib_size);
-    emit_bind_shader(0, 0xA003);
-    emit_bind_shader(1, 0xA004);
-    emit_backbuffer_rt();
-    emit_clear(0.f, 0.f, 0.f);
-    emit_draws(1);
-    emit_present(++frame); /* F3: warms the textured PSO */
-    if (wait_u64(&status->frames, frame, 15000))
-      FAIL("timeout waiting for frames>=%" PRIu64 " (F3)", frame);
-    if (wait_u64(&status->psos_built, 2, 30000))
-      FAIL("timeout waiting for psos_built>=2 (textured PSO)");
-
-    emit_backbuffer_rt();
-    emit_clear(0.f, 0.f, 0.f);
-    emit_draws(1);
-    emit_present(++frame); /* F4: textured quad with the PSO ready */
-    if (wait_u64(&status->frames, frame, 15000))
-      FAIL("timeout waiting for frames>=%" PRIu64 " (F4)", frame);
+    /* converge the textured quad (library build wave + PSO wave + draw) */
+    if (draw_wave_converge(status, &frame, 0xA003, 1, 30) < 0)
+      FAIL("textured draw never landed");
     if (atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) < 1)
       FAIL("uploads_executed=0 (heap upload never executed)");
 
@@ -620,9 +690,13 @@ main(int argc, char **argv) {
     printf("[test_feed] storm: frame presented while %" PRIu64 " draws skipped "
            "on in-flight compiles, producer never stalled\n", skip1 - skip0);
 
-    /* compiles drain: 64 new pipelines, none left in flight */
-    if (wait_u64(&status->psos_built, psos0 + 64, 60000))
-      FAIL("timeout: psos_built=%" PRIu64 " want %" PRIu64,
+    /* drain: converge draw waves until all 64 pairs execute in one wave —
+     * proves the skips STOP once the async creates + compiles land */
+    int stormWaves = draw_wave_converge(status, &frame, 0xC000, 64, 30);
+    if (stormWaves < 0)
+      FAIL("storm never drained (async create/compile pipeline stuck)");
+    if (atomic_load_explicit(&status->psos_built, memory_order_relaxed) < psos0 + 64)
+      FAIL("psos_built=%" PRIu64 " want >=%" PRIu64 " after full storm wave",
            (uint64_t)atomic_load_explicit(&status->psos_built, memory_order_relaxed),
            psos0 + 64);
     for (int i = 0; i < 1000; i++) {
@@ -633,32 +707,107 @@ main(int argc, char **argv) {
              (uint64_t)atomic_load_explicit(&status->psos_pending, memory_order_relaxed));
       usleep(10000);
     }
-
-    /* second wave: every pair draws for real now */
-    uint64_t exec0 = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
-    emit_backbuffer_rt();
-    emit_clear(0.f, 0.f, 0.f);
-    for (uint32_t i = 0; i < 64; i++) {
-      emit_bind_shader(0, 0xC000 + 2 * i);
-      emit_bind_shader(1, 0xC001 + 2 * i);
-      emit_draws(1);
-    }
-    emit_present(++frame);
-    if (wait_u64(&status->frames, frame, 30000))
-      FAIL("timeout waiting for frames>=%" PRIu64 " (storm wave 2)", frame);
-    uint64_t exec1 = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
-    if (exec1 - exec0 != 64)
-      FAIL("storm wave 2: draws_executed delta %" PRIu64 " want 64",
-           exec1 - exec0);
     if (atomic_load_explicit(&status->exec_errors, memory_order_relaxed))
       FAIL("exec_errors=%" PRIu64,
            (uint64_t)atomic_load_explicit(&status->exec_errors, memory_order_relaxed));
     if (atomic_load_explicit(&g_ring->stalls, memory_order_relaxed))
       FAIL("ring stalls=%" PRIu64 " (producer starved)",
            (uint64_t)atomic_load_explicit(&g_ring->stalls, memory_order_relaxed));
-    printf("[test_feed] storm: %" PRIu64 " PSOs landed async, wave 2 drew all "
-           "64, stalls=0\n",
-           (uint64_t)atomic_load_explicit(&status->psos_built, memory_order_relaxed) - psos0);
+    printf("[test_feed] storm: 64 PSOs landed async, drained in %d waves, "
+           "stalls=0\n", stormWaves);
+
+    /* --- BOOT FLOOD (S3 v2): 200 shader LIBRARIES + 300 MB of texture
+     * uploads arriving together — the real-game (GTA IV boot) profile that
+     * starved the S2/S3.0 consumer in newLibraryWithData and overran the
+     * heap. Asserts: the wire survives (producer never waits for ring
+     * space), heap acks flow (heap_put's bounded ack wait never times out
+     * while 300 MB cycles through an 8 MiB heap), frames keep presenting,
+     * and the pending-create draw skips eventually DRAIN (a final wave
+     * draws 100/100). --- */
+    uint64_t psosF = atomic_load_explicit(&status->psos_built, memory_order_relaxed);
+    uint64_t skipF =
+        atomic_load_explicit(&status->draws_skipped_pending_pso, memory_order_relaxed);
+    uint64_t uplF = atomic_load_explicit(&status->uploads_executed, memory_order_relaxed);
+
+    struct d9mt_wire_rec_create_texture ft;
+    memset(&ft, 0, sizeof(ft));
+    ft.hdr.opcode = d9mt_wire_op_create_texture;
+    ft.hdr.size = sizeof(ft);
+    ft.wire_id = 300;
+    ft.client_handle = 0xD001;
+    ft.type = 1;
+    ft.format = 80;
+    ft.width = 512;
+    ft.height = 512;
+    ft.depth = 1;
+    ft.mip_levels = 1;
+    ft.array_layers = 1;
+    ft.sample_count = 1;
+    emit(&ft, sizeof(ft));
+
+    static uint8_t megabyte[512 * 512 * 4]; /* 1 MiB BGRA source */
+    for (size_t k = 0; k < sizeof(megabyte); k++)
+      megabyte[k] = (uint8_t)(k * 2654435761u >> 24);
+
+    emit_backbuffer_rt();
+    emit_clear(0.f, 0.f, 0.f);
+    for (uint32_t i = 0; i < 100; i++) {
+      /* 2 libraries per pair x 100 = 200 libraries */
+      emit_shader(2000 + 2 * i, 0xE000 + 2 * i, 0, "vsMain", lib, lib_size);
+      emit_shader(2001 + 2 * i, 0xE001 + 2 * i, 1, "fsMain", lib, lib_size);
+      emit_bind_shader(0, 0xE000 + 2 * i);
+      emit_bind_shader(1, 0xE001 + 2 * i);
+      emit_draws(1); /* library build in flight: pending-create skip */
+      for (int j = 0; j < 3; j++) /* 3 x 1 MiB x 100 = 300 MB */
+        emit_upload_tex(300, 0xD001, 512, 512, megabyte, sizeof(megabyte), 512 * 4);
+      if (i % 10 == 9)
+        emit_present(++frame);
+    }
+    if (wait_u64(&status->frames, frame, 60000))
+      FAIL("timeout waiting for frames>=%" PRIu64 " (flood frames — consumer "
+           "starved?)", frame);
+    if (g_producer_waits)
+      FAIL("producer waited for ring space %" PRIu64 " times during the flood",
+           g_producer_waits);
+    uint64_t skipG =
+        atomic_load_explicit(&status->draws_skipped_pending_pso, memory_order_relaxed);
+    if (skipG <= skipF)
+      FAIL("no pending-create/PSO skips during the flood (%" PRIu64 " -> %" PRIu64 ")",
+           skipF, skipG);
+    if (wait_u64(&status->uploads_executed, uplF + 300, 60000))
+      FAIL("timeout: uploads_executed=%" PRIu64 " want %" PRIu64,
+           (uint64_t)atomic_load_explicit(&status->uploads_executed, memory_order_relaxed),
+           uplF + 300);
+    printf("[test_feed] flood: 200 libraries + 300 MB through an 8 MiB heap — "
+           "%" PRIu64 " full-heap waits (acks flowed), producer never ring-"
+           "stalled, %" PRIu64 " pending skips\n",
+           g_heap_waits, skipG - skipF);
+
+    /* drain: converge until every flood pair draws in one wave —
+     * draws_skipped stops growing, libraries + PSOs all landed */
+    int floodWaves = draw_wave_converge(status, &frame, 0xE000, 100, 30);
+    if (floodWaves < 0)
+      FAIL("flood never drained (create worker / compiler stuck)");
+    if (atomic_load_explicit(&status->psos_built, memory_order_relaxed) < psosF + 100)
+      FAIL("psos_built=%" PRIu64 " want >=%" PRIu64 " after full flood wave",
+           (uint64_t)atomic_load_explicit(&status->psos_built, memory_order_relaxed),
+           psosF + 100);
+    for (int i = 0; i < 1000; i++) {
+      if (atomic_load_explicit(&status->psos_pending, memory_order_relaxed) == 0)
+        break;
+      if (i == 999)
+        FAIL("psos_pending stuck at %" PRIu64,
+             (uint64_t)atomic_load_explicit(&status->psos_pending, memory_order_relaxed));
+      usleep(10000);
+    }
+    if (atomic_load_explicit(&status->exec_errors, memory_order_relaxed))
+      FAIL("exec_errors=%" PRIu64 " after flood",
+           (uint64_t)atomic_load_explicit(&status->exec_errors, memory_order_relaxed));
+    if (atomic_load_explicit(&g_ring->stalls, memory_order_relaxed))
+      FAIL("ring stalls=%" PRIu64 " after flood",
+           (uint64_t)atomic_load_explicit(&g_ring->stalls, memory_order_relaxed));
+    printf("[test_feed] flood drained in %d waves: +100 PSOs, wave drew "
+           "100/100, skips stopped growing\n", floodWaves);
   }
 
   /* 5. detach => server consumes it and exits 0 */

@@ -27,6 +27,8 @@
  * no resource-ownership migration is needed.
  */
 
+#include <vector>
+
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_wire.h"
 
@@ -180,6 +182,19 @@ namespace dxvk::backend {
     BufShadow m_uboShadow[2][8];
     BufShadow m_indexShadow;
 
+    /* S3 v2 lazy re-upload: texture content whose heap region could not be
+     * allocated (heap full during a boot flood) is stashed here — the bytes
+     * would otherwise be lost forever (staging recycles). Retried at the
+     * image's next bind_texture_by_id and once per present. Bounded by
+     * kMaxPendingUploadBytes; overflow drops for real. */
+    struct PendingTexUpload {
+      Rc<MtlTexture>              image;
+      d9mt_wire_rec_upload_texture rec; /* heap fields refreshed at retry */
+      std::vector<uint8_t>        bytes;
+    };
+    std::vector<PendingTexUpload> m_pendingTexUploads;
+    uint64_t                      m_pendingTexBytes = 0u;
+
     /* Reserves size = sizeof(T) + trailing, 8-aligned, contiguous, zeroed,
      * with hdr.opcode/size filled. Returns nullptr when the transport is
      * inactive (caller skips serialization). endRecord() publishes + kicks. */
@@ -209,9 +224,13 @@ namespace dxvk::backend {
      * cursor, the ack generation). NEVER stalls: a full heap (server behind
      * on acks) drops the upload (heap->dropped++) and returns UINT64_MAX —
      * the server keeps its previous content for that resource. */
-    uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut);
+    uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut,
+                       bool quiet = false);
     void     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
                               uint64_t dstOff, const void* src, uint64_t size);
+    void     emitUploadTextureRecord(const d9mt_wire_rec_upload_texture& fields,
+                                     uint64_t heapOff, uint64_t gen);
+    void     retryPendingTexUploads(const MtlTexture* image);
     void     emitBindTextureById(MtlStageMask stages, uint32_t slot,
                                  const Rc<MtlTextureView>& view);
     void     rebindAfterInvalidate(const Rc<MtlBuffer>& buffer);

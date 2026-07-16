@@ -73,9 +73,15 @@
 #import <Metal/MTL4LibraryFunctionDescriptor.h>
 #import <Metal/MTLResidencySet.h>
 
+#include <pthread/qos.h>
+
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -191,6 +197,12 @@ struct Resource {
   id<MTLTexture> texture = nil;
   id<MTLSamplerState> sampler = nil;
   std::shared_ptr<Shader> shader;
+  /* S3 v2: async create handshake (shader library creation runs on the
+   * create worker so the consumer never blocks in newLibraryWithData).
+   * Consumer acquire-loads before touching `shader`; the worker writes the
+   * payload THEN release-stores. Synchronously-created resources are born
+   * Ready. 0 = building, 1 = ready, 2 = failed. */
+  std::atomic<uint32_t> ready = { 1 };
   /* S3: true once the server holds REAL bytes (heap upload landed) or the
    * texture was rendered to server-side. Content-less private textures stay
    * dummy-bound — their storage is undefined. */
@@ -349,8 +361,27 @@ struct Exec {
   id<MTLSamplerState> dummySampler = nil;
   id<MTLBuffer> fanIndices = nil;
 
+  /* S3 v2: create worker — shader library creation (newLibraryWithData,
+   * milliseconds each; GTA IV boots with hundreds) off the consumer thread.
+   * The consumer only decodes + dispatches + memcpys; jobs land here and
+   * the worker publishes into Resource::ready/shader. */
+  std::thread creatWorker;
+  std::mutex creatMutex;
+  std::condition_variable creatCv;
+  struct CreateJob {
+    std::shared_ptr<Resource> res;
+    std::vector<uint8_t> bytes;
+    d9mt_wire_rec_create_shader meta;
+    std::vector<std::pair<uint8_t, uint8_t>> abWords;
+  };
+  std::deque<CreateJob> creatQueue;
+  bool creatStop = false;
+
   /* folded state */
   std::shared_ptr<Shader> vs, fs;
+  /* S3 v2: last-bound shader whose library is still building; promoted into
+   * vs/fs at draw time once ready (draws skip + count until then). */
+  std::shared_ptr<Resource> vsPend, fsPend;
   std::vector<d9mt_wire_vertex_attr> attrs;
   std::vector<d9mt_wire_vertex_layout> layouts;
   uint32_t topology = 3; /* TriangleList */
@@ -1072,7 +1103,40 @@ static void flushDynamicState() {
   [enc setDepthBias:g->depthBias[0] slopeScale:g->depthBias[1] clamp:g->depthBias[2]];
 }
 
+/* S3 v2: promote pending-create shader binds (the generalized pending-PSO
+ * pattern). Returns true while a bound shader's library is still building —
+ * the draw skips and counts, exactly like an in-flight PSO. */
+static bool promotePendingShaders() {
+  bool pending = false;
+  auto step = [&](std::shared_ptr<Resource>& pend, std::shared_ptr<Shader>& slot) {
+    if (!pend)
+      return;
+    const uint32_t state = pend->ready.load(std::memory_order_acquire);
+    if (state == 0) {
+      pending = true;
+      return;
+    }
+    if (state == 1)
+      slot = pend->shader;
+    /* failed: slot stays null (no-shader skip path) */
+    pend = nullptr;
+    g->dirtyPso = true;
+    g->dirtyBindings = true;
+  };
+  step(g->vsPend, g->vs);
+  step(g->fsPend, g->fs);
+  return pending;
+}
+
 static bool prepareDraw() {
+  if (promotePendingShaders()) {
+    /* library build in flight on the create worker — same accounting as an
+     * in-flight PSO compile (the consumer NEVER waits) */
+    atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g->status->draws_skipped_pending_pso, 1,
+                              memory_order_relaxed);
+    return false;
+  }
   if (!g->pass.pending && !g->pass.active) {
     atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
     return false;
@@ -1236,6 +1300,55 @@ static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
   registerResource(std::move(res));
 }
 
+/* S3 v2: the create worker. newLibraryWithData takes milliseconds per
+ * library and boot storms carry hundreds — running it on the consumer
+ * starved ring consumption (and heap acks) for >5 s and tripped the client
+ * watchdog in a real game. The worker builds the library + Shader payload
+ * and publishes through Resource::ready; the consumer registered the
+ * (building) resource synchronously so stream-order lookups always resolve. */
+static void createWorkerMain() {
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+  for (;;) {
+    Exec::CreateJob job;
+    {
+      std::unique_lock<std::mutex> lock(g->creatMutex);
+      g->creatCv.wait(lock, [] { return g->creatStop || !g->creatQueue.empty(); });
+      if (g->creatQueue.empty())
+        return; /* stop requested and drained */
+      job = std::move(g->creatQueue.front());
+      g->creatQueue.pop_front();
+    }
+    @autoreleasepool {
+      dispatch_data_t data = dispatch_data_create(
+          job.bytes.data(), job.bytes.size(), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+      NSError* err = nil;
+      id<MTLLibrary> lib = [g->device newLibraryWithData:data error:&err];
+      if (!lib) {
+        job.res->ready.store(2, std::memory_order_release);
+        atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
+        static std::atomic<bool> warned = { false };
+        bool expected = false;
+        if (warned.compare_exchange_strong(expected, true))
+          fprintf(stderr, "[serverd] first newLibraryWithData failure: %s\n",
+                  err ? err.localizedDescription.UTF8String : "(no error)");
+        continue;
+      }
+      auto sh = std::make_shared<Shader>();
+      sh->library = lib;
+      char entry[33] = {};
+      std::memcpy(entry, job.meta.entry, 32);
+      sh->entry = entry[0] ? entry : "main";
+      sh->stage = job.meta.stage;
+      sh->ab = job.meta.ab != 0;
+      std::memcpy(sh->cbvMap, job.meta.cbv_slot_map, 8);
+      sh->abTableIndex = job.meta.ab_table_index ? job.meta.ab_table_index : 21u;
+      sh->abWords = std::move(job.abWords);
+      job.res->shader = std::move(sh);
+      job.res->ready.store(1, std::memory_order_release);
+    }
+  }
+}
+
 static void handleCreateShader(const d9mt_wire_rec_create_shader* r) {
   PendingShader& p = g->pendingShaders[r->client_handle];
   if (r->chunk_offset == 0) {
@@ -1258,32 +1371,26 @@ static void handleCreateShader(const d9mt_wire_rec_create_shader* r) {
   if (p.received < p.meta.total_size)
     return;
 
-  dispatch_data_t data = dispatch_data_create(
-      p.bytes.data(), p.bytes.size(), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-  NSError* err = nil;
-  id<MTLLibrary> lib = [g->device newLibraryWithData:data error:&err];
-  if (!lib) {
-    execError("newLibraryWithData failed");
-    g->pendingShaders.erase(r->client_handle);
-    return;
-  }
-  auto sh = std::make_shared<Shader>();
-  sh->library = lib;
-  char entry[33] = {};
-  std::memcpy(entry, p.meta.entry, 32);
-  sh->entry = entry[0] ? entry : "main";
-  sh->stage = p.meta.stage;
-  sh->ab = p.meta.ab != 0;
-  std::memcpy(sh->cbvMap, p.meta.cbv_slot_map, 8);
-  sh->abTableIndex = p.meta.ab_table_index ? p.meta.ab_table_index : 21u;
-  sh->abWords = std::move(p.abWords);
-
+  /* all chunks in: register the resource NOW (building) so the very next
+   * bind_shader resolves it, and hand the expensive library build to the
+   * create worker. The consumer never blocks here. */
   auto res = std::make_shared<Resource>();
   res->kind = Resource::KindShader;
   res->wireId = p.meta.wire_id;
   res->clientHandle = p.meta.client_handle;
-  res->shader = std::move(sh);
-  registerResource(std::move(res));
+  res->ready.store(0, std::memory_order_relaxed);
+  registerResource(res);
+
+  Exec::CreateJob job;
+  job.res = std::move(res);
+  job.bytes = std::move(p.bytes);
+  job.meta = p.meta;
+  job.abWords = std::move(p.abWords);
+  {
+    std::lock_guard<std::mutex> lock(g->creatMutex);
+    g->creatQueue.push_back(std::move(job));
+  }
+  g->creatCv.notify_one();
   g->pendingShaders.erase(r->client_handle);
 }
 
@@ -1905,6 +2012,9 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
 
   g->argTables.push_back(makeArgTablePair());
 
+  /* S3 v2: the create worker (QoS declared inside — main.m discipline) */
+  g->creatWorker = std::thread(createWorkerMain);
+
   if (livenessClear())
     return 1;
 
@@ -1959,11 +2069,27 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
     case d9mt_wire_op_bind_shader: {
       const auto* r = (const d9mt_wire_rec_bind_shader*)hdr;
       auto res = r->library ? lookupHandle(r->library) : nullptr;
-      auto sh = res && res->kind == Resource::KindShader ? res->shader : nullptr;
-      if (r->stage == 0)
-        g->vs = sh;
-      else
-        g->fs = sh;
+      if (res && res->kind != Resource::KindShader)
+        res = nullptr;
+      std::shared_ptr<Shader> sh;
+      std::shared_ptr<Resource> pend;
+      if (res) {
+        /* S3 v2: the library may still be building on the create worker —
+         * bind the RESOURCE as pending; draws promote it once ready. */
+        const uint32_t state = res->ready.load(std::memory_order_acquire);
+        if (state == 0)
+          pend = res;
+        else if (state == 1)
+          sh = res->shader;
+        /* failed: both null — draws skip as no-shader */
+      }
+      if (r->stage == 0) {
+        g->vs = std::move(sh);
+        g->vsPend = std::move(pend);
+      } else {
+        g->fs = std::move(sh);
+        g->fsPend = std::move(pend);
+      }
       g->dirtyPso = true;
       g->dirtyBindings = true; /* CBV slot map is shader-derived */
       break;
@@ -2156,6 +2282,15 @@ extern "C" void
 d9mt_executor_finish(void) {
   if (!g)
     return;
+  /* stop the create worker (drains queued jobs first — cheap, bounded) */
+  if (g->creatWorker.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(g->creatMutex);
+      g->creatStop = true;
+    }
+    g->creatCv.notify_one();
+    g->creatWorker.join();
+  }
   submitFrame();
   if (g->lastSubmitted && !waitSerial(g->lastSubmitted, 2000))
     fprintf(stderr, "[serverd] finish: GPU drain timed out\n");

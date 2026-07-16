@@ -46,8 +46,10 @@
  * --- v3 (render-server Phase S3, ADDITIVE — first 200 bytes unchanged) ----
  *   offset 200  u64      draws_skipped_pending_pso
  *                                          subset of draws_skipped dropped
- *                                          ONLY because the PSO's async
- *                                          compile was still in flight
+ *                                          ONLY because async work was still
+ *                                          in flight: a PSO compile or (v2)
+ *                                          a shader library build on the
+ *                                          create worker
  *   offset 208  u64      psos_pending      async pipeline builds in flight
  *   offset 216  u64      uploads_executed  upload_buffer/upload_texture
  *                                          records blitted from the heap

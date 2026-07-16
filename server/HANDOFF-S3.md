@@ -181,6 +181,79 @@ build-driver.sh PASS (both mingw targets; header change = obj purge rule).
    checklist item 6).
 10. **Kick channel still 1 ms poll** (S3 checklist item 4, untouched).
 
+## V2 — boot-flood fixes (real-game feedback round)
+
+GTA IV boot verdict on v1: watchdog worked as designed (5 warn windows,
+clean disable, game unharmed) but the wire still died — two chokes, both
+from v1's own flags list (1 and 4/6). Fixed:
+
+### Create worker (v1 flag 4): newLibraryWithData off the consumer
+
+`executor.mm` gained a dedicated create worker (`createWorkerMain`,
+std::thread + mutex/condvar deque, QOS_USER_INTERACTIVE like every server
+thread). The consumer's create_shader handler still accumulates chunks
+(memcpy) but on the final chunk it registers the Resource IMMEDIATELY in
+state `ready=0` (building) — so the very next bind_shader resolves it — and
+queues the expensive `newLibraryWithData` + Shader construction to the
+worker, which publishes via `Resource::ready` (0 building / 1 ready / 2
+failed; payload written before the release-store, consumer acquire-loads).
+bind_shader of a building resource parks it in `vsPend/fsPend`;
+`promotePendingShaders()` at draw time promotes ready ones (dirtyPso) and
+PENDING ones skip the draw, counted in `draws_skipped` AND
+`draws_skipped_pending_pso` (meaning broadened: async PSO **or** library
+build in flight — d9mt_status.h comment updated). The consumer thread now
+only ever decodes + dispatches + memcpys.
+
+Consequence worth knowing: a pipeline needs a DRAW ATTEMPT after the
+library lands to even START its PSO compile — nothing precompiles
+speculatively. Real games draw every frame so this self-heals in 1-2
+frames; test_feed converges with explicit draw waves
+(`draw_wave_converge`).
+
+### Heap ack starvation + lazy re-upload (v1 flag 6 hardening)
+
+The observed heapDrop=281 was DOWNSTREAM of the same choke: acks advance at
+slab-memcpy time on the consumer, and the consumer was stuck in
+newLibraryWithData — fix (1) restores ack flow (verified: 300 MB cycles
+through an 8 MiB test heap with 32 producer backpressure waits and zero
+timeouts). Independently, dropped TEXTURE content is no longer lost
+forever: `MtlWireContext` stashes the bytes (`m_pendingTexUploads`, capped
+at 96 MiB `kMaxPendingUploadBytes`) and retries — per-image at its next
+bind_texture_by_id (upload lands BEFORE the bind so the server's
+hasContent gate is satisfied by draw time) and a full sweep once per
+present. FIFO per image is preserved: a new upload for an image with
+stashed content queues behind the stash (subresource write order). Retries
+probe the heap QUIETLY (no double heapDrop count). `heapAlloc` gained the
+`quiet` param.
+
+### Test evidence v2 (scripts/build-server.sh gate, PASSING ~1 s wall)
+
+Existing scenarios restructured to convergence draw-waves (see consequence
+above), plus the BOOT FLOOD: 200 shader libraries + 300 MB of texture
+uploads (3 x 1 MiB x 100, interleaved with binds/draws/presents) through an
+8 MiB heap — producer NEVER waited for ring space, heap acks flowed (32
+bounded backpressure waits, no timeout), frames kept presenting, 100
+pending-create skips counted, then the drain wave drew 100/100 in 2 waves
+with psos_pending=0, exec_errors=0, ring stalls=0; detach acked
+315,621,376 heap bytes. Full-clean build-driver.sh PASS.
+
+### V2 flag updates
+
+- v1 flag 4 (sync newLibraryWithData) — FIXED (create worker).
+- v1 flag 6 (heap full = silent staleness) — SOFTENED for textures (lazy
+  re-upload stash); BUFFER content drops (initial snapshots / uploadBuffer /
+  invalidate refresh) are still not retried — dual-execution hides it today,
+  must close before the thin-recorder step.
+- NEW: create_buffer's zero-fill memset and create_texture/sampler Metal
+  object creation still run on the consumer — cheap in practice (memset
+  GB/s; object creation µs) but unmeasured under a worst-case boot; the
+  worker queue is general enough to take them if a capture shows it.
+- NEW: the create worker is ONE thread — a pathological metallib storm
+  serializes behind it (but never blocks the consumer). Parallelize only
+  with evidence.
+- NEW: pending-upload stash keys on the IMAGE (Rc keeps it alive); a game
+  that uploads once and never re-binds relies on the per-present sweep.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

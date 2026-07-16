@@ -37,6 +37,10 @@ namespace dxvk::backend {
      * The PE region is address space, the FILE stays sparse until written. */
     constexpr uint64_t WireHeapCapacity = 256ull << 20;
 
+    /* S3 v2 lazy re-upload stash cap: texture bytes waiting for heap space.
+     * Beyond this the content is dropped for good (stale server texture). */
+    constexpr uint64_t kMaxPendingUploadBytes = 96ull << 20;
+
     /* Stall watchdog (S3): one window is the old ~1 s spin bound; the
      * transport survives WireStallWindows consecutive full-ring windows
      * (warn each) before the permanent disable — boot bursts ride through,
@@ -411,7 +415,8 @@ namespace dxvk::backend {
 
   /* --- S3 shared-heap producer (see mtl_wire_context.h) -------------------- */
 
-  uint64_t MtlWireContext::heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut) {
+  uint64_t MtlWireContext::heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut,
+                                     bool quiet) {
     if (m_heap == nullptr || src == nullptr || bytes == 0u)
       return UINT64_MAX;
     const uint64_t need = (bytes + 255u) & ~255ull;
@@ -426,13 +431,16 @@ namespace dxvk::backend {
 
     const uint64_t consumed = m_heap->consumed.load(std::memory_order_acquire);
     if (start + need - consumed > m_heapCap) {
-      /* full — the server has not GPU-completed enough regions. NEVER stall
-       * the CS thread on bulk data: drop this upload (server keeps stale
-       * content for the resource) and count it. */
-      m_heap->dropped.fetch_add(1u, std::memory_order_relaxed);
-      if (!m_heapWarned) {
-        m_heapWarned = true;
-        Logger::warn("MtlWireContext: shared heap full, dropping content uploads (server acks behind)");
+      /* full — the server has not acked enough regions. NEVER stall the CS
+       * thread on bulk data: fail the allocation (texture content goes to
+       * the lazy re-upload stash; buffer content is dropped) and count it.
+       * quiet = a RETRY probing for space: no double-count, no re-warn. */
+      if (!quiet) {
+        m_heap->dropped.fetch_add(1u, std::memory_order_relaxed);
+        if (!m_heapWarned) {
+          m_heapWarned = true;
+          Logger::warn("MtlWireContext: shared heap full, stalling content uploads (server acks behind)");
+        }
       }
       return UINT64_MAX;
     }
@@ -463,11 +471,51 @@ namespace dxvk::backend {
     }
   }
 
+  void MtlWireContext::emitUploadTextureRecord(const d9mt_wire_rec_upload_texture& fields,
+                                               uint64_t heapOff, uint64_t gen) {
+    auto* r = beginRecord<d9mt_wire_rec_upload_texture>(d9mt_wire_op_upload_texture);
+    if (!r)
+      return;
+    const d9mt_wire_rec_hdr hdr = r->hdr;
+    *r = fields;
+    r->hdr = hdr;
+    r->heap_offset = heapOff;
+    r->heap_generation = gen;
+    endRecord();
+  }
+
+  /* S3 v2 lazy re-upload: content stashed on a full heap gets another shot —
+   * per-image at its next bind (upload-before-bind keeps the server's
+   * hasContent gate satisfied by draw time) and image==nullptr sweeps
+   * everything once per present. FIFO order is preserved (later stashes of
+   * the same subresource must land after earlier ones); the first region
+   * that still doesn't fit ends the sweep. */
+  void MtlWireContext::retryPendingTexUploads(const MtlTexture* image) {
+    if (m_pendingTexUploads.empty() || m_heap == nullptr || !m_active)
+      return;
+    for (size_t i = 0u; i < m_pendingTexUploads.size(); ) {
+      PendingTexUpload& p = m_pendingTexUploads[i];
+      if (image != nullptr && p.image.ptr() != image) {
+        i++;
+        continue;
+      }
+      uint64_t gen = 0u;
+      const uint64_t off = heapAlloc(p.bytes.data(), p.bytes.size(), &gen, true);
+      if (off == UINT64_MAX)
+        return; /* heap still full — keep order, retry later */
+      emitUploadTextureRecord(p.rec, off, gen);
+      m_pendingTexBytes -= p.bytes.size();
+      m_pendingTexUploads.erase(m_pendingTexUploads.begin() + ptrdiff_t(i));
+    }
+  }
+
   void MtlWireContext::emitBindTextureById(MtlStageMask stages, uint32_t slot,
                                            const Rc<MtlTextureView>& view) {
     uint64_t id = 0u;
-    if (view != nullptr && view->image != nullptr)
+    if (view != nullptr && view->image != nullptr) {
       id = ensureTextureCreated(view->image);
+      retryPendingTexUploads(view->image.ptr());
+    }
     auto* r = beginRecord<d9mt_wire_rec_bind_texture_by_id>(d9mt_wire_op_bind_texture_by_id);
     if (!r)
       return;
@@ -663,6 +711,8 @@ namespace dxvk::backend {
      * its IOSurface slot. Emitted BEFORE the forward so the server sees the
      * frame boundary at the same stream position the client executes it. */
     if (m_active) {
+      /* S3 v2: once-per-frame sweep of content waiting for heap space */
+      retryPendingTexUploads(nullptr);
       Rc<MtlTexture> bb = currentBackbuffer();
       uint64_t bbId = bb != nullptr ? ensureTextureCreated(bb) : 0u;
       if (auto* r = beginRecord<d9mt_wire_rec_present_frame>(d9mt_wire_op_present_frame)) {
@@ -1165,29 +1215,49 @@ namespace dxvk::backend {
         const MtlFormat fmt = format != MtlFormat::Invalid ? format : dst->format;
         MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u, total = 0u;
         wirePitch(fmt, extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage, total);
-        uint64_t gen = 0u;
-        const uint64_t heapOff = heapAlloc(bytes, total, &gen);
-        if (heapOff != UINT64_MAX) {
-          if (auto* r = beginRecord<d9mt_wire_rec_upload_texture>(d9mt_wire_op_upload_texture)) {
-            r->wire_id = texId;
-            r->client_handle = dst->texture.tex;
-            r->mip = dstSub.mipLevel;
-            r->layer = dstSub.baseLayer;
-            r->x = uint32_t(dstOff.x);
-            r->y = uint32_t(dstOff.y);
-            r->z = uint32_t(dstOff.z);
-            r->width = extent.width;
-            r->height = extent.height;
-            r->depth = extent.depth;
-            r->row_pitch = uint32_t(bytesPerRow);
-            r->slice_pitch = uint32_t(bytesPerImage);
-            r->format = uint32_t(fmt);
-            r->heap_offset = heapOff;
-            r->heap_generation = gen;
-            r->data_size = total;
-            endRecord();
+        d9mt_wire_rec_upload_texture fields = {};
+        fields.wire_id = texId;
+        fields.client_handle = dst->texture.tex;
+        fields.mip = dstSub.mipLevel;
+        fields.layer = dstSub.baseLayer;
+        fields.x = uint32_t(dstOff.x);
+        fields.y = uint32_t(dstOff.y);
+        fields.z = uint32_t(dstOff.z);
+        fields.width = extent.width;
+        fields.height = extent.height;
+        fields.depth = extent.depth;
+        fields.row_pitch = uint32_t(bytesPerRow);
+        fields.slice_pitch = uint32_t(bytesPerImage);
+        fields.format = uint32_t(fmt);
+        fields.data_size = total;
+        /* stashed content for this image must land FIRST (subresource
+         * ordering), so a stash forces this upload to queue behind it */
+        retryPendingTexUploads(dst.ptr());
+        bool stashPending = false;
+        for (const auto& p : m_pendingTexUploads) {
+          if (p.image.ptr() == dst.ptr()) {
+            stashPending = true;
+            break;
           }
         }
+        uint64_t gen = 0u;
+        uint64_t heapOff = UINT64_MAX;
+        if (!stashPending)
+          heapOff = heapAlloc(bytes, total, &gen);
+        if (heapOff != UINT64_MAX) {
+          emitUploadTextureRecord(fields, heapOff, gen);
+        } else if (m_pendingTexBytes + total <= kMaxPendingUploadBytes) {
+          /* S3 v2 lazy re-upload: heap full — keep the bytes (staging
+           * recycles them) and retry at the image's next bind / present. */
+          PendingTexUpload p;
+          p.image = dst;
+          p.rec = fields;
+          p.bytes.assign(static_cast<const uint8_t*>(bytes),
+                         static_cast<const uint8_t*>(bytes) + total);
+          m_pendingTexBytes += total;
+          m_pendingTexUploads.push_back(std::move(p));
+        }
+        /* else: stash cap exceeded — content lost for good (heapDrop'd) */
       }
     }
     m_inner->copyBufferToTexture(dst, dstSub, dstOff, extent, src, off, rowAlign, sliceAlign, format);
