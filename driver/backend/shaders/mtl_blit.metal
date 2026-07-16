@@ -44,3 +44,14 @@ fragment float4 fillFsMain(BlitVsOut in [[stage_in]],
                            constant BlitParams& params [[buffer(0)]]) {
   return params.fillColor;
 }
+
+/* Scissored depth/stencil clear (clearImageView, non-color aspects — D3D9
+ * Clear with a partial rect on a depth surface): load-action clears are
+ * scissor-blind, so this is a depth-writing draw. No fragment function —
+ * rasterization-only; the vertex z IS the clear value (fillColor.x, viewport
+ * z [0,1] passthrough). Stencil rides the DSS replace-op + reference value. */
+vertex float4 depthClearVsMain(uint vid [[vertex_id]],
+                               constant BlitParams& params [[buffer(0)]]) {
+  float2 t = float2(float((vid << 1u) & 2u), float(vid & 2u));
+  return float4(t.x * 2.0f - 1.0f, 1.0f - t.y * 2.0f, params.fillColor.x, 1.0f);
+}

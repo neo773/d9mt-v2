@@ -64,6 +64,8 @@ namespace dxvk::backend::prof {
     CntChunkFlush,      // non-empty flushCmdChunk crossings
     CntPsoMiss,         // RenderPsoCache misses (hot-path pipeline compiles)
     CntArgRotate,       // selectArgumentTablesForDraw calls (binding-dirty draws)
+    CntAbRebuild,       // AB word-slice rebuilds (ring alloc + full word rewrite)
+    CntPsoKeyBuild,     // resolvePso invocations that rebuilt+hashed the key (DirtyPso)
     CounterCount
   };
 
@@ -121,7 +123,11 @@ namespace dxvk::backend::prof {
       "(", double(g_counts[CntChunkFlush]) / kFrames, "/f)",
       " psoMiss=", g_counts[CntPsoMiss],
       " argRotate=", g_counts[CntArgRotate],
-      "(", double(g_counts[CntArgRotate]) / kFrames, "/f)");
+      "(", double(g_counts[CntArgRotate]) / kFrames, "/f)",
+      " abRebuild=", g_counts[CntAbRebuild],
+      "(", double(g_counts[CntAbRebuild]) / kFrames, "/f)",
+      " psoKeyBuild=", g_counts[CntPsoKeyBuild],
+      "(", double(g_counts[CntPsoKeyBuild]) / kFrames, "/f)");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 

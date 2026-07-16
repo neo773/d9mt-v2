@@ -303,9 +303,16 @@ namespace dxvk::backend {
       uint32_t dirtyCbvs     = ~0u;   // 8 CBV slots
       /* Argument-buffer path: gpuAddress of the stage's current handle-word
        * slice (0 = none built yet). Rebuilt by flushResources whenever any
-       * binding mask is dirty or the PSO changed (the word layout is
+       * binding mask is dirty or the SHADER changed (the word layout is
        * shader-derived); re-appended cheaply (shadow-diffed) otherwise. */
       uint64_t abGpuAddress = 0u;
+      /* Persistent CPU copy of the stage's handle words. Rebuilds patch only
+       * the words whose (kind,reg) is dirty, then memcpy the whole shadow
+       * into the fresh ring slice — ring memory recycles, so it can never be
+       * read back to carry clean words forward. abFnId (shader library
+       * cookie) detects word-LAYOUT changes, which force a full recompute. */
+      std::vector<uint64_t> abShadowWords;
+      uint64_t abFnId = 0u;
       /* Which binding model consumed the dirty masks last (0 = per-slot,
        * 1 = argument buffer). The two paths clear the same masks, so a
        * model switch (FF ubershader <-> translated shader) must force a
@@ -483,10 +490,13 @@ namespace dxvk::backend {
      * samplers ride the device sampler cache ([0]=Nearest, [1]=Linear). */
     Rc<MtlShaderFunction>      m_blitVs, m_blitFs;
     Rc<MtlShaderFunction>      m_fillFs;   /* solid-color variant (clearImageView) */
+    Rc<MtlShaderFunction>      m_depthClearVs; /* depth-writing variant (scissored DS clears) */
     std::array<Rc<MtlSamplerState>, 2> m_blitSamplers;
     bool                       m_blitInitFailed = false;
     std::vector<BlitArgTable>  m_blitArgTables;
     uint32_t                   m_blitArgCursor = 0u;
+    void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
+                               MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
 
     // --- core internal flow -------------------------------------------------
     void ensureCommandBuffer();        // begin MTL4 cmdbuf on the current allocator

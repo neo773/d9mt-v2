@@ -89,6 +89,7 @@ namespace dxvk::backend {
 
   bool MtlContextImpl::resolvePso() {
     prof::Scope profScope(prof::ResolvePso);
+    prof::bump(prof::CntPsoKeyBuild);
     if (m_vs == nullptr)
       return false;
 
@@ -299,51 +300,76 @@ namespace dxvk::backend {
 
       /* --- argument-buffer path (fn->abWords) ------------------------------
        * The shader reads every texture/sampler/CBV as an 8-byte handle word
-       * from ONE buffer at kAbIndex. Rebuild the word slice when any binding
-       * changed or the PSO did (the word layout is shader-derived); otherwise
-       * the previous slice is still exact — either way binding is ONE
-       * shadow-diffed setAddress instead of per-slot table calls. Slice
-       * memory is never rewritten once bound (snapshot semantics): a rebuild
-       * allocates fresh ring bytes. */
+       * from ONE buffer at kAbIndex. The words live in a persistent CPU
+       * shadow (abShadowWords): a rebuild patches only the words whose
+       * (kind,reg) dirty bit is set, then memcpys the shadow into a fresh
+       * ring slice (snapshot semantics — ring bytes are never rewritten once
+       * bound, and recycled ring memory can never be read back). A shader
+       * change (abFnId) is a word-LAYOUT change and recomputes everything;
+       * a mere PSO change (blend/vertex-layout) does not touch the words. */
       if (abShader) {
-        const bool rebuild = psoChanged || b.abGpuAddress == 0u
-          || (b.dirtyCbvs | b.dirtyTextures | b.dirtySamplers) != 0u;
+        const uint64_t fnId = uint64_t(fn->library);
+        const bool layoutChanged = b.abFnId != fnId;
+        const uint32_t dirtyCbvs = layoutChanged ? ~0u : b.dirtyCbvs;
+        const uint32_t dirtyTexs = layoutChanged ? ~0u : b.dirtyTextures;
+        const uint32_t dirtySmps = layoutChanged ? ~0u : b.dirtySamplers;
+        const bool rebuild = layoutChanged || b.abGpuAddress == 0u
+          || (dirtyCbvs | dirtyTexs | dirtySmps) != 0u;
         b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
 
         if (rebuild) {
+          prof::bump(prof::CntAbRebuild);
           const uint32_t words = uint32_t(fn->abWords.size());
+          if (b.abShadowWords.size() != words) {
+            b.abShadowWords.assign(words, 0u);
+            b.abFnId = 0u;   /* size change: recompute every word below */
+          }
+          const bool full = layoutChanged || b.abFnId != fnId;
+          b.abFnId = fnId;
+          uint64_t* sw = b.abShadowWords.data();
+          for (uint32_t i = 0u; i < words; i++) {
+            const MtlShaderFunction::AbWord& e = fn->abWords[i];
+            uint64_t v;
+            switch (e.kind) {
+              case MtlShaderFunction::AbWordKind::Cbv: {
+                if (!full && !(dirtyCbvs & (1u << e.reg)))
+                  continue;                     /* shadow already exact */
+                v = 0u;
+                if (e.reg < b.cbvs.size()) {
+                  StageBindings::CbvBinding& cbv = b.cbvs[e.reg];
+                  /* Record-time snapshot (MtlBufferSlice contract) with the
+                   * discard/range offset folded in. */
+                  if (cbv.slice.defined() && cbv.slice.storage() != nullptr
+                   && uintptr_t(cbv.slice.storage().ptr()) >= 0x10000u)
+                    v = cbv.slice.gpuAddress(cbv.rangeOffset);
+                }
+              } break;
+              case MtlShaderFunction::AbWordKind::Texture: {
+                if (!full && !(dirtyTexs & (1u << e.reg)))
+                  continue;
+                v = 0u;
+                if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr)
+                  v = static_cast<MtlTextureViewImpl*>(
+                    b.textures[e.reg].ptr())->gpuResourceId;
+              } break;
+              case MtlShaderFunction::AbWordKind::Sampler: {
+                if (!full && !(dirtySmps & (1u << e.reg)))
+                  continue;
+                v = 0u;
+                if (e.reg < b.samplers.size() && b.samplers[e.reg] != nullptr)
+                  v = static_cast<MtlSamplerStateImpl*>(
+                    b.samplers[e.reg].ptr())->gpuResourceId;
+              } break;
+              default:
+                v = 0u;
+                break;
+            }
+            sw[i] = v;
+          }
           RingSlice rs = m_device->uploadRing().allocate(
             uint64_t(words) * 8u, 16u);
           if (rs.cpuPtr) {
-            uint64_t* w = reinterpret_cast<uint64_t*>(rs.cpuPtr);
-            for (uint32_t i = 0u; i < words; i++) {
-              const MtlShaderFunction::AbWord& e = fn->abWords[i];
-              uint64_t v = 0u;
-              switch (e.kind) {
-                case MtlShaderFunction::AbWordKind::Cbv: {
-                  if (e.reg < b.cbvs.size()) {
-                    StageBindings::CbvBinding& cbv = b.cbvs[e.reg];
-                    /* Record-time snapshot (MtlBufferSlice contract) with the
-                     * discard/range offset folded in. */
-                    if (cbv.slice.defined() && cbv.slice.storage() != nullptr
-                     && uintptr_t(cbv.slice.storage().ptr()) >= 0x10000u)
-                      v = cbv.slice.gpuAddress(cbv.rangeOffset);
-                  }
-                } break;
-                case MtlShaderFunction::AbWordKind::Texture: {
-                  if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr)
-                    v = static_cast<MtlTextureViewImpl*>(
-                      b.textures[e.reg].ptr())->gpuResourceId;
-                } break;
-                case MtlShaderFunction::AbWordKind::Sampler: {
-                  if (e.reg < b.samplers.size() && b.samplers[e.reg] != nullptr)
-                    v = static_cast<MtlSamplerStateImpl*>(
-                      b.samplers[e.reg].ptr())->gpuResourceId;
-                } break;
-                default: break;
-              }
-              w[i] = v;
-            }
+            std::memcpy(rs.cpuPtr, sw, uint64_t(words) * 8u);
             b.abGpuAddress = rs.gpuAddress;
           }
         }
@@ -783,6 +809,10 @@ namespace dxvk::backend {
       MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize));
     if (m_fillFs != nullptr)
       m_fillFs->entryName = "fillFsMain";
+    m_depthClearVs = m_device->createShaderFunction(
+      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize));
+    if (m_depthClearVs != nullptr)
+      m_depthClearVs->entryName = "depthClearVsMain";
 
     /* ClampToEdge: a stretched blit's edge texels must not bleed from the
      * opposite border; no mip filtering (blit views are single-mip). Both
@@ -796,11 +826,13 @@ namespace dxvk::backend {
     m_blitSamplers[1] = m_device->createSampler(key);
 
     if (m_blitVs == nullptr || m_blitFs == nullptr || m_fillFs == nullptr
+     || m_depthClearVs == nullptr
      || m_blitSamplers[0] == nullptr || m_blitSamplers[1] == nullptr) {
       Logger::err("MtlContextImpl: meta-blit pipeline init failed");
       m_blitVs = nullptr;
       m_blitFs = nullptr;
       m_fillFs = nullptr;
+      m_depthClearVs = nullptr;
       m_blitInitFailed = true;   /* don't retry (and re-log) per blit */
       return false;
     }
@@ -810,12 +842,14 @@ namespace dxvk::backend {
   void MtlContextImpl::clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                       MtlSize extent, MtlAspectMask aspects,
                                       MtlClearValue value) {
-    /* D3D9 ColorFill. Color aspect only — the frontend never routes depth
-     * fills here (StretchRect/Clear own those paths). */
+    /* D3D9 ColorFill and partial-rect Clear. Depth/stencil aspects arrive
+     * from Clear() with a viewport/scissor rect smaller than the surface —
+     * load-action clears are scissor-blind, so those take a depth-writing
+     * draw instead. */
     if (view == nullptr || view->image == nullptr)
       return;
-    if (unlikely(!(aspects & MtlAspectColor))) {
-      Logger::err("MtlContextImpl::clearImageView: non-color aspect unsupported");
+    if (!(aspects & MtlAspectColor)) {
+      clearDepthStencilRect(view, offset, extent, aspects, value);
       return;
     }
 
@@ -903,6 +937,131 @@ namespace dxvk::backend {
     float params[8] = {
       0.f, 0.f, 0.f, 0.f,
       value.color.r, value.color.g, value.color.b, value.color.a,
+    };
+    RingSlice rs = m_device->uploadRing().allocate(sizeof(params), 256u);
+    if (rs.cpuPtr)
+      std::memcpy(rs.cpuPtr, params, sizeof(params));
+
+    obj_handle_t table = selectBlitArgTable();
+    MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
+    MTL4RenderCommandEncoder_setArgumentTable(
+      enc, table, uint64_t(WMTRenderStageVertex | WMTRenderStageFragment));
+
+    MTL4RenderCommandEncoder_drawPrimitives(
+      enc, WMTPrimitiveTypeTriangle, 0u, 3u, 1u, 0u);
+
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+    m_dirty = DirtyEverything;
+  }
+
+  void MtlContextImpl::clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
+                                             MtlSize extent, MtlAspectMask aspects,
+                                             MtlClearValue value) {
+    /* Scissored depth/stencil clear: a rasterization-only draw whose vertex z
+     * carries the clear depth (depthClearVsMain, no fragment function) and
+     * whose DSS forces write/replace; stencil value rides the reference. The
+     * surface's OTHER aspect is attached load=Load/store=Store so it survives
+     * untouched (its DSS write stays off). */
+    const MtlFormatInfo* fi = lookupFormatInfo(view->key.format);
+    const bool hasDepth   = (fi->flags & MtlFormatFlagDepth) != 0u;
+    const bool hasStencil = (fi->flags & MtlFormatFlagStencil) != 0u;
+    const bool clearDepth   = hasDepth   && (aspects & MtlAspectDepth) != 0u;
+    const bool clearStencil = hasStencil && (aspects & MtlAspectStencil) != 0u;
+    if (!clearDepth && !clearStencil)
+      return;
+
+    if (!ensureBlitPipeline())
+      return;
+
+    const MtlExtent3D mipExtent = view->image->mipLevelExtent(view->key.baseMip);
+    uint32_t x1 = std::min(offset.x + extent.width,  mipExtent.width);
+    uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
+    if (offset.x >= x1 || offset.y >= y1)
+      return;
+
+    /* Vertex-only PSO: colorCount 0, fs absent. depthFormat (a Metal-3-only
+     * key field, never in the Metal 4 descriptor) discriminates this key from
+     * anything else built on the blit library. */
+    RenderPsoKey key = {};
+    key.vsCookie      = uint64_t(m_depthClearVs->library);
+    key.fsCookie      = 0u;
+    key.colorCount    = 0u;
+    key.sampleCount   = uint8_t(std::max(view->image->info().sampleCount, 1u));
+    key.topologyClass = uint8_t(WMTPrimitiveTopologyClassTriangle);
+    key.depthFormat   = uint32_t(view->key.format);
+    obj_handle_t pso = m_psoCache.get(
+      key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
+    if (!pso)
+      return;
+
+    MtlDepthStencilState ds = {};
+    ds.depthTest      = true;
+    ds.depthCompareOp = MtlCompareFunction::Always;
+    ds.depthWrite     = clearDepth;
+    ds.stencilEnable  = clearStencil;
+    if (clearStencil) {
+      MtlStencilState s = {};
+      s.compareOp = MtlCompareFunction::Always;
+      s.failOp = s.depthFailOp = s.passOp = MtlStencilOperation::Replace;
+      ds.front = ds.back = s;
+    }
+    obj_handle_t dsso = m_device->getDepthStencilState(ds);
+
+    if (m_pass.active)
+      closePass();
+    else
+      flushPendingClears();
+    ensureCommandBuffer();
+
+    auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+    view->image->setTrackingSerial(m_currentSerial);
+    m_keepAlive.push_back(view);
+
+    WMTRenderPassInfo info = {};
+    if (hasDepth) {
+      info.depth.texture      = tv->owned.handle();
+      info.depth.load_action  = WMTLoadActionLoad;
+      info.depth.store_action = WMTStoreActionStore;
+      info.depth.level        = view->key.baseMip;
+      info.depth.slice        = view->key.baseLayer;
+    }
+    if (hasStencil) {
+      info.stencil.texture      = tv->owned.handle();
+      info.stencil.load_action  = WMTLoadActionLoad;
+      info.stencil.store_action = WMTStoreActionStore;
+      info.stencil.level        = view->key.baseMip;
+      info.stencil.slice        = view->key.baseLayer;
+    }
+    info.render_target_width  = mipExtent.width;
+    info.render_target_height = mipExtent.height;
+    obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+
+    MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
+    MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
+    if (clearStencil)
+      MTL4RenderCommandEncoder_setStencilReferenceValue(enc, value.stencil);
+
+    WMTViewport vp = {};
+    vp.originX = double(offset.x);
+    vp.originY = double(offset.y);
+    vp.width   = double(x1 - offset.x);
+    vp.height  = double(y1 - offset.y);
+    vp.znear   = 0.0;
+    vp.zfar    = 1.0;
+    MTL4RenderCommandEncoder_setViewport(enc, vp);
+    WMTScissorRect sc = {};
+    sc.x      = offset.x;
+    sc.y      = offset.y;
+    sc.width  = x1 - offset.x;
+    sc.height = y1 - offset.y;
+    MTL4RenderCommandEncoder_setScissorRect(enc, sc);
+
+    /* BlitParams: fillColor.x = clear depth (vertex z passthrough). */
+    float params[8] = {
+      0.f, 0.f, 0.f, 0.f,
+      value.depth, 0.f, 0.f, 0.f,
     };
     RingSlice rs = m_device->uploadRing().allocate(sizeof(params), 256u);
     if (rs.cpuPtr)
