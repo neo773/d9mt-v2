@@ -1,0 +1,47 @@
+server/consumer.m
+  s_68632dcad39ed7::t_5c59f0b6df41cb 108-110,113-114
+  s_68632dcad39ed7::t_e1ff2cac9e7f55 21-26
+  s_68632dcad39ed7::t_244f6b6d0b2671 126-127
+  s_68632dcad39ed7::t_2dc2442053cb9e 128
+server/executor.mm
+  s_68632dcad39ed7::t_9702d5af5fafc8 1765-1769,1773-1776
+  s_68632dcad39ed7::t_9a1a0f1be34340 1-55,62-429,439,446-535,539,541-1490,1505-1764,1770-1772,1777-1826
+  s_68632dcad39ed7::t_c1deaaa5504727 1491-1504
+  s_68632dcad39ed7::t_b83ee70f49a62d 430-438,440-445
+  s_68632dcad39ed7::t_c64fe18594c756 56-61
+  s_68632dcad39ed7::t_9e013e41fa6b52 536-538,540
+server/d9mt_server.h
+  s_68632dcad39ed7::t_dc4fe95d31dc43 4-6,11-14,16-19,25-59,63-65
+  s_68632dcad39ed7::t_9787c52efc8915 66
+server/test_feed.c
+  s_68632dcad39ed7::t_68a87de52e8a41 2,6,8,19-23,41-42,58-59,63,75,79-107
+  s_68632dcad39ed7::t_1df323b8b6ff45 258-398
+  s_68632dcad39ed7::t_a971c32f3973bd 419-424
+  s_68632dcad39ed7::t_5cd13ba5984207 108-109
+  s_68632dcad39ed7::t_5631e4eab07a51 399
+server/main.m
+  s_68632dcad39ed7::t_9e608d09cfd0bc 97-104,107-108,110-111
+  s_68632dcad39ed7::t_892bfa22ca93bb 2,12-16,22-23
+server/iosurface_pool.m
+  s_68632dcad39ed7::t_a6cc1fbfcae324 2,4-7,9-13,25-29,33-34,36-39,41-49,51-57,89,102,106-108,110-111,114-142
+server/test_stub.metal
+  s_68632dcad39ed7::t_e19b8dc9d8efe9 1-28
+scripts/build-server.sh
+  s_68632dcad39ed7::t_3fed90c1c9f83f 2,5-6,15-25,36-38,42,47-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4ee37bdaed363c25673f9554ab76cc319090354e",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
