@@ -1,0 +1,29 @@
+server/main.m
+  s_68632dcad39ed7::t_88caff5125cc11 1-17,19-37,39-113
+  s_68632dcad39ed7::t_ed1562d9bec5de 18
+  s_68632dcad39ed7::t_6416568b79e0fd 38
+server/d9mt_status.h
+  s_68632dcad39ed7::t_6398ce5547c6e9 1-83
+server/iosurface_pool.m
+  s_68632dcad39ed7::t_be05f87ca6b3c3 1-137
+server/consumer.m
+  s_68632dcad39ed7::t_93b8a3dfa6bc60 1-137
+server/d9mt_server.h
+  s_68632dcad39ed7::t_9e5b9b8b600cad 1-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "60f8657c1f21da213a919a16384c7ec74f9f0d18",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
