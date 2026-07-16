@@ -517,6 +517,27 @@ namespace dxvk::backend {
     void appendTableSampler(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
     bool prepareDraw();                // ensurePass + resolve + flush dirty steps
     bool resolvePso();                 // build key from folded state, bind PSO
+
+    /* PSO input snapshot (mtld3d's pipeline_state.rs trick, adapted): a
+     * cheap identity of everything the RenderPsoKey is derived FROM. A
+     * 4-entry MRU of (snapshot -> pso) short-circuits the 600-byte key
+     * build + FNV + map probe for the A<->B material alternation that
+     * dominates DirtyPso draws. Generation counters stand in for deep
+     * vector/array contents; every setter that mutates key inputs bumps
+     * its counter. D9MT_NO_PSOMRU=1 disables. */
+    struct PsoSnapshot {
+      const void* vs = nullptr;      /* shader identity (device-lifetime objects) */
+      const void* fs = nullptr;
+      uint32_t colorFmt[4] = { };    /* attachment formats BY VALUE (0 = unbound) —
+                                      * never pointers; a recycled view address
+                                      * with a different format would false-hit */
+      uint32_t layoutGen = 0u, strideGen = 0u, blendGen = 0u;
+      uint32_t msaaPacked = 0u, topoClass = 0u, pad = 0u;
+    };
+    PsoSnapshot  m_psoMruKey[4] = { };
+    obj_handle_t m_psoMruPso[4] = { };
+    uint32_t     m_psoMruCursor = 0u;
+    uint32_t     m_layoutGen = 0u, m_strideGen = 0u, m_blendGen = 0u;
     ArgTablePair createArgumentTablePair() const;
     void selectArgumentTablesForPass();
     void bindArgumentTables();         // setArgumentTable per stage on the encoder

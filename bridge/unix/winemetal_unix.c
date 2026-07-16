@@ -3738,24 +3738,39 @@ static NTSTATUS
 _MetalLayer_setProps(void *obj) {
   struct unixcall_generic_obj_constptr_noret *params = obj;
   CAMetalLayer *layer = (CAMetalLayer *)params->handle;
-  const struct WMTLayerProps *props = params->arg.ptr;
-  execute_on_main(^{
-    layer.device = (id<MTLDevice>)props->device;
-    layer.opaque = props->opaque;
+  /* By-value copy: the block runs AFTER this call returns and the caller's
+   * params struct is gone. */
+  const struct WMTLayerProps props = *(const struct WMTLayerProps *)params->arg.ptr;
+  /* ASYNC, never dispatch_sync: a synchronous hop to the main thread
+   * deadlocks during display-mode changes — wine's main thread is blocked
+   * SendMessage'ing WM_DISPLAYCHANGE to the app thread, which sits in
+   * Reset waiting for THIS call (device lock held). Layer props are
+   * configuration, not per-frame state; applying them a beat later is
+   * harmless. Manual retain: no ARC in this TU, the block must keep the
+   * layer alive until it runs. */
+  [layer retain];
+  void (^apply)(void) = ^{
+    layer.device = (id<MTLDevice>)props.device;
+    layer.opaque = props.opaque;
     dxmt_set_layer_background_black(layer);
-    layer.framebufferOnly = props->framebuffer_only;
+    layer.framebufferOnly = props.framebuffer_only;
     /* Zero means "leave untouched": layer geometry (contentsScale,
      * drawableSize) is owned by the window system's view layout; callers
      * that only configure device/format must not clobber it. */
-    if (props->contents_scale > 0.0)
-      layer.contentsScale = props->contents_scale;
-    layer.displaySyncEnabled = props->display_sync_enabled;
-    if (props->drawable_width > 0.0 && props->drawable_height > 0.0)
-      layer.drawableSize = CGSizeMake(props->drawable_width, props->drawable_height);
-    layer.pixelFormat = to_metal_pixel_format(props->pixel_format);
-    if (props->maximum_drawable_count != 0)
-      layer.maximumDrawableCount = props->maximum_drawable_count;
-  });
+    if (props.contents_scale > 0.0)
+      layer.contentsScale = props.contents_scale;
+    layer.displaySyncEnabled = props.display_sync_enabled;
+    if (props.drawable_width > 0.0 && props.drawable_height > 0.0)
+      layer.drawableSize = CGSizeMake(props.drawable_width, props.drawable_height);
+    layer.pixelFormat = to_metal_pixel_format(props.pixel_format);
+    if (props.maximum_drawable_count != 0)
+      layer.maximumDrawableCount = props.maximum_drawable_count;
+    [layer release];
+  };
+  if ([NSThread isMainThread])
+    apply();
+  else
+    dispatch_async(dispatch_get_main_queue(), apply);
   return STATUS_SUCCESS;
 }
 

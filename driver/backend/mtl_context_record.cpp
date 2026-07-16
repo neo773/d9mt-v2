@@ -192,8 +192,10 @@ namespace dxvk::backend {
 
   void MtlContextImpl::submit(bool waitCompleted) {
     prof::Scope profScope(prof::Submit);
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseSubmit);
       closePass();
+    }
 
     if (!m_cmdbuf)
       return;
@@ -325,8 +327,10 @@ namespace dxvk::backend {
       return;
     }
 
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseSubmit);
       closePass();
+    }
     ensureCommandBuffer();
 
     /* METAL 4 present handshake, all four steps: queue waitForDrawable BEFORE
@@ -352,9 +356,39 @@ namespace dxvk::backend {
 
   // --- render pass (decision 1) ---------------------------------------------
 
+  static bool sameAttachment(const Rc<MtlTextureView>& a,
+                             const Rc<MtlTextureView>& b);
+
   void MtlContextImpl::bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) {
-    if (m_pass.active)
+    /* Redundant framebuffer rebind: the frontend re-binds on ANY FB-dirty
+     * flag (present, state restores, SetRenderTarget with the same target),
+     * and most of those name the SAME attachments as the open pass. Closing
+     * and reopening an identical pass is a full TBDR tile store+load for
+     * nothing — measured 52 of ~83 pass closes/frame. Keep the encoder.
+     * Identity = same subresource AND same view format (an sRGB re-view of
+     * the same texture is a different attachment to the PSO). */
+    /* EXPERIMENTAL, default OFF (D9MT_RTSKIP=1 enables): keeping the pass
+     * open across a same-target rebind cut passes 83 -> 57/frame, but a
+     * display-mode Reset with the skip active leaves the game wedged after
+     * the switch (bisect-confirmed; the held pass straddles backbuffer
+     * destruction). Re-enable once the Reset path force-closes the pass. */
+    static const bool rtSkipOn = std::getenv("D9MT_RTSKIP") != nullptr;
+    if (m_pass.active) {
+      if (rtSkipOn) {
+        auto sameRt = [](const Rc<MtlTextureView>& a, const Rc<MtlTextureView>& b) {
+          if (!sameAttachment(a, b))
+            return false;
+          return a == nullptr || b == nullptr || a->key.format == b->key.format;
+        };
+        bool same = sameRt(m_pass.targets.depthStencil, targets.depthStencil);
+        for (uint32_t i = 0u; same && i < MtlRenderTargets::MaxColorTargets; i++)
+          same = sameRt(m_pass.targets.color[i], targets.color[i]);
+        if (same)
+          return;
+      }
+      prof::bump(prof::CntPassCloseRt);
       closePass();
+    }
     else
       flushPendingClears();
     /* A folded, not-yet-drawn clear must EXECUTE before the pending pass is
@@ -431,6 +465,7 @@ namespace dxvk::backend {
       if (clear & MtlAspectStencil) { m_pass.clearStencil = true; m_pass.stencilClear = value.stencil; }
     }
     m_pass.pending = true;
+    prof::bump(prof::CntPassCloseClear);
     materializePass();
     closePass();
     m_pass = std::move(saved);
@@ -450,6 +485,7 @@ namespace dxvk::backend {
       any = any || c;
     if (!any)
       return;
+    prof::bump(prof::CntPassCloseClear);
     materializePass();
     closePass();
   }
@@ -648,6 +684,7 @@ namespace dxvk::backend {
       return;
     m_vertexAttrs.assign(attrs, attrs + nAttr);
     m_vertexLayouts.assign(layouts, layouts + nLayout);
+    m_layoutGen++;
     m_dirty |= DirtyPso;
   }
 
@@ -694,6 +731,7 @@ namespace dxvk::backend {
     if (std::memcmp(&m_blend[rt], &blend, sizeof(blend)) == 0)
       return;
     m_blend[rt] = blend;
+    m_blendGen++;
     m_dirty |= DirtyPso;
   }
 
@@ -726,8 +764,10 @@ namespace dxvk::backend {
 
   void MtlContextImpl::bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) {
     auto& stream = m_vertexStreams[binding];
-    if (stream.stride != stride)
+    if (stream.stride != stride) {
+      m_strideGen++;
       m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
+    }
     stream.slice = std::move(slice);
     stream.stride = stride;
     m_dirtyVertexStreams |= 1u << binding;
@@ -743,8 +783,10 @@ namespace dxvk::backend {
     auto& stream = m_vertexStreams[binding];
     if (!stream.slice.defined())
       return;                            /* range update with nothing bound */
-    if (stream.stride != stride)
+    if (stream.stride != stride) {
+      m_strideGen++;
       m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
+    }
     stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
                                   offset, length);
     stream.stride = stride;

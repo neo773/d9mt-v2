@@ -66,6 +66,14 @@ namespace dxvk::backend::prof {
     CntArgRotate,       // selectArgumentTablesForDraw calls (binding-dirty draws)
     CntAbRebuild,       // AB word-slice rebuilds (ring alloc + full word rewrite)
     CntPsoKeyBuild,     // resolvePso invocations that rebuilt+hashed the key (DirtyPso)
+    /* Why did an ACTIVE render pass close? (TBDR: every close = full tile
+     * store, every reopen = full tile load — the pass-count levers.) */
+    CntPassCloseSubmit, //   frame end (submit / present)
+    CntPassCloseRt,     //   bindRenderTargets switch
+    CntPassCloseClear,  //   standalone clear pass (folded clears, ColorFill, DS rect)
+    CntPassCloseXfer,   //   transfer compute encoder (uploads/copies mid-frame)
+    CntPassCloseBarrier,//   emitGraphicsBarrier (feedback-loop hazard)
+    CntPassCloseBlit,   //   meta-blit / mipgen
     CounterCount
   };
 
@@ -127,7 +135,13 @@ namespace dxvk::backend::prof {
       " abRebuild=", g_counts[CntAbRebuild],
       "(", double(g_counts[CntAbRebuild]) / kFrames, "/f)",
       " psoKeyBuild=", g_counts[CntPsoKeyBuild],
-      "(", double(g_counts[CntPsoKeyBuild]) / kFrames, "/f)");
+      "(", double(g_counts[CntPsoKeyBuild]) / kFrames, "/f)",
+      " passClose/f: submit=", double(g_counts[CntPassCloseSubmit]) / kFrames,
+      " rt=", double(g_counts[CntPassCloseRt]) / kFrames,
+      " clear=", double(g_counts[CntPassCloseClear]) / kFrames,
+      " xfer=", double(g_counts[CntPassCloseXfer]) / kFrames,
+      " barrier=", double(g_counts[CntPassCloseBarrier]) / kFrames,
+      " blit=", double(g_counts[CntPassCloseBlit]) / kFrames);
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 

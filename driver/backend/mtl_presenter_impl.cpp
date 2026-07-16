@@ -61,7 +61,15 @@ namespace dxvk::backend {
        * once attached). */
       attachLayerResidency();
 
+      /* DIAG: nextDrawable can block indefinitely on pool starvation (no
+       * timeout parameter) — a silent CS-thread hang. Time it and shout. */
+      auto t0 = std::chrono::steady_clock::now();
       obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      if (unlikely(ms > 500))
+        Logger::warn(str::format("MtlPresenter: nextDrawable blocked ", ms,
+          "ms (frame ", frameId, ", got=", drawable != 0u, ")"));
       if (!drawable)
         return image;   // occluded / no drawable this frame
 
@@ -147,19 +155,23 @@ namespace dxvk::backend {
     void applyProps() {
       if (!m_layer)
         return;
-      /* The window layer's GEOMETRY (contentsScale, drawableSize) belongs to
-       * the window system — the winemac driver recomputes both from the view
-       * bounds and backing scale on every layout. Writing either from here
-       * races that layout and strands stale values (a pixel-sized drawable
-       * composited in points = top-left quarter magnified; a stale oversized
-       * drawable = 4x present cost). Zero = leave untouched (bridge contract);
-       * the present blit scales the backbuffer to whatever drawable the
-       * layout produces. */
+      /* contentsScale belongs to the window system (the winemac driver sets
+       * it from the backing scale) — writing it from here stranded a stale
+       * 1.0 after minimize/restore: pixel-sized drawable composited in
+       * POINTS = top-left quarter magnified. Zero = leave untouched.
+       *
+       * drawableSize IS written, but only from here (construction and
+       * recreate — i.e. swapchain size changes): a display-mode Reset must
+       * re-pin the drawable to the new backbuffer size or the layer keeps
+       * serving stale-sized drawables after the switch. NO per-frame
+       * re-pinning (the old acquire-time drift loop is what fought the
+       * layout and broke minimize/restore); the present blit absorbs any
+       * size the layout imposes between recreates. */
       WMTLayerProps props = {};
       props.device               = m_wmtDevice;
       props.contents_scale       = 0.0;
-      props.drawable_width       = 0.0;
-      props.drawable_height      = 0.0;
+      props.drawable_width       = double(m_desc.imageExtent.width);
+      props.drawable_height      = double(m_desc.imageExtent.height);
       props.opaque               = true;
       props.display_sync_enabled = m_desc.vsync;
       /* The present path copies the app backbuffer INTO the drawable via a

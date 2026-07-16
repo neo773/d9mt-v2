@@ -89,9 +89,45 @@ namespace dxvk::backend {
 
   bool MtlContextImpl::resolvePso() {
     prof::Scope profScope(prof::ResolvePso);
-    prof::bump(prof::CntPsoKeyBuild);
     if (m_vs == nullptr)
       return false;
+
+    /* MRU short-circuit: snapshot the key INPUTS (~64B) and memcmp against
+     * the last 4 resolved snapshots — the A<->B material alternation that
+     * dominates DirtyPso draws hits here and skips the 600-byte key build,
+     * FNV hash, and map probe entirely. Generation counters stand in for
+     * attr/layout/stride/blend contents. D9MT_NO_PSOMRU=1 disables. */
+    static const bool mruOff = std::getenv("D9MT_NO_PSOMRU") != nullptr;
+    PsoSnapshot snap = {};
+    snap.vs = m_vs.ptr();
+    snap.fs = m_fs.ptr();
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+      const Rc<MtlTextureView>& v = m_pass.targets.color[i];
+      snap.colorFmt[i] = v != nullptr ? uint32_t(v->key.format) : 0u;
+    }
+    snap.layoutGen  = m_layoutGen;
+    snap.strideGen  = m_strideGen;
+    snap.blendGen   = m_blendGen;
+    snap.msaaPacked = (uint32_t(m_msaa.sampleCount) << 1)
+                    | (m_msaa.alphaToCoverage ? 1u : 0u);
+    snap.topoClass  = uint32_t(topologyClass(m_topology));
+
+    if (!mruOff) {
+      for (uint32_t i = 0u; i < 4u; i++) {
+        if (m_psoMruPso[i] != 0u
+         && std::memcmp(&m_psoMruKey[i], &snap, sizeof(snap)) == 0) {
+          obj_handle_t pso = m_psoMruPso[i];
+          if (pso == m_lastEncodedPso)
+            return true;
+          m_lastEncodedPso = pso;
+          auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setpso>(
+            uint16_t(WMTMtl4RenderCommandSetPSO));
+          cmd->pso = pso;
+          return true;
+        }
+      }
+    }
+    prof::bump(prof::CntPsoKeyBuild);
 
     obj_handle_t vsLibrary = m_vs->library;
     obj_handle_t fsLibrary = m_fs != nullptr ? obj_handle_t(m_fs->library) : 0u;
@@ -163,6 +199,11 @@ namespace dxvk::backend {
     obj_handle_t pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
     if (!pso)
       return false;
+
+    /* Feed the MRU on the slow path (round-robin eviction). */
+    m_psoMruKey[m_psoMruCursor] = snap;
+    m_psoMruPso[m_psoMruCursor] = pso;
+    m_psoMruCursor = (m_psoMruCursor + 1u) & 3u;
 
     /* DirtyPso often re-resolves to the PSO already encoded (state rewritten
      * with the same values, or A->B->A shader flips within a pass) — skip
@@ -572,8 +613,10 @@ namespace dxvk::backend {
   // --- transfers / blits (decision 8: MTL4 compute-encoder copies) ------------
 
   obj_handle_t MtlContextImpl::computeEncoder() {
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseXfer);
       closePass();
+    }
     else
       flushPendingClears();   /* a copy must observe folded, not-yet-drawn clears */
     ensureCommandBuffer();
@@ -759,8 +802,10 @@ namespace dxvk::backend {
       }
     }
 
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseBlit);
       closePass();
+    }
     else
       flushPendingClears();
     ensureCommandBuffer();
@@ -868,6 +913,7 @@ namespace dxvk::backend {
       m_pass.clearColor[0]    = true;
       m_pass.clearValues[0]   = value;
       m_pass.pending          = true;
+      prof::bump(prof::CntPassCloseClear);
       materializePass();
       closePass();
       m_pass = std::move(saved);
@@ -898,8 +944,10 @@ namespace dxvk::backend {
     if (!pso)
       return;
 
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseClear);
       closePass();
+    }
     else
       flushPendingClears();
     ensureCommandBuffer();
@@ -1009,8 +1057,10 @@ namespace dxvk::backend {
     }
     obj_handle_t dsso = m_device->getDepthStencilState(ds);
 
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseClear);
       closePass();
+    }
     else
       flushPendingClears();
     ensureCommandBuffer();
@@ -1184,8 +1234,10 @@ namespace dxvk::backend {
 
     /* A blit must observe folded, not-yet-drawn clears (computeEncoder
      * precedent); an open pass flushes its fragment writes via closePass. */
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseBlit);
       closePass();
+    }
     else
       flushPendingClears();
     ensureCommandBuffer();
@@ -1309,8 +1361,10 @@ namespace dxvk::backend {
     if (!renderable)
       return;
 
-    if (m_pass.active)
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseBlit);
       closePass();
+    }
     ensureCommandBuffer();
     t->setTrackingSerial(m_currentSerial);
 

@@ -508,10 +508,12 @@ namespace dxvk {
       D3D9WindowMessageFilter filter(m_window);
 
       if (!changeFullscreen) {
+        Logger::info("D9MT-RESET: ChangeDisplayMode...");
         hr = ChangeDisplayMode(pPresentParams, pFullscreenDisplayMode);
         if (FAILED(hr))
           return hr;
 
+        Logger::info("D9MT-RESET: updateFullscreenWindow...");
         wsi::updateFullscreenWindow(m_monitor, m_window, true);
       }
     }
@@ -521,12 +523,15 @@ namespace dxvk {
     if (changeFullscreen)
       SetGammaRamp(0, &m_ramp);
 
+    Logger::info("D9MT-RESET: UpdatePresentParameters...");
     UpdatePresentParameters();
 
+    Logger::info("D9MT-RESET: CreateBackBuffers...");
     hr = CreateBackBuffers(m_presentParams.BackBufferCount, m_presentParams.Flags);
     if (FAILED(hr))
       return hr;
 
+    Logger::info("D9MT-RESET: done");
     return D3D_OK;
   }
 
