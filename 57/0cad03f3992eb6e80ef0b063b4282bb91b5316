@@ -1,0 +1,21 @@
+driver/backend/mtl_cmd_chunk.h
+  s_68632dcad39ed7::t_37c06a284655f9 32-73
+driver/backend/mtl_context_impl.h
+  s_68632dcad39ed7::t_ac71e180014e71 446-458
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "570cad03f3992eb6e80ef0b063b4282bb91b5316",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
