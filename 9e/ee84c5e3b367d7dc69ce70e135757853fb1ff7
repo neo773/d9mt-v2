@@ -1,0 +1,22 @@
+driver/backend/mtl_context_impl.h
+  s_68632dcad39ed7::t_11f5139b39c1e3 609-617
+driver/backend/mtl_context_record.cpp
+  s_68632dcad39ed7::t_4ec9dec890e29b 962-983,988-1012
+  s_68632dcad39ed7::t_fe54b0d609115d 1027-1036
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "9eee84c5e3b367d7dc69ce70e135757853fb1ff7",
+  "prompts": {},
+  "sessions": {
+    "s_68632dcad39ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d47597d1-1e29-44f1-9e2a-245ec1b9ecd9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
