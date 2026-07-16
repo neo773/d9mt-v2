@@ -1,6 +1,28 @@
 # Native Backend — moving the CS-thread's work to ARM64
 
-## Why (measured, 2026-07-17)
+## ⚠ PREMISE FALSIFIED (2026-07-17, same day)
+
+Verified: CrossOver's ENTIRE wine stack is x86_64 — wineserver, ntdll.so,
+winemetal.so, the whole process runs "X86-64 (translated)". macOS cannot mix
+architectures in one process, so the unix side pays Rosetta exactly like the
+PE side. In-process Phases 2-3 as written buy NOTHING and are CANCELLED.
+mtld3d ships x86_64 unix-side too ("matching Wine's own binaries") — nobody
+has an in-process native escape.
+
+What survives:
+- The Phase 0/1 wire transport (committed): the ring protocol is process-
+  agnostic and is the foundation for the only TRUE native option — a separate
+  ARM64 render-server process (shm ring via mmap + newBufferWithBytesNoCopy,
+  IOSurface-backed render targets, MTLSharedEvent cross-process sync,
+  layer.contents/IOSurface presentation). Bigger project; ALSO would move
+  Metal.framework execution itself off Rosetta (today even Apple's Metal
+  framework code runs translated in our process).
+- The measured alternative: stay translated and cut work per call (the
+  mtld3d philosophy) — -O2 (landed), algorithmic trims, overlap.
+
+Decision pending. Original plan below for reference.
+
+## Why (measured, 2026-07-17) — [premise now known false in-process]
 
 The frame ceiling is ONE `dxvk-cs` thread doing all D3D9→Metal translation as
 x86 code under Rosetta (~2× per-instruction tax; ~38% of process time is
