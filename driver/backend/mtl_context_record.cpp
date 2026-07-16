@@ -1,10 +1,13 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <tuple>
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
@@ -67,6 +70,9 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     if (m_pass.active)
       closePass();
+    /* MetalFX scaler handles are +1-owned (bridge contract). */
+    for (auto& kv : m_fxScalers)
+      NSObject_release(kv.second);
     /* Context-lifetime visibility buffer: registered at creation, leaves
      * the residency set through the same deferred-destruction path as
      * every other allocation. */
@@ -197,6 +203,13 @@ namespace dxvk::backend {
       closePass();
     }
 
+    /* Decision 10: replay the parked frame list into this command buffer
+     * BEFORE endCommandBuffer/commit. Every consumer of GPU-ordered results
+     * (readback waits, query polls, staging fences, Reset, present) funnels
+     * through this submit, so nothing can observe un-replayed work. No-op in
+     * immediate mode / when nothing was parked. */
+    flushFramePasses();
+
     if (!m_cmdbuf)
       return;
 
@@ -279,6 +292,14 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::endFrame() {
+    /* Frame-boundary marker for Rule B (decision 10): the frontend emits
+     * endFrame() from PresentImage immediately BEFORE the present flush
+     * (EndFrame -> Flush -> present blit -> synchronizeWsi, all in CS
+     * order), so the very next flushFramePasses carries the batch that ends
+     * at the Present boundary — the one place D3D9 declares depth/stencil
+     * contents undefined and their final store may be discarded. */
+    m_frameBoundaryFlush = true;
+
     uint64_t completed = m_device->submissions().completedSerial();
     {
       prof::Scope profScope(prof::EndFrame);
@@ -453,6 +474,15 @@ namespace dxvk::backend {
     }
 
     /* standalone clear: dedicated mini-pass with load=clear, store=store */
+    /* DEFERRED MODE: an ACTIVE recording pass owns m_cmdChunk — the swap
+     * dance below would otherwise let the mini-pass's recordPassEntry steal
+     * the active pass's parked draws. Close (park) the active pass first;
+     * the clear entry then records in true D3D9 order (prior draws, then
+     * clear, then later draws in a fresh pass). */
+    if (deferredPassesEnabled() && m_pass.active) {
+      prof::bump(prof::CntPassCloseClear);
+      closePass();
+    }
     PendingPass saved = std::move(m_pass);
     m_pass = PendingPass();
     if (clear & MtlAspectColor) {
@@ -495,6 +525,23 @@ namespace dxvk::backend {
       return;
 
     ensureCommandBuffer();
+
+    /* Decision 10 (deferred): open a RECORDING pass, not an encoder. All
+     * per-pass encoder-scoped state behaves identically because every write
+     * rides the CmdChunk, not the encoder: the chunk replays into the real
+     * encoder at flushFramePasses. Folded clears stay on m_pass and are
+     * captured by recordPassEntry. */
+    if (deferredPassesEnabled()) {
+      m_pass.encoder = 0;
+      m_pass.active  = true;
+      m_pass.pending = false;
+      m_pass.encodedDraws = 0u;
+      m_dirty = DirtyEverything;
+      m_argTablesBound = false;
+      m_lastEncodedPso = 0u;
+      m_dynValid       = false;
+      return;
+    }
 
     WMTRenderPassInfo info = {};
     /* Occlusion queries write into a per-context visibility buffer bound at
@@ -625,6 +672,11 @@ namespace dxvk::backend {
   void MtlContextImpl::flushCmdChunk() {
     if (m_cmdChunk.empty())
       return;
+    /* Deferred recording has no live encoder — the chunk is consumed by
+     * recordPassEntry and replayed at flushFramePasses instead. Nothing
+     * should call this without an encoder; guard rather than crash. */
+    if (!m_pass.encoder)
+      return;
     prof::Scope profScope(prof::FlushCmdChunk);
     prof::bump(prof::CntChunkFlush);
     /* ONE crossing replays the whole batch natively (mtl_cmd_chunk.h /
@@ -638,6 +690,12 @@ namespace dxvk::backend {
   void MtlContextImpl::closePass() {
     if (!m_pass.active)
       return;
+
+    /* Decision 10 (deferred): no encoder exists yet — park the pass. */
+    if (deferredPassesEnabled()) {
+      recordPassEntry();
+      return;
+    }
 
     /* Replay every batched wmtcmd for this pass before the encoder is
      * barriered/ended — the chunk invariant (non-empty only while a pass is
@@ -848,8 +906,16 @@ namespace dxvk::backend {
         changed = true;
       }
     }
-    if (changed)
+    if (changed) {
       m_dirty |= DirtyResources;
+      /* Decision 10: shader-read bookkeeping for Rules B/C — an attachment
+       * sampled anywhere this batch must keep its Store. Insert only on
+       * CHANGE (this branch), so the per-draw redundant-bind storm never
+       * touches the set. Conservative: a bind without a draw still inserts
+       * (only ever blocks an optimization). */
+      if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
+        m_frameSampled.insert(view->image.ptr());
+    }
   }
 
   void MtlContextImpl::bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) {
@@ -1020,8 +1086,12 @@ namespace dxvk::backend {
      * Any command boundary is a valid flush point — the stream replays in
      * append order across flushes, and Metal snapshots the argument table at
      * each encoded draw, so table writes replayed in a later flush can never
-     * retroactively affect a draw encoded in an earlier one. */
-    if (m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
+     * retroactively affect a draw encoded in an earlier one.
+     * DEFERRED MODE: no live encoder to flush into — the chunk parks with
+     * the pass and its memory pools across frames (m_chunkPool), so the cap
+     * (a PE-side arena memory knob, not a correctness one) does not apply. */
+    if (!deferredPassesEnabled()
+     && m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
       flushCmdChunk();
 
     if ((m_dirty & DirtyPso) && !resolvePso())
@@ -1106,6 +1176,407 @@ namespace dxvk::backend {
     m_dirty = 0u;
     prof::bump(prof::CntDraws);
     return true;
+  }
+
+  // --- frame-deferred pass list (decision 10) --------------------------------
+
+  CmdChunk MtlContextImpl::takeChunk() {
+    if (m_chunkPool.empty())
+      return CmdChunk();
+    CmdChunk c = std::move(m_chunkPool.back());
+    m_chunkPool.pop_back();
+    return c;
+  }
+
+  void MtlContextImpl::recordPassEntry() {
+    FrameEntry e;
+    e.kind         = FrameEntry::Kind::Render;
+    e.targets      = m_pass.targets;          /* copy — m_pass keeps them pending */
+    e.clearColor   = m_pass.clearColor;
+    e.clearValues  = m_pass.clearValues;
+    e.clearDepth   = m_pass.clearDepth;
+    e.clearStencil = m_pass.clearStencil;
+    e.depthClear   = m_pass.depthClear;
+    e.stencilClear = m_pass.stencilClear;
+    e.draws        = m_pass.encodedDraws;
+    e.chunks.push_back(std::move(m_cmdChunk));
+    m_cmdChunk = takeChunk();
+    m_frameEntries.push_back(std::move(e));
+
+    /* Mirror the immediate closePass post-state exactly. */
+    m_pass.encoder = 0;
+    m_pass.active  = false;
+    m_pass.pending = true;    /* same targets stay bound until rebound */
+    m_pass.encodedDraws = 0u;
+    m_argTablesBound = false; /* next pass rotates + re-binds */
+    for (auto& c : m_pass.clearColor) c = false;
+    m_pass.clearDepth = m_pass.clearStencil = false;
+  }
+
+  void MtlContextImpl::prepareDirectEncode(uint32_t passCloseCounter) {
+    if (m_pass.active) {
+      prof::bump(prof::Counter(passCloseCounter));
+      closePass();
+    }
+    else
+      flushPendingClears();   /* a copy must observe folded, not-yet-drawn clears */
+    ensureCommandBuffer();
+  }
+
+  void MtlContextImpl::encodeDirect(std::function<void(obj_handle_t)>&& fn) {
+    if (!deferredPassesEnabled()) {
+      fn(m_cmdbuf.handle());
+      return;
+    }
+    FrameEntry e;
+    e.kind   = FrameEntry::Kind::Direct;
+    e.encode = std::move(fn);
+    m_frameEntries.push_back(std::move(e));
+  }
+
+  void MtlContextImpl::noteTransferRead(const MtlTexture* tex) {
+    if (!deferredPassesEnabled() || tex == nullptr)
+      return;
+    m_frameSampled.insert(tex);
+    m_everTransferRead.insert(tex);
+  }
+
+  void MtlContextImpl::flushFramePasses() {
+    /* Rule B applies only to the batch that ends at the Present boundary
+     * (armed by endFrame); consume the flag on EVERY flush so a mid-frame
+     * flush can never inherit it. */
+    const bool frameBoundary = m_frameBoundaryFlush;
+    m_frameBoundaryFlush = false;
+
+    if (m_frameEntries.empty()) {
+      m_frameSampled.clear();
+      return;
+    }
+
+    if (!m_cmdbuf) {
+      /* Cannot happen by construction (every record path runs
+       * ensureCommandBuffer first) — drop loudly rather than crash. */
+      Logger::err("MtlContextImpl::flushFramePasses: entries without cmdbuf, dropped");
+      m_frameEntries.clear();
+      m_frameSampled.clear();
+      return;
+    }
+
+    /* Independent runtime gates, ON by default (mtld3d's const-bool gates,
+     * exposed as env kill-switches for in-game bisects). */
+    static const bool ruleB   = std::getenv("D9MT_NO_RULE_B") == nullptr;
+    static const bool ruleC   = std::getenv("D9MT_NO_RULE_C") == nullptr;
+    static const bool ruleE   = std::getenv("D9MT_NO_RULE_E") == nullptr;
+    static const bool ruleF   = std::getenv("D9MT_NO_RULE_F") == nullptr;
+    static const bool mergeOn = std::getenv("D9MT_NO_PASSMERGE") == nullptr;
+
+    auto& entries = m_frameEntries;
+
+    /* Attachment identity for the rules: texture + mip + layer (the
+     * sameAttachment contract) — Rc-held by the entries, so no pointer can
+     * be recycled while parked. */
+    using AttKey = std::tuple<const void*, uint32_t, uint32_t>;
+    auto attKeyOf = [](const Rc<MtlTextureView>& v) {
+      return AttKey((const void*)v->image.ptr(), v->key.baseMip, v->key.baseLayer);
+    };
+    auto sameRt = [](const Rc<MtlTextureView>& a, const Rc<MtlTextureView>& b) {
+      if (!sameAttachment(a, b))
+        return false;
+      return a == nullptr || b == nullptr || a->key.format == b->key.format;
+    };
+    auto isSampled = [&](const Rc<MtlTextureView>& v) {
+      return v != nullptr && v->image != nullptr
+          && m_frameSampled.find(v->image.ptr()) != m_frameSampled.end();
+    };
+    auto anyClear = [](const FrameEntry& e) {
+      bool c = e.clearDepth || e.clearStencil;
+      for (bool b : e.clearColor) c = c || b;
+      return c;
+    };
+    auto chunksEmpty = [](const FrameEntry& e) {
+      for (const auto& c : e.chunks)
+        if (!c.empty()) return false;
+      return true;
+    };
+
+    /* --- Rule E: fold clear-only passes into the next pass on the same
+     * targets as its load actions. Clear-only = Render entry, zero draws,
+     * empty chunk (a non-empty chunk may carry visibility-mode or barrier
+     * commands that must materialize in place). Merge target: the next
+     * Render entry attaching EVERY cleared attachment at the SAME slot with
+     * load=Load. Bail on any intervening Direct entry (its reads/writes are
+     * positional and opaque), on any intervening pass touching a cleared
+     * attachment, and on sampled targets — conservative, correctness first. */
+    if (ruleE) {
+      for (size_t i = 0u; i < entries.size(); ) {
+        FrameEntry& p = entries[i];
+        if (p.kind != FrameEntry::Kind::Render || p.draws != 0u
+         || !chunksEmpty(p) || !anyClear(p)) {
+          i++;
+          continue;
+        }
+        bool blocked = false;
+        for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets && !blocked; s++)
+          blocked = p.clearColor[s] && isSampled(p.targets.color[s]);
+        if ((p.clearDepth || p.clearStencil) && isSampled(p.targets.depthStencil))
+          blocked = true;
+        size_t target = SIZE_MAX;
+        for (size_t j = i + 1u; j < entries.size() && !blocked && target == SIZE_MAX; j++) {
+          const FrameEntry& c = entries[j];
+          if (c.kind != FrameEntry::Kind::Render) {
+            blocked = true;   /* opaque transfer/blit between clear and target */
+            break;
+          }
+          bool touches = false, matches = true;
+          for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
+            if (!p.clearColor[s])
+              continue;
+            /* the cleared attachment appearing at ANY slot of c counts as a
+             * touch; a fold is only legal at the SAME slot with load=Load */
+            bool touchedHere = false;
+            for (uint32_t cs = 0u; cs < MtlRenderTargets::MaxColorTargets; cs++)
+              touchedHere = touchedHere
+                || (c.targets.color[cs] != nullptr
+                 && sameAttachment(c.targets.color[cs], p.targets.color[s]));
+            touches = touches || touchedHere;
+            matches = matches && sameRt(c.targets.color[s], p.targets.color[s])
+                   && !c.clearColor[s];
+          }
+          if (p.clearDepth || p.clearStencil) {
+            bool touchedHere = c.targets.depthStencil != nullptr
+              && sameAttachment(c.targets.depthStencil, p.targets.depthStencil);
+            touches = touches || touchedHere;
+            matches = matches && sameRt(c.targets.depthStencil, p.targets.depthStencil)
+                   && !(p.clearDepth   && c.clearDepth)
+                   && !(p.clearStencil && c.clearStencil)
+                   && !c.clearDepth && !c.clearStencil;
+          }
+          if (!touches)
+            continue;         /* unrelated pass; keep scanning */
+          if (matches)
+            target = j;
+          else
+            blocked = true;   /* partial touch — materialize in place */
+        }
+        if (target != SIZE_MAX) {
+          FrameEntry& t = entries[target];
+          for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
+            if (p.clearColor[s]) {
+              t.clearColor[s]  = true;
+              t.clearValues[s] = p.clearValues[s];
+            }
+          }
+          if (p.clearDepth)   { t.clearDepth = true;   t.depthClear = p.depthClear; }
+          if (p.clearStencil) { t.clearStencil = true; t.stencilClear = p.stencilClear; }
+          for (auto& ch : entries[i].chunks) {
+            ch.reset();
+            m_chunkPool.push_back(std::move(ch));
+          }
+          entries.erase(entries.begin() + i);
+          /* don't advance — what was at i+1 is now at i */
+        } else {
+          i++;
+        }
+      }
+    }
+
+    /* --- Pass merging: adjacent Render entries with IDENTICAL attachments
+     * (texture+mip+layer+format on every slot) replay into one encoder,
+     * killing a full tile store+load per merge on TBDR. The follower must
+     * have no clears (a load-action clear would wipe the leader's draws).
+     * This is the flush-time replacement for the reverted D9MT_RTSKIP hack:
+     * a Reset can never interleave here, and entries hold Rc keepalives. */
+    if (mergeOn) {
+      for (size_t i = 0u; i + 1u < entries.size(); ) {
+        FrameEntry& a = entries[i];
+        FrameEntry& b = entries[i + 1u];
+        bool merge = a.kind == FrameEntry::Kind::Render
+                  && b.kind == FrameEntry::Kind::Render
+                  && !anyClear(b)
+                  && sameRt(a.targets.depthStencil, b.targets.depthStencil);
+        for (uint32_t s = 0u; merge && s < MtlRenderTargets::MaxColorTargets; s++)
+          merge = sameRt(a.targets.color[s], b.targets.color[s]);
+        if (merge) {
+          for (auto& ch : b.chunks)
+            a.chunks.push_back(std::move(ch));
+          a.draws += b.draws;
+          entries.erase(entries.begin() + i + 1u);
+        } else {
+          i++;
+        }
+      }
+    }
+
+    /* --- default store actions */
+    for (auto& e : entries) {
+      if (e.kind != FrameEntry::Kind::Render)
+        continue;
+      e.colorStore.fill(uint8_t(WMTStoreActionStore));
+      e.depthStore   = uint8_t(WMTStoreActionStore);
+      e.stencilStore = uint8_t(WMTStoreActionStore);
+    }
+
+    /* --- Rule B: depth/stencil store=DontCare on each depth attachment's
+     * LAST pass of the batch — only at the Present boundary (D3D9: depth is
+     * undefined across Present), and only when the texture can never be
+     * shader-read: structurally (no ShaderRead usage — a D3D9 INTZ-style
+     * depth texture keeps Store forever, mtld3d's depth_is_sampleable) and
+     * observationally (not read this batch). */
+    if (ruleB && frameBoundary) {
+      std::unordered_set<const void*> handled;
+      for (size_t ri = entries.size(); ri-- > 0u; ) {
+        FrameEntry& e = entries[ri];
+        if (e.kind != FrameEntry::Kind::Render || e.targets.depthStencil == nullptr)
+          continue;
+        const Rc<MtlTextureView>& dsv = e.targets.depthStencil;
+        if (dsv->image == nullptr || !handled.insert(dsv->image.ptr()).second)
+          continue;
+        const MtlTexture* img = dsv->image.ptr();
+        if ((img->info().usage & MtlTextureUsageShaderRead) != 0u)
+          continue;
+        if (m_frameSampled.find(img) != m_frameSampled.end())
+          continue;
+        e.depthStore   = uint8_t(WMTStoreActionDontCare);
+        e.stencilStore = uint8_t(WMTStoreActionDontCare);
+        prof::bump(prof::CntStoreDontCare);
+      }
+    }
+
+    /* --- Rule C: color store=DontCare when the NEXT pass on the same
+     * attachment starts with a full clear. Skipped for anything sampled or
+     * transfer-read this batch (positional reads collapse conservatively
+     * into the global set) and for any texture EVER read by a transfer —
+     * the present copy reads the backbuffer every frame, which makes this
+     * the backbuffer exemption (its store never goes DontCare). */
+    if (ruleC) {
+      std::map<AttKey, std::pair<size_t, uint32_t>> nextUse;
+      for (size_t ri = entries.size(); ri-- > 0u; ) {
+        FrameEntry& e = entries[ri];
+        if (e.kind != FrameEntry::Kind::Render)
+          continue;
+        for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
+          const Rc<MtlTextureView>& v = e.targets.color[s];
+          if (v == nullptr || v->image == nullptr)
+            continue;
+          AttKey key = attKeyOf(v);
+          auto it = nextUse.find(key);
+          if (it != nextUse.end()) {
+            const auto [nj, ns] = it->second;
+            if (entries[nj].clearColor[ns]
+             && m_frameSampled.find(v->image.ptr()) == m_frameSampled.end()
+             && m_everTransferRead.find(v->image.ptr()) == m_everTransferRead.end()) {
+              e.colorStore[s] = uint8_t(WMTStoreActionDontCare);
+              prof::bump(prof::CntStoreDontCare);
+            }
+          }
+          nextUse[key] = { ri, s };
+        }
+      }
+    }
+
+    /* --- Rule F: cull passes with no draws, no commands and no surviving
+     * Store — nothing they do reaches device memory. */
+    if (ruleF) {
+      for (size_t i = 0u; i < entries.size(); ) {
+        FrameEntry& e = entries[i];
+        bool cull = e.kind == FrameEntry::Kind::Render
+                 && e.draws == 0u && chunksEmpty(e);
+        if (cull) {
+          for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++)
+            cull = cull && !(e.targets.color[s] != nullptr
+                          && e.colorStore[s] == uint8_t(WMTStoreActionStore));
+          if (e.targets.depthStencil != nullptr
+           && (e.depthStore   == uint8_t(WMTStoreActionStore)
+            || e.stencilStore == uint8_t(WMTStoreActionStore)))
+            cull = false;
+        }
+        if (cull) {
+          for (auto& ch : e.chunks) {
+            ch.reset();
+            m_chunkPool.push_back(std::move(ch));
+          }
+          entries.erase(entries.begin() + i);
+        } else {
+          i++;
+        }
+      }
+    }
+
+    /* --- replay, in exact record order ------------------------------------ */
+    uint32_t encoders = 0u;
+    for (auto& e : entries) {
+      if (e.kind == FrameEntry::Kind::Direct) {
+        e.encode(m_cmdbuf.handle());
+        e.encode = nullptr;
+        continue;
+      }
+
+      WMTRenderPassInfo info = {};
+      info.visibility_buffer = m_visBuffer.handle();
+      for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
+        const auto& view = e.targets.color[s];
+        if (view == nullptr)
+          continue;
+        auto* impl = static_cast<MtlTextureViewImpl*>(view.ptr());
+        info.colors[s].texture      = impl->owned.handle();
+        info.colors[s].load_action  = e.clearColor[s]
+          ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.colors[s].store_action = WMTStoreAction(e.colorStore[s]);
+        if (e.clearColor[s]) {
+          const auto& v = e.clearValues[s];
+          info.colors[s].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
+        }
+        if (d9mtTrace() && s == 0u)
+          Logger::info(str::format("MAT(replay) color img=", (void*)impl->image.ptr(),
+            " load=", e.clearColor[s] ? "CLEAR" : "LOAD",
+            " store=", e.colorStore[s] == uint8_t(WMTStoreActionStore) ? "STORE" : "DONTCARE"));
+      }
+      if (e.targets.depthStencil != nullptr) {
+        auto* impl = static_cast<MtlTextureViewImpl*>(e.targets.depthStencil.ptr());
+        info.depth.texture      = impl->owned.handle();
+        info.depth.load_action  = e.clearDepth ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.depth.store_action = WMTStoreAction(e.depthStore);
+        info.depth.clear_depth  = e.depthClear;
+        const auto* fmtInfo = lookupFormatInfo(impl->key.format);
+        if (fmtInfo->flags & MtlFormatFlagStencil) {
+          info.stencil.texture       = impl->owned.handle();
+          info.stencil.load_action   = e.clearStencil ? WMTLoadActionClear : WMTLoadActionLoad;
+          info.stencil.store_action  = WMTStoreAction(e.stencilStore);
+          info.stencil.clear_stencil = e.stencilClear;
+        }
+      }
+
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+      for (auto& ch : e.chunks) {
+        if (!ch.empty())
+          MTL4RenderCommandEncoder_encodeCommands(enc, ch.head());
+        ch.reset();
+        m_chunkPool.push_back(std::move(ch));
+      }
+      e.chunks.clear();
+      /* §4c: identical producer-barrier structure to the immediate path —
+       * every encoder's fragment writes are ordered ahead of all later
+       * queue stages before endEncoding. */
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+      encoders++;
+
+      /* GPU-lifetime keepalive for the attachment views (retire-by-serial
+       * at submit, which is the caller of this function). */
+      for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
+        if (e.targets.color[s] != nullptr)
+          m_keepAlive.push_back(e.targets.color[s]);
+      }
+      if (e.targets.depthStencil != nullptr)
+        m_keepAlive.push_back(e.targets.depthStencil);
+    }
+    prof::bump(prof::CntFramePasses, encoders);
+
+    /* No FrameEntry outlives the frame flush — the Reset-vs-parked-pass bug
+     * class (the D9MT_RTSKIP killer) is structurally impossible. */
+    entries.clear();
+    m_frameSampled.clear();
   }
 
   // (resolvePso / bindArgumentTables contents / flushVertexBuffers /

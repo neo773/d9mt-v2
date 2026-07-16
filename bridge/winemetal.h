@@ -1830,6 +1830,12 @@ WINEMETAL_API obj_handle_t MetalLayer_nextDrawable(obj_handle_t layer);
 
 WINEMETAL_API bool MTLDevice_supportsFXSpatialScaler(obj_handle_t device);
 
+/* Metal 4 spatial scaler: created against an MTL4Compiler, encodes into an
+ * MTL4CommandBuffer (the MTL3 MTLCommandBuffer_encodeSpatialScale variant
+ * cannot). Present-path upscale rides these. */
+WINEMETAL_API obj_handle_t MTLDevice_newMTL4SpatialScaler(obj_handle_t device, obj_handle_t compiler, const struct WMTFXSpatialScalerInfo *info);
+WINEMETAL_API void MTL4CommandBuffer_encodeSpatialScale(obj_handle_t cmdbuf, obj_handle_t scaler, obj_handle_t color, obj_handle_t output);
+
 WINEMETAL_API bool MTLDevice_supportsFXTemporalScaler(obj_handle_t device);
 
 struct WMTLayerProps {

@@ -92,6 +92,7 @@ namespace dxvk {
                                        const Rc<MtlBuffer>&, MtlDeviceSize, MtlDeviceSize, MtlDeviceSize, MtlFormat) { MTL_STUB("copyBufferToTexture"); }
   void MtlContext::resolveTexture(const Rc<MtlTexture>&, const Rc<MtlTexture>&, MtlResolveRegion, MtlFormat, MtlResolveMode, MtlResolveMode) { MTL_STUB("resolveTexture"); }
   void MtlContext::blitTextureView(const Rc<MtlTextureView>&, const MtlOffset3D[2], const Rc<MtlTextureView>&, const MtlOffset3D[2], MtlSamplerFilter) { MTL_STUB("blitTextureView"); }
+  bool MtlContext::presentUpscale(const Rc<MtlTexture>&, const Rc<MtlTexture>&) { return false; }
   void MtlContext::generateMipmaps(const Rc<MtlTextureView>&, MtlSamplerFilter) { MTL_STUB("generateMipmaps"); }
   void MtlContext::transformImage(const Rc<MtlTexture>&, MtlSubresourceRange, MtlBarrierScope) { MTL_STUB("transformImage"); }
 

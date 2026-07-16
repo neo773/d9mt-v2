@@ -749,14 +749,18 @@ namespace dxvk {
         } else if (cDrawable.view != nullptr) {
           /* Sizes differ: CoreAnimation window layout re-sizes drawables to
            * the window behind our pinned drawableSize, so a raw copy would
-           * leave the image in the top-left corner. Scaled meta-blit fills
-           * the drawable regardless of its size. */
-          MtlOffset3D dstBox[2] = { { 0, 0, 0 },
-            { int32_t(dst.width), int32_t(dst.height), 1 } };
-          MtlOffset3D srcBox[2] = { { 0, 0, 0 },
-            { int32_t(src.width), int32_t(src.height), 1 } };
-          ctx->blitTextureView(cDrawable.view, dstBox, cPresentView, srcBox,
-            MtlSamplerFilter::Linear);
+           * leave the image in the top-left corner. MetalFX spatial upscale
+           * when opted in (D9MT_METALFX=1) — a lower render resolution then
+           * presents near-native; otherwise the scaled meta-blit fills the
+           * drawable regardless of its size. */
+          if (!ctx->presentUpscale(cDrawable.texture, cPresentImage)) {
+            MtlOffset3D dstBox[2] = { { 0, 0, 0 },
+              { int32_t(dst.width), int32_t(dst.height), 1 } };
+            MtlOffset3D srcBox[2] = { { 0, 0, 0 },
+              { int32_t(src.width), int32_t(src.height), 1 } };
+            ctx->blitTextureView(cDrawable.view, dstBox, cPresentView, srcBox,
+              MtlSamplerFilter::Linear);
+          }
         } else {
           /* No drawable view (stub presenter): clamped copy — an over-sized
            * copy is an out-of-bounds fault that hangs the GPU. */

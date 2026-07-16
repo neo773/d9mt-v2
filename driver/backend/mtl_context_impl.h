@@ -87,10 +87,55 @@
  *    ("main"), colors[] format+blend, sample count, vertex descriptor from
  *    the PsoVertex* structs. NO depth/stencil format (Metal 4 omits it from
  *    the pipeline descriptor), NO tessellation fields.
+ *
+ * 10. FRAME-DEFERRED PASS ENCODING (D9MT_NO_DEFERRED=1 reverts to immediate).
+ *    Ported from mtld3d's passes.rs. closePass() no longer ends a live
+ *    encoder — it parks a FrameEntry{targets, folded clears, the pass's
+ *    CmdChunk} on m_frameEntries; transfers/blits/mini-pass clears park as
+ *    Direct entries (a captured encode closure) so replay order is exactly
+ *    record order. flushFramePasses() runs inside submit() (before
+ *    endCommandBuffer/commit — every frontend flushCommandList, readback
+ *    wait, query wait, Reset and present funnels through submit, so nothing
+ *    can observe un-replayed work). At flush time, with whole-frame
+ *    knowledge, load/store actions are optimized (mtld3d Rules, each env-
+ *    gated, ON by default):
+ *      Rule A (DIVERGES from mtld3d): first use without a clear keeps
+ *        load=Load, NEVER DontCare — D3D9 backbuffers persist across frames
+ *        and GTA relies on backbuffer persistence; mtld3d's first-use
+ *        DontCare assumes single-frame content, we do not.
+ *      Rule B (D9MT_NO_RULE_B): depth/stencil store=DontCare on the
+ *        attachment's LAST pass of the batch, only at a present boundary
+ *        (endFrame() arms m_frameBoundaryFlush; D3D9 says depth is undefined
+ *        across Present) and only if the texture is structurally
+ *        un-sampleable (no ShaderRead usage) and unread this batch.
+ *      Rule C (D9MT_NO_RULE_C): color store=DontCare when the NEXT pass on
+ *        the same attachment starts with a full clear; skipped when the
+ *        texture was sampled/transfer-read this frame or was EVER a
+ *        transfer-read source (m_everTransferRead — the present blit reads
+ *        the backbuffer every frame, so this is the backbuffer exemption
+ *        mechanism: its store can never go DontCare).
+ *      Rule E (D9MT_NO_RULE_E): a clear-only pass (no draws, empty chunk)
+ *        folds into the next pass on the same targets as its load actions.
+ *      Rule F (D9MT_NO_RULE_F): passes with no draws, empty chunks and no
+ *        surviving Store are culled.
+ *      Merge (D9MT_NO_PASSMERGE): adjacent Render entries with identical
+ *        attachments (texture+mip+layer+format per slot) and no clears on
+ *        the second replay into ONE encoder — the safe replacement for the
+ *        reverted D9MT_RTSKIP hack (merging happens at flush time, when a
+ *        Reset can never interleave; entries hold Rc keepalives so no pass
+ *        can straddle backbuffer destruction).
+ *    Serial correctness: replay happens in the SAME command buffer/serial
+ *    the entries were recorded under (flush runs before endCommandBuffer),
+ *    so record-time setTrackingSerial stamps, UploadRing slices, argument-
+ *    table retire-by-serial rotation and query serials all stay valid.
  */
 
 #include <array>
+#include <cstdlib>
+#include <functional>
+#include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../mtl/mtl_context.h"
@@ -101,6 +146,19 @@
 #include "mtl_pso_cache.h"
 
 namespace dxvk::backend {
+
+  /* Frame-deferred pass architecture (decision 10) — OPT-IN via
+   * D9MT_DEFERRED=1. Default OFF: batching the whole frame into one
+   * flush serializes CPU and GPU (frame time = CPU + GPU instead of
+   * overlapped max(CPU, GPU)) — measured as a hard fps regression in GTA IV.
+   * The store/load rules also never fire on deferred renderers (GTA samples
+   * everything it stores). Re-default once submission overlap exists
+   * (native-backend plan phase 4: consumer thread submits pass batches
+   * while later passes are still being recorded). Read once. */
+  inline bool deferredPassesEnabled() {
+    static const bool on = std::getenv("D9MT_DEFERRED") != nullptr;
+    return on;
+  }
 
   /* Backend query object. Occlusion answers come from a visibility-result
    * buffer slot the context assigns at beginQuery; timestamp/event answers
@@ -382,6 +440,52 @@ namespace dxvk::backend {
       uint64_t encodedDraws = 0;       // watchdog budget accounting
     };
 
+    /* One parked frame-list entry (decision 10). Render = a recorded render
+     * pass (targets + folded clears + its wmtcmd chunk(s)); Direct = any
+     * non-render-pass encoder work (compute-encoder transfers, meta-blit
+     * mini-passes, resolve, initImage) captured as a closure so replay order
+     * is exactly record order. Rc members (targets / lambda captures) keep
+     * everything a parked entry references alive until replay; replay then
+     * moves the views into m_keepAlive for the GPU lifetime. */
+    struct FrameEntry {
+      FrameEntry() = default;
+      /* Moves are declared noexcept EXPLICITLY: under C++17 std::function's
+       * move ctor is not noexcept, so the implicit move here wasn't either —
+       * std::vector<FrameEntry> growth (move_if_noexcept) then chose the
+       * COPY path, deep-copying each parked CmdChunk while its head/tail/
+       * next chain still pointed into the destroyed original's blocks; the
+       * replay walked freed heap (GTA IV boot crash, "unhandled mtl4 render
+       * command type"). CmdChunk's copy ctor is deleted now (any copy is a
+       * compile error) and these noexcept moves keep vector growth on the
+       * move path. */
+      FrameEntry(FrameEntry&&) noexcept = default;
+      FrameEntry& operator = (FrameEntry&&) noexcept = default;
+
+      enum class Kind : uint8_t { Render, Direct };
+      Kind kind = Kind::Render;
+
+      /* Render */
+      MtlRenderTargets targets;
+      std::array<bool, 4> clearColor = { };
+      std::array<MtlClearValue, 4> clearValues = { };
+      bool clearDepth = false, clearStencil = false;
+      float depthClear = 1.f;
+      uint32_t stencilClear = 0u;
+      uint64_t draws = 0u;
+      /* Recorded wmtcmd stream(s). One chunk normally; pass merging appends
+       * the follower's chunk — replay issues one encodeCommands per chunk on
+       * the SAME encoder (order-preserving, same contract as the arena-cap
+       * mid-pass flush). Chunks own their memory until replayed, then reset
+       * and return to m_chunkPool. */
+      std::vector<CmdChunk> chunks;
+      /* Flush-time computed store actions (WMTStoreAction values). */
+      std::array<uint8_t, 4> colorStore = { };
+      uint8_t depthStore = 0u, stencilStore = 0u;
+
+      /* Direct */
+      std::function<void(obj_handle_t cmdbuf)> encode;
+    };
+
     Rc<MtlDeviceImpl>  m_device;
     Rc<MtlPresenter>   m_presenter;    // set via synchronizeWsi plumbing
 
@@ -396,6 +500,32 @@ namespace dxvk::backend {
      * arena cap (prepareDraw), and before any DIRECT call on the pass
      * encoder (emitGraphicsBarrier), so stream and direct ops stay ordered. */
     CmdChunk           m_cmdChunk;
+
+    /* Frame-deferred pass list (decision 10). INVARIANT: emptied by
+     * flushFramePasses() inside every submit() — no FrameEntry may outlive
+     * the command buffer it was recorded under. */
+    std::vector<FrameEntry> m_frameEntries;
+    /* Recycled CmdChunk backings for parked passes (block memory plateaus at
+     * the peak per-frame recorded volume instead of re-allocating). */
+    std::vector<CmdChunk>   m_chunkPool;
+    /* Textures observed as shader/transfer READS this batch (bindTexture
+     * change inserts + Direct-entry read sources). Gates Rules B/C: a store
+     * must survive when anything this frame reads the attachment. Cleared at
+     * every flushFramePasses. */
+    std::unordered_set<const void*> m_frameSampled;
+    /* PERSISTENT (context lifetime): textures that were EVER a transfer/blit
+     * read source. The present copy reads the swapchain backbuffer every
+     * frame, so the backbuffer lands here on frame 1 and its color store is
+     * never DontCare'd afterwards (the backbuffer exemption). Conservative
+     * under pointer reuse (a recycled address only ever blocks an
+     * optimization, never enables one). */
+    std::unordered_set<const void*> m_everTransferRead;
+    /* Armed by endFrame() (which the frontend emits immediately before the
+     * present flush), consumed by the next flushFramePasses: gates Rule B to
+     * the one flush whose batch ends at the Present boundary — a mid-frame
+     * flush (query/readback/staging throttle) must NOT discard depth the
+     * rest of the frame still tests against. */
+    bool m_frameBoundaryFlush = false;
 
     /* 3-deep MTL4CommandAllocator ring: rotate per frame, reset the slot we
      * are about to reuse (>= imageCount frames old, so GPU-idle). */
@@ -504,6 +634,13 @@ namespace dxvk::backend {
     static constexpr uint32_t  kFanMaxVerts = 16386u;  /* pattern = 192 KiB of u32 */
     Rc<MtlBuffer>              m_fanIndices;
     bool ensureFanIndices();
+
+    /* MetalFX spatial upscale at present (D9MT_METALFX=1). Scalers are
+     * immutable per (in-dims, out-dims, formats) and device-lifetime; the
+     * handles are +1-owned (bridge contract) and released in the dtor. */
+    bool presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) override;
+    std::map<std::array<uint32_t, 6>, obj_handle_t> m_fxScalers;
+    bool m_fxChecked = false, m_fxUnsupported = false;
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
 
@@ -513,6 +650,16 @@ namespace dxvk::backend {
     void flushPendingClears();         // materialize folded clears with no draw
     void closePass();                  // flush wmtcmd batch, endEncoding + release
     void flushCmdChunk();              // replay + recycle the batched wmtcmd stream
+
+    // --- frame-deferred pass list (decision 10) -----------------------------
+    void recordPassEntry();            // deferred closePass: park the pass
+    CmdChunk takeChunk();              // pooled chunk for the next recording
+    /* Close/flush like computeEncoder() used to, then either run `fn` now
+     * (immediate mode) or park it as a Direct entry (deferred). */
+    void prepareDirectEncode(uint32_t passCloseCounter);
+    void encodeDirect(std::function<void(obj_handle_t)>&& fn);
+    void noteTransferRead(const MtlTexture* tex);
+    void flushFramePasses();           // rules + replay; runs inside submit()
 
     /* wmtcmd appenders for the argument-table hot path (one struct each;
      * table handle rides in the command — MTL4ArgumentTable is not an
@@ -555,7 +702,6 @@ namespace dxvk::backend {
     void flushDynamicState();          // viewport/scissor/dsso/blend/raster setters
     void submit(bool waitCompleted);   // endCommandBuffer, commit, signalEvent, retire
 
-    obj_handle_t computeEncoder();     // close pass, open a one-shot MTL4 compute encoder
     void         ensureVisBuffer();
 
     bool         ensureBlitPipeline(); // lazy meta-blit shader/sampler init

@@ -29,6 +29,48 @@ public:
 
   CmdChunk() = default;
 
+  /* MOVE-ONLY — a CmdChunk copy is structurally broken and MUST stay a
+   * compile error. The implicit copy deep-copied the block arena while
+   * m_head/m_tail and every intra-chain `next` pointer still referenced the
+   * SOURCE's blocks, so the copy's chain dangled the moment the source was
+   * destroyed. That exact copy happened silently in the deferred-pass list:
+   * under C++17, std::function's move ctor is not noexcept, so FrameEntry's
+   * implicit move ctor isn't either, and std::vector<FrameEntry> growth
+   * (move_if_noexcept) COPIED the parked entries and freed the originals'
+   * blocks — the replayed chains then walked freed heap. Frame 1 survived
+   * on stale-but-intact bytes; the next frame's allocation churn recycled
+   * the blocks and the unix replay died on garbage command types
+   * ("unhandled mtl4 render command type", GTA IV boot crash). Deleting
+   * copy forces vector growth onto the (noexcept) move path and turns any
+   * future accidental copy into a compile error. A moved-from chunk is a
+   * valid empty chunk. */
+  CmdChunk(const CmdChunk&) = delete;
+  CmdChunk& operator = (const CmdChunk&) = delete;
+
+  CmdChunk(CmdChunk&& other) noexcept
+  : m_head(other.m_head), m_tail(other.m_tail),
+    m_blocks(std::move(other.m_blocks)),
+    m_activeBlock(other.m_activeBlock),
+    m_blockUsed(other.m_blockUsed) {
+    other.m_head = nullptr;
+    other.m_tail = nullptr;
+    other.m_activeBlock = 0u;
+    other.m_blockUsed = 0u;
+  }
+
+  CmdChunk& operator = (CmdChunk&& other) noexcept {
+    m_head        = other.m_head;
+    m_tail        = other.m_tail;
+    m_blocks      = std::move(other.m_blocks);
+    m_activeBlock = other.m_activeBlock;
+    m_blockUsed   = other.m_blockUsed;
+    other.m_head = nullptr;
+    other.m_tail = nullptr;
+    other.m_activeBlock = 0u;
+    other.m_blockUsed = 0u;
+    return *this;
+  }
+
   /* Appends a command struct; returns a stable pointer to fill in.
    * T must begin with struct wmtcmd_base (type + next). */
   template<typename T>

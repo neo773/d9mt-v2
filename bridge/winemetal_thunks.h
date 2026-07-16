@@ -241,6 +241,22 @@ struct unixcall_mtldevice_newfxspatialscaler {
   obj_handle_t ret;
 };
 
+/* MTL4FX spatial scaler (Metal 4 command buffers; the MTL3 variant above
+ * cannot encode into an MTL4CommandBuffer). */
+struct unixcall_mtldevice_new_mtl4fxspatialscaler {
+  obj_handle_t device;
+  obj_handle_t compiler;
+  struct WMTConstMemoryPointer info;   /* WMTFXSpatialScalerInfo */
+  obj_handle_t ret;
+};
+
+struct unixcall_mtl4commandbuffer_spatial_scale {
+  obj_handle_t cmdbuf;                 /* MTL4CommandBuffer */
+  obj_handle_t scaler;                 /* MTL4FXSpatialScaler */
+  obj_handle_t color;                  /* input texture */
+  obj_handle_t output;                 /* output texture */
+};
+
 struct unixcall_mtlcommandbuffer_temporal_scale {
   obj_handle_t cmdbuf;
   obj_handle_t scaler;
