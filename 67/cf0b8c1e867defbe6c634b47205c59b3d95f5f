@@ -1,0 +1,22 @@
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_20e3bef834ea57 115-125
+  s_9dc0f2092159a8::t_7599b0092dc905 1789-1790
+  s_9dc0f2092159a8::t_2e295032307f51 1684-1692,1697,1709
+  s_9dc0f2092159a8::t_78fd83734bb588 1748
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "67cf0b8c1e867defbe6c634b47205c59b3d95f5f",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
