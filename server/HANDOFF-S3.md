@@ -449,6 +449,64 @@ V5 honest flags:
   anon-restore hygiene now runs only on attach-failure fallback and final
   detach.
 
+## V6 — quiesce deadlock hardening + hung-record telemetry
+
+V5 real-game retest: the process-lifetime design held (attach #0 healthy,
+pid-watch correct), but the server HUNG — no crash, no session log —
+while processing the first real QUIESCE. The heartbeat froze, the client's
+fast-disable fired cleanly, game unharmed. HONEST STATUS: a line-by-line
+audit of handleSession found NO unbounded wait (submitFrame commits +
+signals without waiting; retirement is list pushes; the only create-worker
+lock is held for a queue push/pop), and the synthetic gate could not
+reproduce the hang even with the exact overlap shape — so the ROOT CAUSE IS
+UNCONFIRMED. V6 therefore does three things:
+
+1. **Deadlock-free by construction**: handleSession now ABANDONS the create
+   worker's queue first (swap under the queue mutex, destroy outside it) —
+   no join, no idle-ack wait, and provably no ordering to invert because
+   the worker touches nothing but its own job's Resource + status atomics.
+   This also fixes a real cost: a session died mid-boot-storm no longer
+   leaves the worker churning hundreds of STALE newLibraryWithData jobs.
+   The in-flight job finishes into an orphan. No stage of the handler
+   waits on another thread; no lock is held across a Metal call.
+2. **Per-stage breadcrumbs**: `[serverd] session QUIESCE/BEGIN:
+   worker-abandon... / drain-submit (abandoned N jobs)... / retire
+   (serial=S)... / psocache-drop... / state-reset... / state reset,
+   epoch=E`. A future hang names its exact stage.
+3. **Hung-record telemetry (the bigger net)**: status offset 36 (was _pad0)
+   is now `exec_opcode` — wire opcode+1 while the executor is INSIDE a
+   handler, 0 between records. Mirrored through WMTWireStats
+   (`server_exec_opcode`) into PROF as `execOp=`. THE DECODE RULE for the
+   next frozen-heartbeat log: `hb=0` + `execOp=K` → the executor is stuck
+   inside opcode K-1 (37 = session, 28 = create_shader, 32 = present, ...);
+   `hb=0` + `execOp=0` → the consumer is stuck OUTSIDE handlers (ring walk,
+   stat check, or the process is gone). This works for EVERY handler, not
+   just quiesce.
+
+Gate: the session-3 churn now happens MID-COMPILE-STORM — 64 fresh
+libraries queued, quiesce lands while the worker is mid-queue (log shows
+"abandoned 17 jobs" in a passing run), ack within the epoch timeout,
+exec_opcode 0 after, and the worker provably still builds afterward (a
+fresh pair converges a draw in session 3). PASSING; build-bridge PASS;
+full-clean build-driver PASS.
+
+V6 honest flags:
+- The GTA quiesce hang is NOT reproduced synthetically and NOT
+  conclusively root-caused. If the next run hangs again, execOp + the
+  stage breadcrumbs pinpoint it; candidate classes still open: (a) ObjC
+  release of the last MTLLibrary reference during table clear colliding
+  with the worker deep in MTLCompiler XPC (this project has prior
+  MTLCompiler-XPC history — see civ4 memory), (b) an fprintf-to-blocked-
+  stderr stall (would now show execOp=37 with the last breadcrumb naming
+  the stage BEFORE the hang), (c) the quiesce record racing CS-thread
+  emission if the driver ever destroys a context without draining its CS
+  thread first (SPSC violation — ring corruption; would show as
+  decodeErr>0 or an insane execOp).
+- Shader Resources' libraries are NOT retired through the GPU-safe lists
+  (libraries are not GPU-referenced objects; PSOs made from them are, and
+  ARE retired). If (a) above proves real, the fix is deferring library
+  releases to the worker thread itself.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

@@ -6852,6 +6852,8 @@ _WireRing_stats(void *obj) {
           &wire_status->draws_skipped_pending_pso, memory_order_relaxed);
       out->server_uploads =
           atomic_load_explicit(&wire_status->uploads_executed, memory_order_relaxed);
+      out->server_exec_opcode =
+          atomic_load_explicit(&wire_status->exec_opcode, memory_order_relaxed);
     }
   }
   if (wire_heap) {

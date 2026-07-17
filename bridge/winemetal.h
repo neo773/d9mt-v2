@@ -2576,6 +2576,9 @@ struct WMTWireStats {
   uint64_t server_uploads;      /* heap content records the server executed */
   uint64_t heap_consumed;       /* server's heap generation ack */
   uint64_t heap_dropped;        /* producer uploads dropped: heap full */
+  uint64_t server_exec_opcode;  /* v6: wire opcode+1 the executor is INSIDE
+                                 * right now (0 = between records) — with a
+                                 * frozen heartbeat this names a hung handler */
 };
 
 enum WMTWireAttachMode {

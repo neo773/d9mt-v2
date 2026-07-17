@@ -1770,10 +1770,43 @@ static void resetFoldedState() {
  * table resource GPU-safely, drop the PSO cache (its keys embed dead library
  * POINTERS: a new library at a recycled address must never alias a stale
  * pipeline), reset the folded state to defaults, ack via an epoch bump and
- * KEEP RUNNING. Device/queue/event/argtables/slabs/heap/dummies persist. */
+ * KEEP RUNNING. Device/queue/event/argtables/slabs/heap/dummies persist.
+ *
+ * S3 v6 DEADLOCK-FREE BY CONSTRUCTION + self-naming stages: a real-game
+ * quiesce hung the consumer with no log and no crash. This handler now
+ * (a) prints a breadcrumb per stage so a hang names its stage in the next
+ * log, and (b) contains NO wait that depends on another thread making
+ * progress: the create worker's queue is ABANDONED (swapped out under the
+ * queue mutex, destroyed outside it) rather than joined or acked — the
+ * worker never touches executor state beyond its own job's Resource +
+ * status atomics, so no ack is needed and no ordering can invert; the
+ * "drain" is submitFrame (commit + timeline signal, NO GPU wait — retire-
+ * by-serial owns GPU lifetime exactly as handleDestroy does); retirement
+ * is pure list pushes. No lock is held across any Metal call. */
 static void handleSession(const d9mt_wire_rec_session* r) {
+  const char* what = r->kind ? "BEGIN" : "QUIESCE";
+  fprintf(stderr, "[serverd] session %s: worker-abandon...\n", what);
+
+  /* 1. abandon queued create jobs: stale libraries for a dead session must
+   * not keep the worker churning for minutes; the job IN FLIGHT (possibly
+   * deep inside newLibraryWithData) finishes into an orphaned Resource. */
+  size_t abandoned = 0;
+  {
+    std::deque<Exec::CreateJob> stale;
+    {
+      std::lock_guard<std::mutex> lock(g->creatMutex);
+      stale.swap(g->creatQueue);
+    }
+    abandoned = stale.size(); /* destroyed OUTSIDE the lock */
+  }
+  fprintf(stderr, "[serverd] session %s: drain-submit (abandoned %zu jobs)...\n",
+          what, abandoned);
+
+  /* 2. close + commit the in-flight frame; NO completion wait */
   submitFrame(); /* closes pass + xfer inside */
   const uint64_t after = g->lastSubmitted;
+  fprintf(stderr, "[serverd] session %s: retire (serial=%llu)...\n", what,
+          (unsigned long long)after);
 
   auto retireRes = [&](const std::shared_ptr<Resource>& res) {
     if (res->buffer)
@@ -1795,11 +1828,13 @@ static void handleSession(const d9mt_wire_rec_session* r) {
   g->byHandle.clear();
   g->byWire.clear();
   g->pendingShaders.clear(); /* in-flight create jobs finish into orphans */
+  fprintf(stderr, "[serverd] session %s: psocache-drop...\n", what);
 
   for (auto& kv : g->psoCache)
     if (kv.second && kv.second->pso)
       g->retireNoRes.emplace_back(after, kv.second->pso);
   g->psoCache.clear();
+  fprintf(stderr, "[serverd] session %s: state-reset...\n", what);
 
   g->vs.reset();
   g->fs.reset();

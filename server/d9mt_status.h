@@ -28,7 +28,12 @@
  *   offset  24  u64      completed_serial  last completed submission serial
  *                                          (S1: stays 0 — no server-side execution)
  *   offset  32  u32      error             0 = ok; else enum d9mt_status_error
- *   offset  36  u32      _pad0
+ *   offset  36  u32      exec_opcode       S3 v6 (was _pad0): wire opcode + 1
+ *                                          of the record the executor is
+ *                                          INSIDE right now; 0 = between
+ *                                          records. A frozen heartbeat with a
+ *                                          nonzero exec_opcode names the hung
+ *                                          handler from the client side
  *   offset  40  u32[8]   iosurface_id      IOSurfaceID per swapchain slot (0 = empty)
  *   offset  72  u64[8]   iosurface_serial  generation/frame serial per slot
  *
@@ -100,7 +105,7 @@ struct d9mt_status {
   d9mt_status_au64 progress;         /*  16 */
   d9mt_status_au64 completed_serial; /*  24 */
   d9mt_status_au32 error;            /*  32 */
-  uint32_t _pad0;                    /*  36 */
+  d9mt_status_au32 exec_opcode;      /*  36 (v6; was _pad0) */
   d9mt_status_au32 iosurface_id[D9MT_STATUS_SLOTS];     /* 40 */
   d9mt_status_au64 iosurface_serial[D9MT_STATUS_SLOTS]; /* 72 */
   /* --- v2 (Phase S2) --- */
@@ -126,6 +131,7 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, completed_serial) == 24);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, error) == 32);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, exec_opcode) == 36);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, iosurface_id) == 40);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, iosurface_serial) == 72);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, version) == 136);

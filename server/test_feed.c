@@ -899,10 +899,23 @@ main(int argc, char **argv) {
     printf("[test_feed] flood drained in %d waves: +100 PSOs, wave drew "
            "100/100, skips stopped growing\n", floodWaves);
 
-    /* --- third session: churn again after the heavy load --- */
-    emit_session(0, 2); /* session-2 context died */
+    /* --- third session: QUIESCE UNDER OUTSTANDING COMPILES — the v6
+     * real-game deadlock shape. 64 fresh libraries land on the create
+     * worker and the quiesce record arrives while it is mid-queue; the
+     * handler must abandon the queue and ack WITHOUT any cross-thread
+     * wait. A hang here fails the epoch wait and the [serverd] session
+     * stage logs name the stuck stage. --- */
+    for (uint32_t i = 0; i < 32; i++) {
+      emit_shader(3000 + 2 * i, 0x7000 + 2 * i, 0, "vsMain", lib, lib_size);
+      emit_shader(3001 + 2 * i, 0x7001 + 2 * i, 1, "fsMain", lib, lib_size);
+      emit_bind_shader(0, 0x7000 + 2 * i);
+      emit_bind_shader(1, 0x7001 + 2 * i);
+      emit_draws(1); /* pending-create skips; keeps the table busy */
+    }
+    emit_session(0, 2); /* session-2 context died mid-compile-storm */
     if (wait_u64(&status->epoch, 4, 10000))
-      FAIL("quiesce #2 not acked (epoch=%" PRIu64 ")",
+      FAIL("quiesce #2 not acked under outstanding compiles (epoch=%" PRIu64
+           ") — DEADLOCK; check [serverd] session stage logs",
            (uint64_t)atomic_load_explicit(&status->epoch, memory_order_relaxed));
     int st2;
     if (waitpid(pid, &st2, WNOHANG) == pid)
@@ -910,7 +923,15 @@ main(int argc, char **argv) {
     emit_session(1, 3); /* session-3 context connected */
     if (wait_u64(&status->epoch, 5, 5000))
       FAIL("session begin #3 not acked");
-    /* session-3 smoke: the stream still consumes after two resets */
+    if (atomic_load_explicit(&status->exec_opcode, memory_order_acquire) != 0)
+      FAIL("exec_opcode=%u stuck nonzero after session churn",
+           atomic_load_explicit(&status->exec_opcode, memory_order_relaxed));
+    /* session 3: the create worker must still BUILD after the abandonment */
+    emit_shader(4000, 0x8000, 0, "vsMain", lib, lib_size);
+    emit_shader(4001, 0x8001, 1, "fsMain", lib, lib_size);
+    if (draw_wave_converge(status, &frame, 0x8000, 1, 30) < 0)
+      FAIL("post-abandon compile pipeline stuck (create worker dead?)");
+    /* and the stream still consumes */
     for (uint32_t i = 0; i < 8; i++) {
       struct d9mt_wire_rec_set_stencil_reference sr = {
           {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
@@ -918,8 +939,8 @@ main(int argc, char **argv) {
     }
     if (wait_u64(&status->progress, g_head, 5000))
       FAIL("session-3 records not consumed");
-    printf("[test_feed] session 3: connected + consuming after two resets, "
-           "same pid %d\n", (int)pid);
+    printf("[test_feed] session 3: quiesced mid-storm (queue abandoned), "
+           "reconnected, worker rebuilt + drew — same pid %d\n", (int)pid);
   }
 
   /* 5. detach => server consumes it and exits 0 */

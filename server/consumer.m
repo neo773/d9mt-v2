@@ -119,10 +119,18 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
         /* S2: execute BEFORE publishing tail — the record's ring bytes must
          * stay valid while the executor reads them (the producer may reuse
          * the space the moment tail advances past it). */
-        if (hdr->opcode == d9mt_wire_op_detach)
+        if (hdr->opcode == d9mt_wire_op_detach) {
           detached = 1;
-        else
+        } else {
+          /* S3 v6 self-naming breadcrumb: opcode+1 while INSIDE a handler.
+           * A frozen heartbeat with nonzero exec_opcode names the hung
+           * record from the client's PROF line. */
+          atomic_store_explicit(&status->exec_opcode,
+                                (uint32_t)hdr->opcode + 1u,
+                                memory_order_relaxed);
           d9mt_executor_record(hdr);
+          atomic_store_explicit(&status->exec_opcode, 0, memory_order_relaxed);
+        }
         tail += hdr->size;
       }
       /* Publish per record: releases ring space promptly; tail doubles as
