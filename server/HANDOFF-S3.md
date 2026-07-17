@@ -304,6 +304,68 @@ V3 honest flags:
 - The sweep trusts pid liveness: a pid-reused-by-another-process dir would
   survive (kill(pid,0)==0). Bounded leak, same as before.
 
+## V4 — phantom second attach (re-attach verification + dead-ring cutoff)
+
+V3 real-game retest: first attach fully healthy AND the churn release
+worked — but the SECOND attach logged "[wire] render server attached" with
+NO second "[serverd] ready" anywhere, then hb=0/rec=0 forever: the client
+streamed into a dead ring for ~16 MiB until the 5-window stall budget
+burned and disabled. The unix attach path DID run the epoch handshake, so
+epoch==1 was read without a live server — a stale-mapping / silent-death
+class that could not be reproduced outside wine. V4 hardens every candidate
+so the failure is either FIXED or NAMES ITSELF in the next log:
+
+1. **Detach anon-restore (the likely actual fix)**: `wire_teardown_shm` at
+   detach now restores ANONYMOUS memory over the ring AND heap VAs BEFORE
+   the PE VirtualFrees them. Previously the unix side left the MAP_SHARED
+   file mappings in place at detach ("PE VirtualFree drops the last ref" —
+   the S1 contract): if wine's VM manager recycles a "freed" range without
+   a host munmap (reprotect-and-reuse), the next attach's "fresh" PE region
+   can still resolve to the DEAD ring/status file. Now wine only ever
+   frees/reuses plain anon memory.
+2. **Pre-spawn staleness probe**: right after mapping the freshly
+   O_TRUNC-created status file, epoch MUST read 0 — nonzero means the
+   mapping is stale (the exact phantom mechanism) and the attach fails
+   loudly to local fallback instead of handshaking against a dead server's
+   last words.
+3. **Epoch alone is no longer proof of life**: after epoch==1 the attach
+   requires the heartbeat to ADVANCE (1 s budget, ~100 Hz when alive)
+   before declaring success. Identical for every attach, first or Nth.
+4. **Named diagnostics at every failure point**: `[wire] attach #N: dir=…`
+   opens every attempt; child-death-during-handshake is distinguished from
+   timeout (wait status logged); frozen-heartbeat and stale-epoch failures
+   name themselves. The PE side logs `claim #N` in its attached/local
+   lines for correlation. No more silent halves.
+5. **Never stream into a dead ring** (the wasted 16 MiB + 5 s): two layers —
+   (a) presentObserved latches `g_serverDead` when the server heartbeat is
+   frozen >3 s in server mode (one WireRing_stats per present, already
+   paid); the CS producer checks the latch per record and disables with a
+   named log. (b) waitForSpace: a zero-progress stall window whose
+   heartbeat did not tick disables IMMEDIATELY (dead server) — the
+   5-window budget remains only for live-but-slow consumers. PROF's delta
+   baseline resets on counter regression (new attach epoch).
+
+Gate: the churn prelude now maps BOTH attaches' rings MAP_FIXED at the
+SAME VA, deliberately leaving the dead ring's mapping in place after
+teardown — attach #2 must fully replace it (asserted: the fresh file reads
+magic==0 before init) — and asserts the epoch+heartbeat handshake
+explicitly on both lifecycles. PASSING with the full storm+flood as the
+second attach; build-bridge PASS; full-clean build-driver PASS.
+
+V4 honest flags:
+- The same-VA reuse gate proves the POSIX mechanics; wine's
+  VirtualAlloc/VirtualFree behavior is exactly what the harness CANNOT
+  reproduce (said plainly: requirement 3's "client attach path twice
+  in-process" is not feasible without wine — the diagnostic lines are the
+  contract with the next game run). If the phantom recurs, the log now
+  pinpoints it: stale-epoch warn = mapping bug persists; DIED-before-ready
+  = spawn/env problem; frozen-heartbeat = server hung post-epoch.
+- The dead-server latch keys on presents: a client that stops presenting
+  (loading screen with no Present calls) delays detection until the next
+  present or a ring stall — acceptable, both paths are covered.
+- attach #N heartbeat-advance adds up to ~20 ms to a healthy attach (first
+  tick), bounded 1 s on a dead one.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

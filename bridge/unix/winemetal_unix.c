@@ -6563,12 +6563,13 @@ wire_create_map(const char *name, size_t bytes, void *fixed_at, char out_path[PA
   return p == MAP_FAILED ? NULL : p;
 }
 
-/* Undo a partially-built shm setup: unlink files, drop the status mapping,
- * restore plain anonymous memory over the PE ring region (never unmap it —
- * the PE side owns that VA and will keep producing into it). base != NULL is
- * the fallback path (regions go back to plain memory); at detach the caller
- * passes NULL and the PE side VirtualFrees the regions afterwards. The heap
- * region (wire_heap, S3) follows the same rules. */
+/* Undo a shm setup: unlink files, drop the status mapping, restore plain
+ * anonymous memory over the PE ring (and heap) regions — never UNMAP those
+ * VAs, the PE side owns them (fallback keeps producing into them; detach
+ * VirtualFrees them right after). S3 v4: the detach path passes base too,
+ * so wine's VM manager only ever frees/reuses plain anon memory — a
+ * file-backed range surviving into the NEXT VirtualAlloc is the re-attach
+ * hazard class. The file references drop at the anon restore. */
 static void
 wire_teardown_shm(void *base, uint64_t total) {
   if (wire_status) {
@@ -6620,12 +6621,13 @@ _WireRing_attach(void *obj) {
     goto local;
   }
 
+  unsigned seq;
   {
     /* S3 v3: attach sequence in the dir name — device churn (throwaway
      * boot devices) re-attaches with a FRESH dir + fresh server; a stale
      * dir from an unfinished teardown can never collide. */
     static unsigned wire_attach_seq; /* unix side, process lifetime */
-    const unsigned seq = wire_attach_seq++;
+    seq = wire_attach_seq++;
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !*tmp)
       tmp = "/tmp";
@@ -6634,6 +6636,11 @@ _WireRing_attach(void *obj) {
     snprintf(wire_dir, sizeof(wire_dir), "%s%sd9mt-%d-%u", tmp,
              (len && tmp[len - 1] == '/') ? "" : "/", (int)getpid(), seq);
   }
+  /* S3 v4: every attach attempt names itself up front — a future failure
+   * anywhere below leaves a paired begin/WARN trail, never a silent half. */
+  fprintf(stderr, "[wire] attach #%u: dir=%s ring=%llu B heap=%llu B\n", seq,
+          wire_dir, (unsigned long long)cap,
+          (unsigned long long)params->heap_bytes);
   if (mkdir(wire_dir, 0700) != 0 && errno != EEXIST) {
     fprintf(stderr, "[wire] WARN: mkdir(%s): %s — local ring, no consumer\n",
             wire_dir, strerror(errno));
@@ -6655,6 +6662,21 @@ _WireRing_attach(void *obj) {
             strerror(errno));
     wire_teardown_shm(base, total);
     goto local;
+  }
+  /* S3 v4: the status file was just O_TRUNC-created — a fresh mapping MUST
+   * read epoch=0. A nonzero epoch here means the mapping resolves to STALE
+   * memory (the wrong-VA / leftover-mapping failure class): the handshake
+   * below would then "succeed" against a dead server's last words. Fail
+   * loudly instead. */
+  {
+    uint64_t pre = atomic_load_explicit(&wire_status->epoch, memory_order_acquire);
+    if (pre != 0) {
+      fprintf(stderr, "[wire] WARN: fresh status file reads epoch=%llu "
+                      "(stale mapping) — local ring, no consumer\n",
+              (unsigned long long)pre);
+      wire_teardown_shm(base, total);
+      goto local;
+    }
   }
   wire_init_header((struct d9mt_wire_ring *)base, cap);
 
@@ -6702,8 +6724,10 @@ _WireRing_attach(void *obj) {
     }
 
     /* Handshake: epoch=1 is release-stored LAST by the server. 3 s budget,
-     * early-out if the child dies first. */
+     * early-out if the child dies first (S3 v4: named separately from the
+     * timeout — no more silent halves). */
     int ready = 0;
+    int died = 0, died_status = 0;
     for (uint32_t i = 0; i < 3000u; i++) {
       if (atomic_load_explicit(&wire_status->epoch, memory_order_acquire) == 1) {
         ready = 1;
@@ -6712,20 +6736,55 @@ _WireRing_attach(void *obj) {
       int st;
       if (waitpid(pid, &st, WNOHANG) == pid) {
         pid = 0;
+        died = 1;
+        died_status = st;
         break;
       }
       usleep(1000);
     }
     if (!ready) {
       uint32_t err = atomic_load_explicit(&wire_status->error, memory_order_acquire);
-      fprintf(stderr, "[wire] WARN: d9mt-serverd not ready in 3s (pid=%d err=%u) "
-                      "— local ring, no consumer\n", (int)pid, err);
+      if (died)
+        fprintf(stderr, "[wire] WARN: attach #%u: d9mt-serverd DIED before ready "
+                        "(wait status 0x%x, server err=%u) — local ring, no consumer\n",
+                seq, died_status, err);
+      else
+        fprintf(stderr, "[wire] WARN: attach #%u: d9mt-serverd not ready in 3s "
+                        "(pid=%d err=%u) — local ring, no consumer\n",
+                seq, (int)pid, err);
       if (pid) {
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
       }
       wire_teardown_shm(base, total);
       goto local;
+    }
+    /* S3 v4: epoch alone is not proof of life — require the heartbeat to
+     * ADVANCE (~100 Hz once the consumer loop runs; 1 s budget). A stale
+     * epoch read through any wrong mapping has a FROZEN heartbeat and fails
+     * here instead of "attaching" to a dead ring. */
+    {
+      const uint64_t hb0 =
+          atomic_load_explicit(&wire_status->heartbeat, memory_order_acquire);
+      int alive = 0;
+      for (uint32_t i = 0; i < 1000u; i++) {
+        if (atomic_load_explicit(&wire_status->heartbeat, memory_order_acquire) != hb0) {
+          alive = 1;
+          break;
+        }
+        usleep(1000);
+      }
+      if (!alive) {
+        fprintf(stderr, "[wire] WARN: attach #%u: epoch=1 but heartbeat FROZEN "
+                        "at %llu for 1s (dead/phantom server) — local ring, no consumer\n",
+                seq, (unsigned long long)hb0);
+        if (pid) {
+          kill(pid, SIGKILL);
+          waitpid(pid, NULL, 0);
+        }
+        wire_teardown_shm(base, total);
+        goto local;
+      }
     }
     wire_server_pid = pid;
   }
@@ -6850,7 +6909,14 @@ _WireRing_detach(void *obj) {
             (unsigned long long)atomic_load_explicit(&wire_ring->records, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&wire_ring->bytes, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&wire_ring->decode_errors, memory_order_relaxed));
-    wire_teardown_shm(NULL, 0); /* unlink files + dir, drop status mapping */
+    /* S3 v4: restore ANONYMOUS memory over the ring+heap VAs BEFORE the PE
+     * side VirtualFrees them. Wine's VM manager created those regions as
+     * anon and does not know this side swapped in MAP_SHARED file backing;
+     * letting VirtualFree/re-VirtualAlloc operate on a file-backed range is
+     * exactly the re-attach hazard class (a "fresh" region that still
+     * resolves to the DEAD ring's file). After this the PE frees plain
+     * memory — the file references drop here. */
+    wire_teardown_shm(wire_ring, wire_ring_total);
   }
   wire_ring = NULL;
   wire_ring_total = 0;

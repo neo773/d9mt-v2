@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -55,6 +56,24 @@ namespace dxvk::backend {
 
     /* True once WireRing_attach has been issued (profiler stats source). */
     std::atomic<bool> g_wireAttached = { false };
+
+    /* S3 v4: dead-server latch. presentObserved (app thread) tracks the
+     * server heartbeat; frozen for >3 s while in SERVER mode = dead server,
+     * and the CS producer disables instead of streaming into a dead ring
+     * until it fills. Reset per attach. */
+    std::atomic<bool> g_serverMode = { false };
+    std::atomic<bool> g_serverDead = { false };
+    std::atomic<uint64_t> g_lastHb = { 0u };
+    std::atomic<int64_t> g_lastHbChangeMs = { 0 };
+    constexpr int64_t kServerDeadMs = 3000;
+
+    int64_t monotonicMs() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    /* PE-side attach counter (log correlation with the unix "attach #N"). */
+    std::atomic<uint32_t> g_claimSeq = { 0u };
 
     /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
 
@@ -176,14 +195,22 @@ namespace dxvk::backend {
     m_active = true;
     m_hasConsumer = mode == WMTWireAttachServer;
 
+    /* S3 v4: reset the dead-server latch for this attach epoch */
+    g_serverDead.store(false, std::memory_order_relaxed);
+    g_lastHb.store(0u, std::memory_order_relaxed);
+    g_lastHbChangeMs.store(monotonicMs(), std::memory_order_relaxed);
+    g_serverMode.store(m_hasConsumer, std::memory_order_release);
+
+    const uint32_t claim = g_claimSeq.fetch_add(1u, std::memory_order_relaxed);
     g_wireAttached.store(true, std::memory_order_release);
     if (m_hasConsumer) {
-      Logger::info(str::format("MtlWireContext: render server attached, shm ring=",
-        WireRingCapacity >> 20, " MiB, heap=",
+      Logger::info(str::format("MtlWireContext: render server attached (claim #",
+        claim, "), shm ring=", WireRingCapacity >> 20, " MiB, heap=",
         m_heap ? (WireHeapCapacity >> 20) : 0u, " MiB (dual execution)"));
     } else {
-      Logger::warn(str::format("MtlWireContext: no render server, local ring=",
-        WireRingCapacity >> 20, " MiB with no consumer (disables on first ring-full)"));
+      Logger::warn(str::format("MtlWireContext: no render server (claim #", claim,
+        "), local ring=", WireRingCapacity >> 20,
+        " MiB with no consumer (disables on first ring-full)"));
     }
   }
 
@@ -232,6 +259,7 @@ namespace dxvk::backend {
     { std::lock_guard<std::mutex> lock(g_backbufferMutex);
       g_backbuffer = nullptr;
     }
+    g_serverMode.store(false, std::memory_order_release);
     g_wireClaimed.store(false, std::memory_order_release);
   }
 
@@ -264,6 +292,8 @@ namespace dxvk::backend {
     for (uint32_t window = 1u; window <= WireStallWindows; window++) {
       m_ring->stalls.fetch_add(1u, std::memory_order_relaxed);
       const uint64_t tailAtStart = m_ring->tail.load(std::memory_order_acquire);
+      WMTWireStats hbStart = { };
+      WireRing_stats(&hbStart);
       for (uint32_t spin = 0u; spin < (1u << 20); spin++) {
         tail = m_ring->tail.load(std::memory_order_acquire);
         if (m_head - tail + need <= m_cap) {
@@ -274,6 +304,20 @@ namespace dxvk::backend {
         }
         if ((spin & 0x3Fu) == 0x3Fu)
           ::Sleep(0);
+      }
+      /* S3 v4: a live-but-slow consumer heartbeats through a stall (~100
+       * ticks per window); frozen heartbeat + zero tail progress = DEAD
+       * server — disable NOW instead of burning the full window budget. */
+      if (m_ring->tail.load(std::memory_order_acquire) == tailAtStart) {
+        WMTWireStats hbEnd = { };
+        WireRing_stats(&hbEnd);
+        if (hbEnd.heartbeat == hbStart.heartbeat) {
+          Logger::err(str::format("MtlWireContext: ring stalled with FROZEN "
+            "heartbeat (hb=", hbEnd.heartbeat,
+            ") — server dead, disabling wire transport"));
+          m_active = false;
+          return false;
+        }
       }
       Logger::warn(str::format("MtlWireContext: ring stall window ", window,
         "/", WireStallWindows, " (~1s each, consumer behind)"));
@@ -294,6 +338,15 @@ namespace dxvk::backend {
   void* MtlWireContext::reserveBytes(uint16_t op, uint32_t bytes) {
     if (!m_active)
       return nullptr;
+
+    /* S3 v4: never stream into a dead ring. The present path latches
+     * g_serverDead when the server heartbeat freezes for >3 s — cheaper and
+     * far earlier than waiting for a 16 MiB ring to fill. Permanent. */
+    if (m_hasConsumer && g_serverDead.load(std::memory_order_acquire)) {
+      Logger::err("MtlWireContext: server heartbeat frozen >3s — disabling wire transport (dead server)");
+      m_active = false;
+      return nullptr;
+    }
 
     /* S2: drain queued destroy_resource records first — a destroy is queued
      * only after the resource's last possible use, so emitting it before the
@@ -1422,6 +1475,22 @@ namespace dxvk::backend::wire {
      * counts as "kept pace" for this present. */
     if (s.server_frame_serial + 1u >= local)
       g_srvPace.fetch_add(1u, std::memory_order_relaxed);
+
+    /* S3 v4 dead-server latch: the heartbeat ticks ~100 Hz whenever the
+     * server lives (the v2 create worker keeps the consumer loop — and thus
+     * the heartbeat — running through boot storms). Frozen for >3 s in
+     * SERVER mode = dead; the CS producer disables at its next record
+     * instead of streaming into a dead ring until it fills. */
+    if (g_serverMode.load(std::memory_order_acquire) &&
+        !g_serverDead.load(std::memory_order_relaxed)) {
+      const int64_t now = monotonicMs();
+      if (s.heartbeat != g_lastHb.load(std::memory_order_relaxed)) {
+        g_lastHb.store(s.heartbeat, std::memory_order_relaxed);
+        g_lastHbChangeMs.store(now, std::memory_order_relaxed);
+      } else if (now - g_lastHbChangeMs.load(std::memory_order_relaxed) > kServerDeadMs) {
+        g_serverDead.store(true, std::memory_order_release);
+      }
+    }
   }
 
 }

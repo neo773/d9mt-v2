@@ -300,7 +300,8 @@ draw_wave_converge(struct d9mt_status *status, uint64_t *frame,
 }
 
 static int
-create_file(const char *dir, const char *name, size_t bytes, void **out) {
+create_file_at(const char *dir, const char *name, size_t bytes, void *fixed,
+               void **out) {
   char path[1024];
   snprintf(path, sizeof(path), "%s/%s", dir, name);
   int fd = open(path, O_CREAT | O_RDWR | O_EXCL, 0600);
@@ -308,14 +309,27 @@ create_file(const char *dir, const char *name, size_t bytes, void **out) {
     perror(path);
     return 1;
   }
-  *out = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  *out = mmap(fixed, bytes, PROT_READ | PROT_WRITE,
+              MAP_SHARED | (fixed ? MAP_FIXED : 0), fd, 0);
   close(fd);
-  if (*out == MAP_FAILED) {
+  if (*out == MAP_FAILED || (fixed && *out != fixed)) {
     perror("mmap");
     return 1;
   }
   return 0;
 }
+
+static int
+create_file(const char *dir, const char *name, size_t bytes, void **out) {
+  return create_file_at(dir, name, bytes, NULL, out);
+}
+
+/* The ring VA reused across BOTH attaches (churn hazard class: the client
+ * relocates its ring MAP_FIXED over a PE region; on re-attach the region
+ * may land on the SAME VA that previously held the DEAD ring's file
+ * mapping — the second MAP_FIXED must fully replace it). */
+static void *g_ring_va;
+#define RING_FILE_BYTES (sizeof(struct d9mt_wire_ring) + RING_CAP)
 
 /* S3 v3 device-churn prelude: the D3D9 boot pattern — a THROWAWAY device
  * attaches, emits a few records, and runs the FULL client teardown (detach
@@ -331,8 +345,7 @@ churn_prelude(const char *server_bin) {
     FAIL("churn mkdtemp: %s", strerror(errno));
 
   void *ring_mem, *status_mem, *heap_mem;
-  if (create_file(dir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP,
-                  &ring_mem) ||
+  if (create_file_at(dir, "ring", RING_FILE_BYTES, g_ring_va, &ring_mem) ||
       create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
       create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
                   &heap_mem))
@@ -376,6 +389,21 @@ churn_prelude(const char *server_bin) {
       FAIL("churn: timeout waiting for epoch==1");
     usleep(10000);
   }
+  /* the client's v4 verification, mirrored: epoch alone is not life —
+   * the heartbeat must ADVANCE */
+  {
+    uint64_t hb0 = atomic_load_explicit(&status->heartbeat, memory_order_acquire);
+    int alive = 0;
+    for (int i = 0; i < 1000; i++) {
+      if (atomic_load_explicit(&status->heartbeat, memory_order_acquire) != hb0) {
+        alive = 1;
+        break;
+      }
+      usleep(1000);
+    }
+    if (!alive)
+      FAIL("churn: epoch=1 but heartbeat frozen (dead/phantom server)");
+  }
   if (wait_u64(&status->progress, produced, 5000))
     FAIL("churn: progress stalled");
 
@@ -405,7 +433,9 @@ churn_prelude(const char *server_bin) {
   snprintf(p, sizeof(p), "%s/heap", dir);
   unlink(p);
   rmdir(dir);
-  munmap(ring_mem, sizeof(struct d9mt_wire_ring) + RING_CAP);
+  /* Deliberately DO NOT munmap the ring: the DEAD ring's file mapping stays
+   * live at g_ring_va — the second attach MAP_FIXes the new ring file over
+   * the same VA, exercising the re-attach VA-reuse hazard class. */
   munmap(status_mem, sizeof(struct d9mt_status));
   munmap(heap_mem, D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP);
 
@@ -433,10 +463,16 @@ main(int argc, char **argv) {
   const char *server_bin = argv[1];
 
   /* 0. device churn: throwaway lifecycle first — everything below runs as
-   * the SECOND attach of this process (the real device after a caps probe) */
+   * the SECOND attach of this process (the real device after a caps probe).
+   * BOTH rings map at the SAME fixed VA (see g_ring_va): attach #2 must
+   * MAP_FIXED its fresh file over the dead ring's still-live mapping. */
+  g_ring_va = mmap(NULL, RING_FILE_BYTES, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (g_ring_va == MAP_FAILED)
+    FAIL("ring VA reservation failed: %s", strerror(errno));
   if (churn_prelude(server_bin))
     return 1;
-  printf("[test_feed] SECOND attach: running the full gate\n");
+  printf("[test_feed] SECOND attach: running the full gate (ring VA reused)\n");
 
   /* 1. shm dir + files */
   const char *tmp = getenv("TMPDIR");
@@ -447,8 +483,7 @@ main(int argc, char **argv) {
   printf("[test_feed] shm dir: %s\n", dir);
 
   void *ring_mem, *status_mem, *heap_mem;
-  if (create_file(dir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP,
-                  &ring_mem) ||
+  if (create_file_at(dir, "ring", RING_FILE_BYTES, g_ring_va, &ring_mem) ||
       create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
       create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
                   &heap_mem))
@@ -458,6 +493,13 @@ main(int argc, char **argv) {
   struct d9mt_status *status = status_mem;
   g_heap = heap_mem;
   g_heap_data = (uint8_t *)heap_mem + D9MT_WIRE_HEAP_DATA_OFFSET;
+
+  /* the fresh MAP_FIXED must have REPLACED the dead ring's mapping: a stale
+   * mapping still shows the old header (magic set by the prelude) */
+  if (g_ring->magic != 0)
+    FAIL("second attach: ring VA still shows the DEAD ring's file "
+         "(magic=%llx — MAP_FIXED did not replace the stale mapping)",
+         (unsigned long long)g_ring->magic);
 
   g_ring->capacity = RING_CAP;
   g_ring->data_offset = sizeof(struct d9mt_wire_ring);
