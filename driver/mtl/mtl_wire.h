@@ -174,7 +174,16 @@ enum d9mt_wire_op {
   d9mt_wire_op_upload_texture = 34,
   d9mt_wire_op_bind_texture_by_id = 35,
 
-  d9mt_wire_op_count = 36
+  /* --- Phase S3 v5: PROCESS-LIFETIME server. The wire is decoupled from
+   * MtlContext lifetime (D3D9 device lifetimes are chaotic: throwaway
+   * devices, overlapping lifetimes). Context death sends a QUIESCE session
+   * record — the server resets its resource table + folded state and KEEPS
+   * RUNNING (acked by a status epoch bump); a later context CONNECTS with a
+   * session-begin record. The server dies only with the client process
+   * (pid watchdog) or an explicit Detach (tests / final teardown). */
+  d9mt_wire_op_session = 36,
+
+  d9mt_wire_op_count = 37
 };
 
 /* --- record header -------------------------------------------------------
@@ -746,5 +755,19 @@ struct d9mt_wire_rec_bind_texture_by_id {
   uint32_t layer_count;
 };
 D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_bind_texture_by_id) == 48);
+
+/* Session boundary (S3 v5). kind 0 = QUIESCE (the claiming context died:
+ * drain, retire every table resource GPU-safely, reset folded state, keep
+ * running); kind 1 = BEGIN (a new context connected to the live server:
+ * same reset, marks the boundary). Both ack by incrementing status epoch
+ * (release) — epoch is 1 at boot-ready and +1 per session record executed.
+ * Stale wire ids / client handles from an earlier session MUST fail to
+ * resolve afterwards (dummy substitution), never alias. */
+struct d9mt_wire_rec_session {
+  struct d9mt_wire_rec_hdr hdr;
+  uint32_t kind;    /* 0 = quiesce, 1 = begin */
+  uint32_t session; /* client-side session counter (diagnostics) */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_session) == 16);
 
 #endif /* D9MT_MTL_WIRE_H */

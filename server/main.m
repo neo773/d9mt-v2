@@ -139,9 +139,27 @@ main(int argc, char **argv) {
   fprintf(stderr, "[serverd] ready: pid=%d dir=%s ring=%llu B surfaces=%ux%u\n",
           getpid(), dir, (unsigned long long)ring->capacity, width, height);
 
+  /* S3 v5 (process-lifetime server): the client pid rides the shm dir name
+   * (d9mt-<pid>-<seq>); the consumer watches it and cleans up the shm when
+   * the client dies without teardown. Unparseable names (d9mt-test-*) get
+   * no pid watch — synthetic clients detach explicitly. */
+  pid_t client_pid = 0;
+  {
+    const char *base = strrchr(dir, '/');
+    base = base ? base + 1 : dir;
+    if (strncmp(base, "d9mt-", 5) == 0) {
+      char *end = NULL;
+      long p = strtol(base + 5, &end, 10);
+      if (p > 0 && end && (*end == '-' || *end == 0))
+        client_pid = (pid_t)p;
+    }
+    if (client_pid)
+      fprintf(stderr, "[serverd] watching client pid %d\n", (int)client_pid);
+  }
+
   char ring_path[1024];
   snprintf(ring_path, sizeof(ring_path), "%s/ring", dir);
-  rc = d9mt_consumer_run(ring, status, ring_path);
+  rc = d9mt_consumer_run(ring, status, ring_path, client_pid);
 
   fprintf(stderr, "[serverd] exit rc=%d\n", rc);
   return rc;

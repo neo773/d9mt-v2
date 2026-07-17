@@ -366,6 +366,89 @@ V4 honest flags:
 - attach #N heartbeat-advance adds up to ~20 ms to a healthy attach (first
   tick), bounded 1 s on a dead one.
 
+## V5 — PROCESS-LIFETIME SERVER (design correction; supersedes V3's
+## respawn-per-attach and the interim lazy-attach brief)
+
+Rounds 3–5 kept patching device-lifetime PATTERNS (throwaway device,
+overlap, whatever's next) because the wire's lifetime was coupled to
+MtlContext lifetime. V5 decouples them BY CONSTRUCTION — the bug class is
+eliminated, not enumerated:
+
+1. **The server is process-lifetime.** The FIRST claim in the wine process
+   spawns it (V4's verified attach, unchanged, once); it survives every
+   context/device destruction and dies only with the client process — its
+   own pid watchdog (client pid parsed from the shm dir name
+   `d9mt-<pid>-<seq>`; checked ~10 Hz alongside the ring-unlink stat) exits
+   AND unlinks the shm files itself, so a crashed or teardown-less client
+   leaks nothing. The orphan sweep stays as backstop. WireRing_detach
+   remains implemented for explicit final-teardown callers (tests use it);
+   the driver no longer calls it.
+2. **Context death = QUIESCE, not teardown** (`d9mt_wire_rec_session`
+   kind 0, op 36): the server drains the in-flight frame, retires every
+   table resource GPU-safely (buffers/textures via the residency retire
+   list; samplers/views/PSOs via retireNoRes), CLEARS the PSO cache (its
+   keys embed library POINTERS — a new library at a recycled address must
+   never alias a stale pipeline; dssoCache is value-keyed and persists),
+   resets folded state to D3D9 defaults (resetFoldedState, shared with
+   init), acks by BUMPING STATUS EPOCH (+1 per session record; boot-ready
+   is 1) and keeps running. Client side sends the record + a bounded
+   diagnostic ack wait (WireRing_quiesce, thunk 215) — ring order already
+   serializes the reset ahead of any successor's records. No SIGTERM, no
+   unlink, no region frees: the ring/heap files, PE regions and producer
+   CURSORS (a successor continues where its predecessor stopped) are
+   process-lifetime (`WireTransport g_wt`, file-scope in
+   mtl_wire_context.cpp).
+3. **Context creation = CONNECT** (session-begin record, kind 1, same reset
+   + epoch ack): verifies the live server (heartbeat-advance, the V4
+   discipline) and marks the session boundary. The v5-brief lazy-claim
+   retry is kept exactly as designed: a context born while the claim is
+   held (overlapping lifetimes — the round-5 GTA evidence) retries the CAS
+   once per present and connects when the holder dies; one bool test in
+   steady state. Connecting never spawns; a failed FIRST attach stays
+   process-permanent (no per-present respawn stalls).
+4. **Single-producer discipline over global transport**: only the claim
+   holder may write the ring/heap — `reserveBytes` and `heapAlloc` carry
+   the authoritative `m_claimed` gate (every record and region funnels
+   through them); tap-site guards use `wired()`. Binding shadows track on
+   EVERY context (any of them may claim later) and replay after connect
+   (bind-once-then-Discard state the frontend will never re-emit).
+   Pre-connect creates need nothing: wire ids are assigned only on
+   successful emission, so create-at-first-use never assumed attach
+   preceded creation; metallib byte copies are retained on not-yet-claimed
+   contexts and dropped only once the process is permanently wireless.
+
+Gate (test_feed, PASSING ~2 s wall): ONE server pid across three sessions —
+boot attach + S1 checks; session 1 creates + RED-fills texture wire 777;
+QUIESCE (epoch 2, server alive); BEGIN (epoch 3); session 2 runs the ENTIRE
+gate (F1/F2 async-PSO, F4 checkerboard, stale-id probe: binding wire 777
+now draws the BLACK dummy — red would be aliasing, blue a skipped draw —
+proving the table reset; storm; 300 MB flood); QUIESCE #2 (epoch 4) +
+BEGIN #3 (epoch 5) + post-reset consumption smoke; explicit detach exits 0.
+Then the pid-watchdog scenario: a forked stand-in client is SIGKILLed and
+the server exits 0 AND removes its own shm dir within ~1 s. build-bridge
+PASS; full-clean build-driver PASS.
+
+V5 honest flags:
+- The PE claim/connect logic itself still needs the real game (same harness
+  limit as V4 — test_feed exercises the server's session machinery and the
+  stream shapes, not wine). Healthy log signature: ONE `[wire] attach #0`,
+  ONE `[serverd] ready`, then `session QUIESCE/BEGIN` pairs on device churn
+  with the SAME serverd pid, `claim #N` lines PE-side, hb never 0.
+- Sessions never shrink the slab pool or argument-table pool (rewound, not
+  freed); psoCache resets per session (compiles re-run — boot churn only).
+- A quiesce emitted while the ring is nearly full follows normal
+  backpressure; the 700 ms ack wait can expire under extreme load (warned,
+  harmless — ring order still serializes).
+- Straggler destroy records from a previous session are dropped by the
+  table reset; a same-handle recreate in the NEW session followed by a
+  session-1 straggler destroy (Rc released late, queued after the dtor's
+  queue clear) could destroy the new resource — narrow window, unobserved,
+  bounded by dummy-substitution semantics.
+- V3's "fresh dir per attach" seq suffix remains but now only distinguishes
+  processes' FIRST attaches (seq stays 0 in practice); V4's detach
+  anon-restore hygiene now runs only on attach-failure fallback and final
+  detach.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

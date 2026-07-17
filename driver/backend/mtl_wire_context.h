@@ -143,31 +143,19 @@ namespace dxvk::backend {
 
     Rc<MtlContext> m_inner;
 
-    /* ring (only the claiming instance has these non-null). m_ringMem is a
-     * page-aligned VirtualAlloc region; WireRing_attach maps the MAP_SHARED
-     * `ring` file over it (render-server Phase S1) or leaves it plain
-     * memory when no server could be spawned (m_hasConsumer = false). */
-    uint8_t*        m_ringMem = nullptr;
-    d9mt_wire_ring* m_ring    = nullptr;
-    uint8_t*        m_data    = nullptr;
-    uint64_t        m_cap     = 0u;
-    uint64_t        m_head    = 0u;    /* local producer cursor mirror */
-    bool            m_active  = false; /* serializing */
-    bool            m_kick    = false; /* empty->nonempty seen for the pending record */
-    bool            m_hasConsumer = false; /* d9mt-serverd is draining the ring */
-    uint32_t        m_pending = 0u;    /* bytes reserved by beginRecord */
-    bool            m_draining = false; /* inside emitQueuedDestroys */
-    uint64_t        m_presentSerial = 0u; /* presentFrame counter (S2) */
-
-    /* S3 shared heap (mtl_wire.h d9mt_wire_heap): second VirtualAlloc region
-     * relocated into the sparse MAP_SHARED `heap` file — texture/buffer
-     * CONTENT rides regions here; only region metadata rides ring records. */
-    uint8_t*        m_heapMem  = nullptr;
-    d9mt_wire_heap* m_heap     = nullptr;
-    uint8_t*        m_heapData = nullptr;
-    uint64_t        m_heapCap  = 0u;
-    uint64_t        m_heapHead = 0u;   /* local producer cursor mirror */
-    bool            m_heapWarned = false;
+    /* S3 v5: the TRANSPORT (ring + heap regions, producer cursors, server
+     * session) is PROCESS-LIFETIME state — file-scope in the .cpp (struct
+     * WireTransport g_wt) — because D3D9 device lifetimes are chaotic
+     * (throwaway boot devices, overlapping lifetimes). A context only holds
+     * its CLAIM state: whether it is the current producer, or is waiting to
+     * become one. Context death QUIESCES the server (state reset record);
+     * the server itself survives until the client process dies. */
+    bool m_claimed = false;   /* this context is the current wire producer */
+    /* Constructed while the claim was HELD (overlapping device lifetimes).
+     * Retries the claim once per present (tryLateClaim); cleared by the
+     * first full connect/attach attempt — claim-held is the ONLY retryable
+     * state, transport failures stay session-permanent. */
+    bool m_wantClaim = false;
 
     /* S3 rebind shadows: which LOGICAL buffer sits in each wire-visible
      * binding, so invalidateBuffer (a Discard rename, which the frontend
@@ -206,6 +194,21 @@ namespace dxvk::backend {
     void endRecord();
     bool waitForSpace(uint64_t need);
 
+    /* --- S3 v5: claim lifecycle (claim must be HELD by the caller) ---------
+     * attachWire = FIRST attach in the process: region alloc + spawn +
+     * V4-verified handshake. connectWire = attach to the ALREADY-RUNNING
+     * process-lifetime server: liveness check + session-begin record.
+     * tryLateClaim runs once per present while m_wantClaim: CAS the claim;
+     * on success run ONE connect/attach attempt and replay the shadowed
+     * bindings (the frontend never re-binds state it set before the wire
+     * existed). */
+    bool attachWire();
+    bool connectWire();
+    void acquireWire();
+    void tryLateClaim();
+    void emitShadowBinds(const MtlBuffer* only);
+    bool wired() const; /* this context is the producer AND the transport lives */
+
     /* --- S2 cold-record emission (CS thread) -------------------------------
      * Lazy create-at-first-wire-use: each ensure* checks the resource's
      * wireId (0 = not on the wire yet), emits the create record and assigns
@@ -235,7 +238,6 @@ namespace dxvk::backend {
     void     retryPendingTexUploads(const MtlTexture* image);
     void     emitBindTextureById(MtlStageMask stages, uint32_t slot,
                                  const Rc<MtlTextureView>& view);
-    void     rebindAfterInvalidate(const Rc<MtlBuffer>& buffer);
 
     static void fillBufferRef(d9mt_wire_buffer_ref& dst, const MtlBufferSlice& slice);
     static void fillRtRef(d9mt_wire_rt_ref& dst, const Rc<MtlTextureView>& view);

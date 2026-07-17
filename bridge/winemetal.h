@@ -2619,7 +2619,16 @@ WINEMETAL_API void WireRing_stats(struct WMTWireStats *out);
 /* Teardown, bounded < 1 s: waits <=500 ms for the server to drain
  * (consumer_exited / progress == head), SIGTERMs + reaps it if still alive,
  * unlinks the shm dir. Call AFTER writing the Detach record + shutdown flag
- * and BEFORE releasing the ring region. */
+ * and BEFORE releasing the ring region. S3 v5: the driver no longer calls
+ * this at context death (the server is process-lifetime; its pid watchdog
+ * cleans up at client exit) — kept for explicit final-teardown callers. */
 WINEMETAL_API void WireRing_detach(void);
+
+/* S3 v5 session boundary ack: bounded (<=700 ms) wait for the status epoch
+ * to increment — the server's acknowledgment that a quiesce/begin session
+ * record was executed (resource table reset). Diagnostic; the ring's total
+ * order already guarantees the reset lands before any later record. Call
+ * AFTER writing the session record. */
+WINEMETAL_API void WireRing_quiesce(void);
 
 #endif

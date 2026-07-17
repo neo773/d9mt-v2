@@ -26,6 +26,8 @@
  * never abort the stream.
  */
 
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -43,7 +45,7 @@ now_ms(void) {
 
 int
 d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
-                  const char *ring_path) {
+                  const char *ring_path, pid_t client_pid) {
   uint8_t *data = (uint8_t *)ring + ring->data_offset;
   const uint64_t cap = ring->capacity;
   uint64_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
@@ -52,6 +54,7 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
 
   int detached = 0;
   int unlinked = 0;
+  int client_dead = 0;
   uint64_t last_hb_ms = now_ms();
   uint64_t last_stat_ms = last_hb_ms;
 
@@ -62,16 +65,24 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
       atomic_fetch_add_explicit(&status->heartbeat, 1, memory_order_relaxed);
       last_hb_ms = now;
     }
-    /* client-death fallback: ring file unlinked => exit (~10 Hz check) */
+    /* client-death fallback: ring file unlinked => exit (~10 Hz check).
+     * S3 v5 (process-lifetime server): also watch the CLIENT PID — the
+     * server survives every device/context churn and owns its own cleanup
+     * when the client process dies (crash or exit without teardown). */
     if (now - last_stat_ms >= 100) {
       struct stat st;
       if (stat(ring_path, &st) != 0) {
         fprintf(stderr, "[serverd] ring file gone, exiting\n");
         unlinked = 1;
       }
+      if (client_pid && kill(client_pid, 0) != 0 && errno == ESRCH) {
+        fprintf(stderr, "[serverd] client pid %d gone, exiting + cleaning shm\n",
+                (int)client_pid);
+        client_dead = 1;
+      }
       last_stat_ms = now;
     }
-    if (unlinked || detached)
+    if (unlinked || detached || client_dead)
       break;
 
     uint64_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
@@ -126,11 +137,31 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
   /* close the frame/GPU work before reporting (bounded drain inside) */
   d9mt_executor_finish();
 
+  /* S3 v5: a dead client cannot unlink — the server cleans its own shm */
+  if (client_dead) {
+    char path[1024];
+    size_t n = strlen(ring_path);
+    if (n < sizeof(path) && n >= 5) {
+      snprintf(path, sizeof(path), "%s", ring_path);
+      unlink(path); /* .../ring */
+      path[n - 4] = 0;
+      char f[1024];
+      snprintf(f, sizeof(f), "%sstatus", path);
+      unlink(f);
+      snprintf(f, sizeof(f), "%sheap", path);
+      unlink(f);
+      path[n - 5] = 0; /* strip trailing '/' too */
+      rmdir(path);
+    }
+  }
+
   /* final counters (mirrors the in-process consumer's exit report) */
   fprintf(stderr,
           "[serverd] consumer exit (%s): records=%llu bytes=%llu "
           "decode_errors=%llu\n",
-          detached ? "detach" : (unlinked ? "unlink" : "shutdown"),
+          detached ? "detach"
+                   : (unlinked ? "unlink"
+                               : (client_dead ? "client-dead" : "shutdown")),
           (unsigned long long)atomic_load_explicit(&ring->records,
                                                    memory_order_relaxed),
           (unsigned long long)atomic_load_explicit(&ring->bytes,

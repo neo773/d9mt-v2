@@ -5,6 +5,8 @@
  * Shared between C11 (main.m/consumer.m), ObjC and ObjC++ (executor.mm) —
  * everything here is a C ABI. */
 
+#include <sys/types.h>
+
 #include "../driver/mtl/mtl_wire.h"
 #include "d9mt_status.h"
 
@@ -62,9 +64,12 @@ void d9mt_executor_finish(void);
 /* consumer.m: the drain loop (S1 counting + S2 execution dispatch). Decodes/
  * validates wire records, hands each to the executor, mirrors ring->tail into
  * status->progress, heartbeats ~100 Hz, exits on the Detach opcode,
- * ring->shutdown, or unlink of ring_path. Returns 0 on clean exit. */
+ * ring->shutdown, unlink of ring_path, or — S3 v5, when client_pid != 0 —
+ * death of the client process (the server is process-lifetime and owns its
+ * own cleanup in that case: shm files unlinked before exit). Returns 0 on
+ * clean exit. */
 int d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
-                      const char *ring_path);
+                      const char *ring_path, pid_t client_pid);
 
 #ifdef __cplusplus
 }

@@ -6924,6 +6924,30 @@ _WireRing_detach(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* S3 v5 session-boundary ack: bounded wait for the server's epoch bump
+ * (executed session record). Diagnostic only — record order in the ring
+ * already serializes the reset ahead of any later record. */
+static NTSTATUS
+_WireRing_quiesce(void *obj) {
+  (void)obj;
+  if (!wire_status || wire_mode != WMTWireAttachServer)
+    return STATUS_SUCCESS;
+  const uint64_t e0 = atomic_load_explicit(&wire_status->epoch, memory_order_acquire);
+  for (uint32_t i = 0; i < 700u; i++) {
+    uint64_t e = atomic_load_explicit(&wire_status->epoch, memory_order_acquire);
+    if (e > e0) {
+      fprintf(stderr, "[wire] session record acked (epoch %llu -> %llu)\n",
+              (unsigned long long)e0, (unsigned long long)e);
+      return STATUS_SUCCESS;
+    }
+    usleep(1000);
+  }
+  fprintf(stderr, "[wire] WARN: session record not acked in 700ms (epoch=%llu; "
+                  "server behind or dead — ring order still serializes the reset)\n",
+          (unsigned long long)e0);
+  return STATUS_SUCCESS;
+}
+
 /* --- autorelease-pool dispatch wrappers --------------------------------- *
  * Wine threads have no NSAutoreleasePool, so every autoreleased object a
  * Metal/CA call produces on this side would leak for the process lifetime
@@ -7395,6 +7419,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WireRing_kick,                                               /* 212 */
     &_WireRing_stats_pooled,                                       /* 213 */
     &_WireRing_detach,                                             /* 214 */
+    &_WireRing_quiesce,                                            /* 215 */
 
 };
 
@@ -7630,6 +7655,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WireRing_kick,                                               /* 212 */
     &_WireRing_stats_pooled,                                       /* 213 */
     &_WireRing_detach,                                             /* 214 */
+    &_WireRing_quiesce,                                            /* 215 */
 
 };
 #endif

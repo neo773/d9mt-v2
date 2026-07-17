@@ -18,7 +18,11 @@
  *
  * Exact layout (total 136 bytes):
  *   offset   0  u64      epoch             0 = booting, 1 = ready (release-stored
- *                                          LAST, after iosurfaces are published)
+ *                                          LAST, after iosurfaces are published).
+ *                                          S3 v5: +1 per SESSION record executed
+ *                                          (quiesce/begin ack — the server is
+ *                                          process-lifetime and resets its state
+ *                                          between client device sessions)
  *   offset   8  u64      heartbeat         monotonic, ~100 Hz while alive
  *   offset  16  u64      progress          consumed ring bytes (mirror of ring->tail)
  *   offset  24  u64      completed_serial  last completed submission serial

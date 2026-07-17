@@ -1433,6 +1433,8 @@ static void handleDestroy(const d9mt_wire_rec_destroy_resource* r) {
     g->retire.emplace_back(retireAfter, res->buffer);
   if (res->texture)
     g->retire.emplace_back(retireAfter, res->texture);
+  if (res->sampler)
+    g->retireNoRes.emplace_back(retireAfter, res->sampler);
   for (auto& v : res->views)
     if (v.second)
       g->retireNoRes.emplace_back(retireAfter, v.second);
@@ -1728,6 +1730,94 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
   g->dirtyPso = g->dirtyState = true;
 }
 
+/* Folded-state defaults — MUST mirror the client's (mtl_types.h): zero-init
+ * is NOT the D3D9 default (writeMask=0xF, depth compare Always, stencil
+ * masks 0xFF). Used at init AND at every session reset (S3 v5). */
+static void resetFoldedState() {
+  for (auto& b : g->blend) {
+    b = d9mt_wire_rec_set_blend_mode();
+    b.write_mask = 0xFu;
+    b.color_dst = b.alpha_dst = 0u; /* Zero */
+    b.color_src = b.alpha_src = 1u; /* One */
+  }
+  g->depthStencil = d9mt_wire_rec_set_depth_stencil_state();
+  g->depthStencil.depth_compare_op = 7u; /* Always */
+  g->depthStencil.front.compare_op = g->depthStencil.back.compare_op = 7u;
+  g->depthStencil.front.read_mask = g->depthStencil.back.read_mask = 0xFFu;
+  g->depthStencil.front.write_mask = g->depthStencil.back.write_mask = 0xFFu;
+  g->msaa = d9mt_wire_rec_set_multisample_state();
+  g->msaa.sample_count = 1u;
+  g->msaa.sample_mask = ~0u;
+  g->raster = d9mt_wire_rec_set_rasterizer_state();
+  g->attrs.clear();
+  g->layouts.clear();
+  g->topology = 3; /* TriangleList */
+  g->viewport = d9mt_wire_viewport();
+  g->viewportSet = false;
+  std::memset(g->blendColor, 0, sizeof(g->blendColor));
+  g->stencilRef = 0;
+  std::memset(g->depthBias, 0, sizeof(g->depthBias));
+  for (auto& st : g->stages)
+    st = StageState();
+  for (auto& s : g->streams)
+    s = Stream();
+  g->index = {};
+  g->dirtyPso = g->dirtyState = g->dirtyBindings = true;
+}
+
+/* S3 v5: session boundary (quiesce at context death / begin at connect).
+ * The server is PROCESS-LIFETIME — drain the in-flight frame, retire every
+ * table resource GPU-safely, drop the PSO cache (its keys embed dead library
+ * POINTERS: a new library at a recycled address must never alias a stale
+ * pipeline), reset the folded state to defaults, ack via an epoch bump and
+ * KEEP RUNNING. Device/queue/event/argtables/slabs/heap/dummies persist. */
+static void handleSession(const d9mt_wire_rec_session* r) {
+  submitFrame(); /* closes pass + xfer inside */
+  const uint64_t after = g->lastSubmitted;
+
+  auto retireRes = [&](const std::shared_ptr<Resource>& res) {
+    if (res->buffer)
+      g->retire.emplace_back(after, res->buffer);
+    if (res->texture)
+      g->retire.emplace_back(after, res->texture);
+    if (res->sampler)
+      g->retireNoRes.emplace_back(after, res->sampler);
+    for (auto& v : res->views)
+      if (v.second)
+        g->retireNoRes.emplace_back(after, v.second);
+    res->views.clear();
+  };
+  for (auto& kv : g->byHandle)
+    retireRes(kv.second);
+  for (auto& kv : g->byWire)
+    if (!kv.second->clientHandle) /* byHandle already retired the rest */
+      retireRes(kv.second);
+  g->byHandle.clear();
+  g->byWire.clear();
+  g->pendingShaders.clear(); /* in-flight create jobs finish into orphans */
+
+  for (auto& kv : g->psoCache)
+    if (kv.second && kv.second->pso)
+      g->retireNoRes.emplace_back(after, kv.second->pso);
+  g->psoCache.clear();
+
+  g->vs.reset();
+  g->fs.reset();
+  g->vsPend.reset();
+  g->fsPend.reset();
+  resetFoldedState();
+  g->pass = Pass(); /* closed above; attachments drop */
+  g->argTablesBound = false;
+  g->lastPso = nil;
+  g->dynValid = false;
+  g->backbufferWireId = 0;
+
+  const uint64_t epoch =
+      atomic_fetch_add_explicit(&g->status->epoch, 1, memory_order_release) + 1;
+  fprintf(stderr, "[serverd] session %s (client session %u): state reset, epoch=%llu\n",
+          r->kind ? "BEGIN" : "QUIESCE", r->session, (unsigned long long)epoch);
+}
+
 static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   const uint32_t slot = g->presentSlot;
   submitFrame();
@@ -1924,20 +2014,7 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
                    uint64_t heap_bytes) {
   g = new Exec();
   g->status = status;
-  /* fold-state defaults MUST mirror the client's (mtl_types.h defaults) —
-   * zero-init is NOT the D3D9 default: writeMask=0xF (a zero mask silently
-   * kills all color writes), depth compare Always, stencil masks 0xFF. */
-  for (auto& b : g->blend) {
-    b.write_mask = 0xFu;
-    b.color_dst = b.alpha_dst = 0u; /* Zero */
-    b.color_src = b.alpha_src = 1u; /* One */
-  }
-  g->depthStencil.depth_compare_op = 7u; /* Always */
-  g->depthStencil.front.compare_op = g->depthStencil.back.compare_op = 7u;
-  g->depthStencil.front.read_mask = g->depthStencil.back.read_mask = 0xFFu;
-  g->depthStencil.front.write_mask = g->depthStencil.back.write_mask = 0xFFu;
-  g->msaa.sample_count = 1u;
-  g->msaa.sample_mask = ~0u;
+  resetFoldedState();
   g->device = d9mt_pool_device();
   if (!g->device) {
     atomic_store_explicit(&status->error, d9mt_status_err_metal,
@@ -2063,6 +2140,11 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       break;
     case d9mt_wire_op_bind_texture_by_id:
       handleBindTextureById((const d9mt_wire_rec_bind_texture_by_id*)hdr);
+      break;
+
+    /* --- S3 v5 session boundary (process-lifetime server) --- */
+    case d9mt_wire_op_session:
+      handleSession((const d9mt_wire_rec_session*)hdr);
       break;
 
     /* --- hot-loop state (folded) --- */

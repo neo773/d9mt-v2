@@ -1917,3 +1917,9 @@ WireRing_detach(void) {
   uint64_t dummy = 0;
   UNIX_CALL(214, &dummy);
 }
+
+WINEMETAL_API void
+WireRing_quiesce(void) {
+  uint64_t dummy = 0;
+  UNIX_CALL(215, &dummy);
+}

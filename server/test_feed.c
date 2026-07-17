@@ -40,6 +40,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -238,6 +239,13 @@ emit_present(uint64_t serial) {
 }
 
 static void
+emit_session(uint32_t kind, uint32_t sess) {
+  struct d9mt_wire_rec_session sr = {
+      {d9mt_wire_op_session, sizeof(sr), 0}, kind, sess};
+  emit(&sr, sizeof(sr));
+}
+
+static void
 emit_upload_tex(uint64_t wire_id, uint64_t handle, uint32_t w, uint32_t h,
                 const void *bytes, uint64_t size, uint32_t row_pitch) {
   uint64_t gen = 0;
@@ -300,8 +308,7 @@ draw_wave_converge(struct d9mt_status *status, uint64_t *frame,
 }
 
 static int
-create_file_at(const char *dir, const char *name, size_t bytes, void *fixed,
-               void **out) {
+create_file(const char *dir, const char *name, size_t bytes, void **out) {
   char path[1024];
   snprintf(path, sizeof(path), "%s/%s", dir, name);
   int fd = open(path, O_CREAT | O_RDWR | O_EXCL, 0600);
@@ -309,148 +316,12 @@ create_file_at(const char *dir, const char *name, size_t bytes, void *fixed,
     perror(path);
     return 1;
   }
-  *out = mmap(fixed, bytes, PROT_READ | PROT_WRITE,
-              MAP_SHARED | (fixed ? MAP_FIXED : 0), fd, 0);
+  *out = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
-  if (*out == MAP_FAILED || (fixed && *out != fixed)) {
+  if (*out == MAP_FAILED) {
     perror("mmap");
     return 1;
   }
-  return 0;
-}
-
-static int
-create_file(const char *dir, const char *name, size_t bytes, void **out) {
-  return create_file_at(dir, name, bytes, NULL, out);
-}
-
-/* The ring VA reused across BOTH attaches (churn hazard class: the client
- * relocates its ring MAP_FIXED over a PE region; on re-attach the region
- * may land on the SAME VA that previously held the DEAD ring's file
- * mapping — the second MAP_FIXED must fully replace it). */
-static void *g_ring_va;
-#define RING_FILE_BYTES (sizeof(struct d9mt_wire_ring) + RING_CAP)
-
-/* S3 v3 device-churn prelude: the D3D9 boot pattern — a THROWAWAY device
- * attaches, emits a few records, and runs the FULL client teardown (detach
- * record, drain, unlink, dir removal) — after which the real device must be
- * able to attach again with a fresh server and pass the complete gate. The
- * caller (main) runs the whole existing scenario as the SECOND attach. */
-static int
-churn_prelude(const char *server_bin) {
-  const char *tmp = getenv("TMPDIR");
-  char dir[900];
-  snprintf(dir, sizeof(dir), "%s/d9mt-test-XXXXXX", tmp ? tmp : "/tmp");
-  if (!mkdtemp(dir))
-    FAIL("churn mkdtemp: %s", strerror(errno));
-
-  void *ring_mem, *status_mem, *heap_mem;
-  if (create_file_at(dir, "ring", RING_FILE_BYTES, g_ring_va, &ring_mem) ||
-      create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
-      create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
-                  &heap_mem))
-    return 1;
-  g_ring = ring_mem;
-  g_data = (uint8_t *)ring_mem + sizeof(struct d9mt_wire_ring);
-  struct d9mt_status *status = status_mem;
-  g_heap = heap_mem;
-  g_heap_data = (uint8_t *)heap_mem + D9MT_WIRE_HEAP_DATA_OFFSET;
-
-  g_ring->capacity = RING_CAP;
-  g_ring->data_offset = sizeof(struct d9mt_wire_ring);
-  g_ring->magic = D9MT_WIRE_RING_MAGIC;
-  g_heap->capacity = HEAP_CAP;
-  g_heap->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
-  g_heap->magic = D9MT_WIRE_HEAP_MAGIC;
-
-  /* a few records — the throwaway device does almost nothing */
-  for (uint32_t i = 0; i < 20; i++) {
-    struct d9mt_wire_rec_set_stencil_reference sr = {
-        {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
-    emit(&sr, sizeof(sr));
-    struct d9mt_wire_rec_set_blend_color bc = {
-        {d9mt_wire_op_set_blend_color, sizeof(bc), 0}, {1.f, 0.f, 0.f, 1.f}};
-    emit(&bc, sizeof(bc));
-  }
-  const uint64_t produced = g_head;
-
-  pid_t pid;
-  char *sargv[] = {(char *)server_bin, dir, "640", "480", NULL};
-  int rc = posix_spawn(&pid, server_bin, NULL, NULL, sargv, environ);
-  if (rc)
-    FAIL("churn posix_spawn: %s", strerror(rc));
-  for (int i = 0;; i++) {
-    if (atomic_load_explicit(&status->epoch, memory_order_acquire) == 1)
-      break;
-    int st;
-    if (waitpid(pid, &st, WNOHANG) == pid)
-      FAIL("churn: server died before ready (status 0x%x)", st);
-    if (i >= 1000)
-      FAIL("churn: timeout waiting for epoch==1");
-    usleep(10000);
-  }
-  /* the client's v4 verification, mirrored: epoch alone is not life —
-   * the heartbeat must ADVANCE */
-  {
-    uint64_t hb0 = atomic_load_explicit(&status->heartbeat, memory_order_acquire);
-    int alive = 0;
-    for (int i = 0; i < 1000; i++) {
-      if (atomic_load_explicit(&status->heartbeat, memory_order_acquire) != hb0) {
-        alive = 1;
-        break;
-      }
-      usleep(1000);
-    }
-    if (!alive)
-      FAIL("churn: epoch=1 but heartbeat frozen (dead/phantom server)");
-  }
-  if (wait_u64(&status->progress, produced, 5000))
-    FAIL("churn: progress stalled");
-
-  /* FULL teardown — exactly what a destroyed device does */
-  struct d9mt_wire_rec_nul detach = {{d9mt_wire_op_detach, 8, 0}};
-  emit(&detach, sizeof(detach));
-  int st = -1, exited = 0;
-  for (int i = 0; i < 500; i++) {
-    if (waitpid(pid, &st, WNOHANG) == pid) {
-      exited = 1;
-      break;
-    }
-    usleep(10000);
-  }
-  if (!exited)
-    FAIL("churn: server did not exit after detach");
-  if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
-    FAIL("churn: server exit status 0x%x", st);
-  if (atomic_load_explicit(&g_ring->consumer_exited, memory_order_acquire) != 1)
-    FAIL("churn: consumer_exited not set");
-
-  char p[1024];
-  snprintf(p, sizeof(p), "%s/ring", dir);
-  unlink(p);
-  snprintf(p, sizeof(p), "%s/status", dir);
-  unlink(p);
-  snprintf(p, sizeof(p), "%s/heap", dir);
-  unlink(p);
-  rmdir(dir);
-  /* Deliberately DO NOT munmap the ring: the DEAD ring's file mapping stays
-   * live at g_ring_va — the second attach MAP_FIXes the new ring file over
-   * the same VA, exercising the re-attach VA-reuse hazard class. */
-  munmap(status_mem, sizeof(struct d9mt_status));
-  munmap(heap_mem, D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP);
-
-  /* reset ALL producer state: the second attach starts from scratch */
-  g_ring = NULL;
-  g_data = NULL;
-  g_heap = NULL;
-  g_heap_data = NULL;
-  g_head = 0;
-  g_records = 0;
-  g_producer_waits = 0;
-  g_heap_head = 0;
-  g_heap_waits = 0;
-  printf("[test_feed] churn: throwaway lifecycle clean "
-         "(attach -> %u records -> full teardown, exit 0)\n", 41);
   return 0;
 }
 
@@ -462,18 +333,6 @@ main(int argc, char **argv) {
   }
   const char *server_bin = argv[1];
 
-  /* 0. device churn: throwaway lifecycle first — everything below runs as
-   * the SECOND attach of this process (the real device after a caps probe).
-   * BOTH rings map at the SAME fixed VA (see g_ring_va): attach #2 must
-   * MAP_FIXED its fresh file over the dead ring's still-live mapping. */
-  g_ring_va = mmap(NULL, RING_FILE_BYTES, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANON, -1, 0);
-  if (g_ring_va == MAP_FAILED)
-    FAIL("ring VA reservation failed: %s", strerror(errno));
-  if (churn_prelude(server_bin))
-    return 1;
-  printf("[test_feed] SECOND attach: running the full gate (ring VA reused)\n");
-
   /* 1. shm dir + files */
   const char *tmp = getenv("TMPDIR");
   char dir[900];
@@ -483,7 +342,8 @@ main(int argc, char **argv) {
   printf("[test_feed] shm dir: %s\n", dir);
 
   void *ring_mem, *status_mem, *heap_mem;
-  if (create_file_at(dir, "ring", RING_FILE_BYTES, g_ring_va, &ring_mem) ||
+  if (create_file(dir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP,
+                  &ring_mem) ||
       create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
       create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
                   &heap_mem))
@@ -493,13 +353,6 @@ main(int argc, char **argv) {
   struct d9mt_status *status = status_mem;
   g_heap = heap_mem;
   g_heap_data = (uint8_t *)heap_mem + D9MT_WIRE_HEAP_DATA_OFFSET;
-
-  /* the fresh MAP_FIXED must have REPLACED the dead ring's mapping: a stale
-   * mapping still shows the old header (magic set by the prelude) */
-  if (g_ring->magic != 0)
-    FAIL("second attach: ring VA still shows the DEAD ring's file "
-         "(magic=%llx — MAP_FIXED did not replace the stale mapping)",
-         (unsigned long long)g_ring->magic);
 
   g_ring->capacity = RING_CAP;
   g_ring->data_offset = sizeof(struct d9mt_wire_ring);
@@ -607,6 +460,52 @@ main(int argc, char **argv) {
     FAIL("status version=%u want %u",
          atomic_load_explicit(&status->version, memory_order_acquire),
          D9MT_STATUS_VERSION);
+
+  /* --- S3 v5: PROCESS-LIFETIME server, sessions instead of respawns. ---
+   * SESSION 1 (the throwaway device): create + fill a texture, then die —
+   * QUIESCE resets the server's tables (epoch bump ack), the SAME pid keeps
+   * running, and SESSION 2 connects with a begin record. Later, a stale-id
+   * probe binds wire 777 (session-1 identity) and must resolve the DUMMY —
+   * never the old red texture (table reset, no aliasing). */
+  {
+    struct d9mt_wire_rec_create_texture s1t;
+    memset(&s1t, 0, sizeof(s1t));
+    s1t.hdr.opcode = d9mt_wire_op_create_texture;
+    s1t.hdr.size = sizeof(s1t);
+    s1t.wire_id = 777;
+    s1t.client_handle = 0xF777;
+    s1t.type = 1;
+    s1t.format = 80;
+    s1t.width = 64;
+    s1t.height = 64;
+    s1t.depth = 1;
+    s1t.mip_levels = 1;
+    s1t.array_layers = 1;
+    s1t.sample_count = 1;
+    emit(&s1t, sizeof(s1t));
+    static uint8_t redtex[64 * 64 * 4];
+    for (size_t k = 0; k < sizeof(redtex); k += 4) {
+      redtex[k] = 0;       /* B */
+      redtex[k + 1] = 0;   /* G */
+      redtex[k + 2] = 255; /* R */
+      redtex[k + 3] = 255; /* A */
+    }
+    emit_upload_tex(777, 0xF777, 64, 64, redtex, sizeof(redtex), 64 * 4);
+
+    emit_session(0, 1); /* QUIESCE: session-1 context died */
+    if (wait_u64(&status->epoch, 2, 5000))
+      FAIL("quiesce #1 not acked (epoch=%" PRIu64 ")",
+           (uint64_t)atomic_load_explicit(&status->epoch, memory_order_relaxed));
+    int st1;
+    if (waitpid(pid, &st1, WNOHANG) == pid)
+      FAIL("server EXITED on quiesce (status 0x%x) — must be process-lifetime", st1);
+    emit_session(1, 2); /* BEGIN: session-2 context connected */
+    if (wait_u64(&status->epoch, 3, 5000))
+      FAIL("session begin #2 not acked (epoch=%" PRIu64 ")",
+           (uint64_t)atomic_load_explicit(&status->epoch, memory_order_relaxed));
+    printf("[test_feed] sessions: quiesce+begin acked (epoch=3), same server pid %d\n",
+           (int)pid);
+  }
 
   const char *libpath = argc >= 3 ? argv[2] : NULL;
   uint8_t *lib = NULL;
@@ -815,6 +714,42 @@ main(int argc, char **argv) {
     printf("[test_feed] F4: slot %u checkerboard verified (texture content "
            "crossed the heap)\n", slot);
 
+    /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
+     * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
+     * ALIASING (reset broken); blue (the clear) = draw skipped. */
+    struct d9mt_wire_rec_bind_texture_by_id stale;
+    memset(&stale, 0, sizeof(stale));
+    stale.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+    stale.hdr.size = sizeof(stale);
+    stale.stages = 0x2;
+    stale.slot = 0;
+    stale.image_wire_id = 777;
+    stale.format = 80;
+    emit(&stale, sizeof(stale));
+    emit_backbuffer_rt();
+    emit_clear(0.f, 0.f, 1.f); /* blue */
+    emit_draws(1);
+    emit_present(++frame);
+    if (wait_u64(&status->frames, frame, 15000))
+      FAIL("timeout waiting for frames>=%" PRIu64 " (stale probe)", frame);
+    slot = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+    surf = IOSurfaceLookup(ids[slot]);
+    if (!surf)
+      FAIL("IOSurfaceLookup(%u) failed (stale probe)", ids[slot]);
+    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
+    uint8_t sp[4];
+    memcpy(sp, (const uint8_t *)IOSurfaceGetBaseAddress(surf) +
+                   30 * IOSurfaceGetBytesPerRow(surf) + 40 * 4, 4);
+    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
+    CFRelease(surf);
+    if (sp[2] == 255 && sp[1] == 0)
+      FAIL("stale wire id ALIASED session-1 content (pixel red) — table reset broken");
+    if (!(sp[0] == 0 && sp[1] == 0 && sp[2] == 0 && sp[3] == 255))
+      FAIL("stale probe pixel %02x%02x%02x%02x want black dummy (draw skipped?)",
+           sp[0], sp[1], sp[2], sp[3]);
+    printf("[test_feed] stale-id probe: wire 777 dummy-resolved after reset "
+           "(no aliasing)\n");
+
     /* --- COMPILE STORM: 64 distinct shader pairs, draws outrun compiles -- */
     uint64_t psos0 = atomic_load_explicit(&status->psos_built, memory_order_relaxed);
     uint64_t skip0 =
@@ -963,6 +898,28 @@ main(int argc, char **argv) {
            (uint64_t)atomic_load_explicit(&g_ring->stalls, memory_order_relaxed));
     printf("[test_feed] flood drained in %d waves: +100 PSOs, wave drew "
            "100/100, skips stopped growing\n", floodWaves);
+
+    /* --- third session: churn again after the heavy load --- */
+    emit_session(0, 2); /* session-2 context died */
+    if (wait_u64(&status->epoch, 4, 10000))
+      FAIL("quiesce #2 not acked (epoch=%" PRIu64 ")",
+           (uint64_t)atomic_load_explicit(&status->epoch, memory_order_relaxed));
+    int st2;
+    if (waitpid(pid, &st2, WNOHANG) == pid)
+      FAIL("server EXITED on quiesce #2 (status 0x%x)", st2);
+    emit_session(1, 3); /* session-3 context connected */
+    if (wait_u64(&status->epoch, 5, 5000))
+      FAIL("session begin #3 not acked");
+    /* session-3 smoke: the stream still consumes after two resets */
+    for (uint32_t i = 0; i < 8; i++) {
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
+      emit(&sr, sizeof(sr));
+    }
+    if (wait_u64(&status->progress, g_head, 5000))
+      FAIL("session-3 records not consumed");
+    printf("[test_feed] session 3: connected + consuming after two resets, "
+           "same pid %d\n", (int)pid);
   }
 
   /* 5. detach => server consumes it and exits 0 */
@@ -997,6 +954,79 @@ main(int argc, char **argv) {
   printf("[test_feed] clean detach: exit 0, consumer_exited=1, records=%" PRIu64
          ", heap acked %" PRIu64 " B\n",
          g_records, g_heap_head);
+
+  /* --- S3 v5 pid watchdog: a crashed client (no detach, no unlink) must
+   * not leak the process-lifetime server — the server watches the client
+   * pid embedded in the shm dir name (d9mt-<pid>-<seq>) and cleans its own
+   * shm on death. --- */
+  {
+    pid_t child = fork();
+    if (child == 0) {
+      for (;;)
+        pause(); /* stand-in client, killed below */
+    }
+    if (child < 0)
+      FAIL("fork: %s", strerror(errno));
+    char wdir[900];
+    snprintf(wdir, sizeof(wdir), "%s/d9mt-%d-0", tmp ? tmp : "/tmp", (int)child);
+    if (mkdir(wdir, 0700))
+      FAIL("mkdir(%s): %s", wdir, strerror(errno));
+    void *r2, *s2, *h2;
+    const size_t wring = sizeof(struct d9mt_wire_ring) + (1u << 20);
+    if (create_file(wdir, "ring", wring, &r2) ||
+        create_file(wdir, "status", sizeof(struct d9mt_status), &s2) ||
+        create_file(wdir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + (1u << 20), &h2))
+      return 1;
+    struct d9mt_wire_ring *wr = r2;
+    wr->capacity = 1u << 20;
+    wr->data_offset = sizeof(struct d9mt_wire_ring);
+    wr->magic = D9MT_WIRE_RING_MAGIC;
+    struct d9mt_wire_heap *wh = h2;
+    wh->capacity = 1u << 20;
+    wh->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+    wh->magic = D9MT_WIRE_HEAP_MAGIC;
+    struct d9mt_status *ws = s2;
+
+    pid_t wpid;
+    char *wargv[] = {(char *)server_bin, wdir, "64", "64", NULL};
+    if (posix_spawn(&wpid, server_bin, NULL, NULL, wargv, environ))
+      FAIL("watchdog posix_spawn failed");
+    for (int i = 0;; i++) {
+      if (atomic_load_explicit(&ws->epoch, memory_order_acquire) == 1)
+        break;
+      int wst;
+      if (waitpid(wpid, &wst, WNOHANG) == wpid)
+        FAIL("watchdog server died before ready (0x%x)", wst);
+      if (i >= 1000)
+        FAIL("watchdog server not ready");
+      usleep(10000);
+    }
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    int wst = -1, wexited = 0;
+    for (int i = 0; i < 300; i++) { /* pid check is ~10 Hz server-side */
+      if (waitpid(wpid, &wst, WNOHANG) == wpid) {
+        wexited = 1;
+        break;
+      }
+      usleep(10000);
+    }
+    if (!wexited) {
+      kill(wpid, SIGKILL);
+      FAIL("server did NOT exit after client death (watchdog broken)");
+    }
+    if (!WIFEXITED(wst) || WEXITSTATUS(wst) != 0)
+      FAIL("watchdog server exit status 0x%x", wst);
+    char probe[1024];
+    struct stat pst;
+    snprintf(probe, sizeof(probe), "%s/ring", wdir);
+    if (stat(probe, &pst) == 0)
+      FAIL("watchdog: ring file NOT unlinked after client death");
+    if (stat(wdir, &pst) == 0)
+      FAIL("watchdog: shm dir NOT removed after client death");
+    printf("[test_feed] pid watchdog: server exited + cleaned shm after "
+           "client death\n");
+  }
 
   /* teardown */
   char p[1024];
