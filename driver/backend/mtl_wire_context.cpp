@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -111,6 +112,11 @@ namespace dxvk::backend {
      * initialized temporaries). They never get a wire id (server dummy-
      * resolves); counted per attempt for the PROF `inel=` field. */
     std::atomic<uint64_t> g_wireIneligible = { 0u };
+
+    /* S3 v9: copy/blit-family records skipped because a side was wire-
+     * ineligible (pseudo-resource — e.g. the present copy's drawable dst).
+     * PROF `copySkip=`. */
+    std::atomic<uint64_t> g_copySkips = { 0u };
 
     /* Consolidation C1 instrument (docs/RENDER_SERVER_SPEC + HANDOFF-
      * CONSOLIDATION.md): the migration to server-only may only remove the
@@ -1420,6 +1426,32 @@ namespace dxvk::backend {
 
   void MtlWireContext::clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset, MtlSize extent,
                                       MtlAspectMask aspects, MtlClearValue value) {
+    if (wired() && view != nullptr && view->image != nullptr) {
+      const uint64_t id = ensureTextureCreated(view->image);
+      if (id) {
+        if (auto* r = beginRecord<d9mt_wire_rec_clear_image_view>(d9mt_wire_op_clear_image_view)) {
+          r->wire_id = id;
+          r->client_handle = view->image->texture.tex;
+          r->format = uint32_t(view->key.format);
+          r->mip = view->key.baseMip;
+          r->layer = view->key.baseLayer;
+          r->x = uint32_t(offset.x);
+          r->y = uint32_t(offset.y);
+          r->width = extent.width;
+          r->height = extent.height;
+          r->aspects = aspects;
+          r->value.color[0] = value.color.r;
+          r->value.color[1] = value.color.g;
+          r->value.color[2] = value.color.b;
+          r->value.color[3] = value.color.a;
+          r->value.depth = value.depth;
+          r->value.stencil = value.stencil;
+          endRecord();
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->clearImageView(view, offset, extent, aspects, value);
   }
 
@@ -1427,11 +1459,53 @@ namespace dxvk::backend {
 
   void MtlWireContext::copyTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff,
                                    const Rc<MtlTexture>& src, MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) {
+    /* S3 v9: THE menu-composition op (UpdateTexture / 1:1 StretchRect). */
+    if (wired() && dst != nullptr && src != nullptr) {
+      const uint64_t dstId = ensureTextureCreated(dst);
+      const uint64_t srcId = ensureTextureCreated(src);
+      if (dstId && srcId) {
+        if (auto* r = beginRecord<d9mt_wire_rec_copy_texture>(d9mt_wire_op_copy_texture)) {
+          r->dst_wire_id = dstId;
+          r->dst_handle = dst->texture.tex;
+          r->src_wire_id = srcId;
+          r->src_handle = src->texture.tex;
+          r->dst_mip = dstSub.mipLevel;
+          r->dst_layer = dstSub.baseLayer;
+          r->src_mip = srcSub.mipLevel;
+          r->src_layer = srcSub.baseLayer;
+          r->dst_x = uint32_t(dstOff.x); r->dst_y = uint32_t(dstOff.y); r->dst_z = uint32_t(dstOff.z);
+          r->src_x = uint32_t(srcOff.x); r->src_y = uint32_t(srcOff.y); r->src_z = uint32_t(srcOff.z);
+          r->width = extent.width; r->height = extent.height; r->depth = extent.depth;
+          endRecord();
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->copyTexture(dst, dstSub, dstOff, src, srcSub, srcOff, extent);
   }
 
   void MtlWireContext::copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                                   const Rc<MtlBuffer>& src, MtlDeviceSize srcOff, MtlDeviceSize bytes) {
+    if (wired() && dst != nullptr && src != nullptr && bytes) {
+      const Rc<MtlAllocation>& ds = dst->storage();
+      const Rc<MtlAllocation>& ss = src->storage();
+      if (ds != nullptr && ss != nullptr &&
+          ensureStorageCreated(ds) && ensureStorageCreated(ss)) {
+        if (auto* r = beginRecord<d9mt_wire_rec_copy_buffer>(d9mt_wire_op_copy_buffer)) {
+          r->dst_wire_id = ds->wireId;
+          r->dst_handle = ds->handle.buf;
+          r->src_wire_id = ss->wireId;
+          r->src_handle = ss->handle.buf;
+          r->dst_offset = dstOff;
+          r->src_offset = srcOff;
+          r->bytes = bytes;
+          endRecord();
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->copyBuffer(dst, dstOff, src, srcOff, bytes);
   }
 
@@ -1505,12 +1579,76 @@ namespace dxvk::backend {
 
   void MtlWireContext::resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src, MtlResolveRegion region,
                                       MtlFormat format, MtlResolveMode color, MtlResolveMode stencil) {
+    if (wired() && dst != nullptr && src != nullptr) {
+      const uint64_t dstId = ensureTextureCreated(dst);
+      const uint64_t srcId = ensureTextureCreated(src);
+      if (dstId && srcId) {
+        if (auto* r = beginRecord<d9mt_wire_rec_resolve_texture>(d9mt_wire_op_resolve_texture)) {
+          r->dst_wire_id = dstId;
+          r->dst_handle = dst->texture.tex;
+          r->src_wire_id = srcId;
+          r->src_handle = src->texture.tex;
+          r->src_mip = region.srcSubresource.mipLevel;
+          r->src_layer = region.srcSubresource.baseLayer;
+          r->dst_mip = region.dstSubresource.mipLevel;
+          r->dst_layer = region.dstSubresource.baseLayer;
+          endRecord();
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->resolveTexture(dst, src, region, format, color, stencil);
   }
 
   void MtlWireContext::blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],
                                        const Rc<MtlTextureView>& src, const MtlOffset3D srcBox[2],
                                        MtlSamplerFilter filter) {
+    /* S3 v9 meta-blit: normalize rects EXACTLY like the local path
+     * (mtl_context_transfer.cpp blitTextureView) and ship the final
+     * viewport rect + normalized uv — the server just applies them. */
+    if (wired() && dst != nullptr && src != nullptr &&
+        dst->image != nullptr && src->image != nullptr) {
+      const uint64_t dstId = ensureTextureCreated(dst->image);
+      const uint64_t srcId = ensureTextureCreated(src->image);
+      if (dstId && srcId) {
+        int32_t dx0 = dstBox[0].x, dy0 = dstBox[0].y;
+        int32_t dx1 = dstBox[1].x, dy1 = dstBox[1].y;
+        float sx0 = float(srcBox[0].x), sy0 = float(srcBox[0].y);
+        float sx1 = float(srcBox[1].x), sy1 = float(srcBox[1].y);
+        if (dx0 > dx1) { std::swap(dx0, dx1); std::swap(sx0, sx1); }
+        if (dy0 > dy1) { std::swap(dy0, dy1); std::swap(sy0, sy1); }
+        const MtlExtent3D srcExtent = src->image->mipLevelExtent(src->key.baseMip);
+        const MtlExtent3D dstExtent = dst->image->mipLevelExtent(dst->key.baseMip);
+        dx0 = std::max(dx0, 0);
+        dy0 = std::max(dy0, 0);
+        dx1 = std::min(dx1, int32_t(dstExtent.width));
+        dy1 = std::min(dy1, int32_t(dstExtent.height));
+        if (dx0 < dx1 && dy0 < dy1 && srcExtent.width && srcExtent.height) {
+          if (auto* r = beginRecord<d9mt_wire_rec_blit_texture_view>(d9mt_wire_op_blit_texture_view)) {
+            r->dst_wire_id = dstId;
+            r->dst_handle = dst->image->texture.tex;
+            r->src_wire_id = srcId;
+            r->src_handle = src->image->texture.tex;
+            r->dst_format = uint32_t(dst->key.format);
+            r->dst_mip = dst->key.baseMip;
+            r->dst_layer = dst->key.baseLayer;
+            r->src_format = uint32_t(src->key.format);
+            r->src_mip = src->key.baseMip;
+            r->src_layer = src->key.baseLayer;
+            r->dst_x0 = dx0; r->dst_y0 = dy0; r->dst_x1 = dx1; r->dst_y1 = dy1;
+            r->uv[0] = sx0 / float(srcExtent.width);
+            r->uv[1] = sy0 / float(srcExtent.height);
+            r->uv[2] = sx1 / float(srcExtent.width);
+            r->uv[3] = sy1 / float(srcExtent.height);
+            r->filter = uint32_t(filter);
+            endRecord();
+          }
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->blitTextureView(dst, dstBox, src, srcBox, filter);
   }
 
@@ -1519,6 +1657,18 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter) {
+    if (wired() && view != nullptr && view->image != nullptr) {
+      const uint64_t id = ensureTextureCreated(view->image);
+      if (id) {
+        if (auto* r = beginRecord<d9mt_wire_rec_generate_mipmaps>(d9mt_wire_op_generate_mipmaps)) {
+          r->wire_id = id;
+          r->client_handle = view->image->texture.tex;
+          endRecord();
+        }
+      } else {
+        g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
     m_inner->generateMipmaps(view, filter);
   }
 

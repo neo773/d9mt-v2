@@ -459,6 +459,22 @@ struct Exec {
 
   uint32_t presentSlot = 0;
   uint64_t backbufferWireId = 0;
+
+  /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
+   * per-{format,sampleCount} PSOs built ASYNC through PsoEntry; a blit
+   * whose PSO is still compiling is STASHED and drained at present (a
+   * one-shot record cannot retry like a draw). */
+  id<MTLLibrary> blitLib = nil;
+  id<MTLSamplerState> blitSamplers[2] = {nil, nil}; /* nearest, linear */
+  std::unordered_map<uint64_t, std::shared_ptr<PsoEntry>> blitPsoCache;
+  std::vector<d9mt_wire_rec_blit_texture_view> pendingBlits;
+  /* one-shot records whose texture is still BUILDING on the create worker
+   * (the UpdateTexture-right-after-create shape): stashed + drained at
+   * present, same discipline as pendingBlits. Cross-family stream order is
+   * approximated at drain time (copies, clears, mipgens, then blits). */
+  std::vector<d9mt_wire_rec_copy_texture> pendingCopies;
+  std::vector<d9mt_wire_rec_clear_image_view> pendingImgClears;
+  std::vector<d9mt_wire_rec_generate_mipmaps> pendingMipgens;
 };
 
 Exec* g = nullptr;
@@ -1877,6 +1893,378 @@ static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
   g->dirtyBindings = true;
 }
 
+/* --- S3 v9: the GPU-side copy/blit family --------------------------------------
+ * Port of mtl_context_transfer.cpp: copies via the shared xfer compute
+ * encoder (closes render passes, §4c producer barrier at closeXfer); the
+ * resolve is a draw-less Load/MultisampleResolve pass; the meta-blit is a
+ * sampled fullscreen-triangle draw through its own tiny library. */
+
+static const char* kBlitMsl = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct P { float4 uv; };
+struct V { float4 pos [[position]]; float2 uv; };
+vertex V d9mtBlitVs(uint vid [[vertex_id]], constant P& p [[buffer(0)]]) {
+  float2 t = float2(vid == 1 ? 2.0 : 0.0, vid == 2 ? 2.0 : 0.0);
+  V o;
+  o.pos = float4(t.x * 2.0 - 1.0, 1.0 - t.y * 2.0, 0.0, 1.0);
+  o.uv = mix(p.uv.xy, p.uv.zw, t);
+  return o;
+}
+fragment float4 d9mtBlitFs(V in [[stage_in]],
+                           texture2d<float> src [[texture(0)]],
+                           sampler smp [[sampler(0)]]) {
+  return src.sample(smp, in.uv);
+}
+)MSL";
+
+static std::shared_ptr<Resource> resolveCopyRes(uint64_t handle, uint64_t wireId) {
+  auto res = handle ? lookupHandle(handle) : lookupWire(wireId);
+  if (!res && wireId)
+    res = lookupWire(wireId);
+  return res;
+}
+
+/* false = a side is still building (stash + retry at present). */
+static bool tryExecuteCopyTexture(const d9mt_wire_rec_copy_texture* r) {
+  auto dres = resolveCopyRes(r->dst_handle, r->dst_wire_id);
+  auto sres = resolveCopyRes(r->src_handle, r->src_wire_id);
+  if (!dres || !sres)
+    return true; /* unresolvable — drop */
+  if (dres->ready.load(std::memory_order_acquire) == 0 ||
+      sres->ready.load(std::memory_order_acquire) == 0)
+    return false; /* building — retry */
+  if (!observeReady(dres) || !observeReady(sres) ||
+      !dres->texture || !sres->texture)
+    return true; /* failed create — drop */
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  if (!enc)
+    return true;
+  MTLSize sz = MTLSizeMake(r->width ? r->width : 1, r->height ? r->height : 1,
+                           r->depth ? r->depth : 1);
+  [enc copyFromTexture:sres->texture
+           sourceSlice:r->src_layer
+           sourceLevel:r->src_mip
+          sourceOrigin:MTLOriginMake(r->src_x, r->src_y, r->src_z)
+            sourceSize:sz
+             toTexture:dres->texture
+      destinationSlice:r->dst_layer
+      destinationLevel:r->dst_mip
+     destinationOrigin:MTLOriginMake(r->dst_x, r->dst_y, r->dst_z)];
+  dres->hasContent = true;
+  return true;
+}
+
+static void handleCopyTexture(const d9mt_wire_rec_copy_texture* r) {
+  if (!tryExecuteCopyTexture(r) && g->pendingCopies.size() < 8192)
+    g->pendingCopies.push_back(*r);
+}
+
+static void handleCopyBuffer(const d9mt_wire_rec_copy_buffer* r) {
+  auto dres = resolveCopyRes(r->dst_handle, r->dst_wire_id);
+  auto sres = resolveCopyRes(r->src_handle, r->src_wire_id);
+  if (!dres || !sres || !dres->buffer || !sres->buffer || !r->bytes)
+    return;
+  if (r->dst_offset + r->bytes > dres->buffer.length ||
+      r->src_offset + r->bytes > sres->buffer.length) {
+    execError("copy_buffer: out of range");
+    return;
+  }
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  if (!enc)
+    return;
+  [enc copyFromBuffer:sres->buffer
+         sourceOffset:(NSUInteger)r->src_offset
+             toBuffer:dres->buffer
+    destinationOffset:(NSUInteger)r->dst_offset
+                 size:(NSUInteger)r->bytes];
+  dres->hasContent = true;
+}
+
+static void handleResolveTexture(const d9mt_wire_rec_resolve_texture* r) {
+  auto dres = resolveCopyRes(r->dst_handle, r->dst_wire_id);
+  auto sres = resolveCopyRes(r->src_handle, r->src_wire_id);
+  if (!dres || !sres || !observeReady(dres) || !observeReady(sres) ||
+      !dres->texture || !sres->texture)
+    return;
+  closePass();
+  closeXfer();
+  ensureCmdbuf();
+  MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
+  desc.colorAttachments[0].texture = sres->texture;
+  desc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  desc.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+  desc.colorAttachments[0].level = r->src_mip;
+  desc.colorAttachments[0].slice = r->src_layer;
+  desc.colorAttachments[0].resolveTexture = dres->texture;
+  desc.colorAttachments[0].resolveLevel = r->dst_mip;
+  desc.colorAttachments[0].resolveSlice = r->dst_layer;
+  desc.renderTargetWidth = (NSUInteger)sres->texture.width >> r->src_mip;
+  desc.renderTargetHeight = (NSUInteger)sres->texture.height >> r->src_mip;
+  id<MTL4RenderCommandEncoder> enc = [g->cmdbuf renderCommandEncoderWithDescriptor:desc];
+  if (!enc) {
+    execError("resolve: encoder failed");
+    return;
+  }
+  [enc barrierAfterStages:(MTLStages)kStageFragment
+        beforeQueueStages:(MTLStages)kStageAll
+        visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+  [enc endEncoding];
+  atomic_fetch_add_explicit(&g->status->encoders, 1, memory_order_relaxed);
+  dres->hasContent = true;
+}
+
+static bool tryExecuteMipgen(const d9mt_wire_rec_generate_mipmaps* r) {
+  auto res = resolveCopyRes(r->client_handle, r->wire_id);
+  if (!res)
+    return true;
+  if (res->ready.load(std::memory_order_acquire) == 0)
+    return false; /* building — retry */
+  if (!observeReady(res) || !res->texture)
+    return true;
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  if (!enc)
+    return true;
+  [enc generateMipmapsForTexture:res->texture];
+  return true;
+}
+
+static void handleGenerateMipmaps(const d9mt_wire_rec_generate_mipmaps* r) {
+  if (!tryExecuteMipgen(r) && g->pendingMipgens.size() < 4096)
+    g->pendingMipgens.push_back(*r);
+}
+
+static bool tryExecuteClearImage(const d9mt_wire_rec_clear_image_view* r) {
+  auto res = resolveCopyRes(r->client_handle, r->wire_id);
+  if (!res)
+    return true;
+  if (res->ready.load(std::memory_order_acquire) == 0)
+    return false; /* building — retry */
+  if (!observeReady(res) || !res->texture)
+    return true;
+  id<MTLTexture> tex = res->texture;
+  const uint32_t mipW = (uint32_t)tex.width >> r->mip ? (uint32_t)tex.width >> r->mip : 1u;
+  const uint32_t mipH = (uint32_t)tex.height >> r->mip ? (uint32_t)tex.height >> r->mip : 1u;
+  const bool fullRect = r->x == 0 && r->y == 0 && r->width >= mipW && r->height >= mipH;
+  if (!(r->aspects & 0x1u) || !fullRect) {
+    /* partial rects / depth-stencil need the fill / depth-clear draw
+     * pipelines — a later slice. Named once. */
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr, "[serverd] clear_image_view: partial/DS clear dropped "
+                      "(aspects=0x%x rect=%u,%u %ux%u of %ux%u)\n",
+              r->aspects, r->x, r->y, r->width, r->height, mipW, mipH);
+    }
+    return true;
+  }
+  /* full-subresource color: the standalone mini-pass shape */
+  if (g->pass.active)
+    closePass();
+  Pass saved = g->pass;
+  g->pass = Pass();
+  g->pass.color[0].tex = tex;
+  g->pass.color[0].format = tex.pixelFormat;
+  g->pass.color[0].baseMip = r->mip;
+  g->pass.color[0].baseLayer = r->layer;
+  g->pass.color[0].named = true;
+  g->pass.clearColor[0] = true;
+  g->pass.clearValues[0] = MTLClearColorMake(r->value.color[0], r->value.color[1],
+                                             r->value.color[2], r->value.color[3]);
+  g->pass.pending = true;
+  materializePass();
+  closePass();
+  g->pass = saved;
+  g->dirtyPso = g->dirtyState = true;
+  res->hasContent = true;
+  return true;
+}
+
+static void handleClearImageView(const d9mt_wire_rec_clear_image_view* r) {
+  if (!tryExecuteClearImage(r) && g->pendingImgClears.size() < 4096)
+    g->pendingImgClears.push_back(*r);
+}
+
+/* Meta-blit. Returns false when the dst-format PSO is still compiling — the
+ * caller stashes the record and the present sweep retries (a lost blit is
+ * the black-menu class this slice exists to fix). */
+static bool tryExecuteBlit(const d9mt_wire_rec_blit_texture_view* r) {
+  auto dres = resolveCopyRes(r->dst_handle, r->dst_wire_id);
+  auto sres = resolveCopyRes(r->src_handle, r->src_wire_id);
+  if (!dres || !sres)
+    return true; /* unresolvable — drop */
+  if (dres->ready.load(std::memory_order_acquire) == 0 ||
+      sres->ready.load(std::memory_order_acquire) == 0)
+    return false; /* still building — stash + retry at present */
+  if (!observeReady(dres) || !observeReady(sres) ||
+      !dres->texture || !sres->texture)
+    return true; /* failed create — drop */
+  if (!g->blitLib)
+    return true;
+
+  /* PSO keyed on the DST TEXTURE's real format (a mismatching view format
+   * would need a dst view — reinterpretation not modeled; base format is
+   * correct for every observed caller). Async build, stash while pending. */
+  const uint64_t key = (uint64_t)dres->texture.pixelFormat |
+                       ((uint64_t)dres->texture.sampleCount << 32);
+  auto it = g->blitPsoCache.find(key);
+  std::shared_ptr<PsoEntry> entry;
+  if (it == g->blitPsoCache.end()) {
+    entry = std::make_shared<PsoEntry>();
+    g->blitPsoCache.emplace(key, entry);
+    MTL4RenderPipelineDescriptor* desc = [[MTL4RenderPipelineDescriptor alloc] init];
+    MTL4LibraryFunctionDescriptor* vfd = [[MTL4LibraryFunctionDescriptor alloc] init];
+    vfd.library = g->blitLib;
+    vfd.name = @"d9mtBlitVs";
+    desc.vertexFunctionDescriptor = vfd;
+    MTL4LibraryFunctionDescriptor* ffd = [[MTL4LibraryFunctionDescriptor alloc] init];
+    ffd.library = g->blitLib;
+    ffd.name = @"d9mtBlitFs";
+    desc.fragmentFunctionDescriptor = ffd;
+    desc.colorAttachments[0].pixelFormat = dres->texture.pixelFormat;
+    desc.rasterSampleCount = dres->texture.sampleCount ? dres->texture.sampleCount : 1;
+    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    struct d9mt_status* status = g->status;
+    atomic_fetch_add_explicit(&status->psos_pending, 1, memory_order_relaxed);
+    [g->compiler newRenderPipelineStateWithDescriptor:desc
+                                  compilerTaskOptions:nil
+                                    completionHandler:^(id<MTLRenderPipelineState> pso,
+                                                        NSError* err) {
+      if (pso) {
+        entry->pso = pso;
+        entry->state.store(1, std::memory_order_release);
+        atomic_fetch_add_explicit(&status->psos_built, 1, memory_order_relaxed);
+      } else {
+        entry->state.store(2, std::memory_order_release);
+        atomic_fetch_add_explicit(&status->exec_errors, 1, memory_order_relaxed);
+        fprintf(stderr, "[serverd] blit PSO build failed: %s\n",
+                err ? err.localizedDescription.UTF8String : "(no error)");
+      }
+      atomic_fetch_sub_explicit(&status->psos_pending, 1, memory_order_relaxed);
+    }];
+    return false; /* just kicked — stash */
+  }
+  entry = it->second;
+  const uint32_t state = entry->state.load(std::memory_order_acquire);
+  if (state == 0)
+    return false; /* compiling — stash */
+  if (state != 1 || !entry->pso)
+    return true; /* failed — drop (logged once by the handler) */
+
+  /* src sampled through a (cached) view for mip/layer/format selection */
+  d9mt_wire_rec_bind_texture_by_id viewKey = {};
+  viewKey.format = r->src_format;
+  viewKey.view_type = 1;
+  viewKey.base_mip = r->src_mip;
+  viewKey.mip_count = 1;
+  viewKey.base_layer = r->src_layer;
+  viewKey.layer_count = 1;
+  id<MTLTexture> srcTex = resolveTexView(sres, &viewKey);
+  if (!srcTex)
+    return true;
+
+  closePass();
+  closeXfer();
+  ensureCmdbuf();
+  const uint32_t mipW = (uint32_t)dres->texture.width >> r->dst_mip ? (uint32_t)dres->texture.width >> r->dst_mip : 1u;
+  const uint32_t mipH = (uint32_t)dres->texture.height >> r->dst_mip ? (uint32_t)dres->texture.height >> r->dst_mip : 1u;
+
+  MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
+  desc.colorAttachments[0].texture = dres->texture;
+  desc.colorAttachments[0].level = r->dst_mip;
+  desc.colorAttachments[0].slice = r->dst_layer;
+  desc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+  desc.renderTargetWidth = mipW;
+  desc.renderTargetHeight = mipH;
+  id<MTL4RenderCommandEncoder> enc = [g->cmdbuf renderCommandEncoderWithDescriptor:desc];
+  if (!enc) {
+    execError("blit: encoder failed");
+    return true;
+  }
+  atomic_fetch_add_explicit(&g->status->encoders, 1, memory_order_relaxed);
+  [enc setRenderPipelineState:entry->pso];
+
+  MTLViewport vp;
+  vp.originX = r->dst_x0;
+  vp.originY = r->dst_y0;
+  vp.width = double(r->dst_x1 - r->dst_x0);
+  vp.height = double(r->dst_y1 - r->dst_y0);
+  vp.znear = 0.0;
+  vp.zfar = 1.0;
+  [enc setViewport:vp];
+  MTLScissorRect sc;
+  sc.x = (NSUInteger)r->dst_x0;
+  sc.y = (NSUInteger)r->dst_y0;
+  sc.width = (NSUInteger)(r->dst_x1 - r->dst_x0);
+  sc.height = (NSUInteger)(r->dst_y1 - r->dst_y0);
+  if (sc.x + sc.width > mipW || sc.y + sc.height > mipH) { /* belt+braces */
+    sc.x = 0; sc.y = 0; sc.width = mipW; sc.height = mipH;
+  }
+  [enc setScissorRect:sc];
+
+  RingSlice rs = ringAlloc(sizeof(float) * 4, 256);
+  if (!rs.cpu) {
+    [enc endEncoding];
+    execError("blit: slab alloc failed");
+    return true;
+  }
+  std::memcpy(rs.cpu, r->uv, sizeof(float) * 4);
+  selectArgumentTablesForPass();
+  ArgTablePair& pair = g->argTables[g->currentArgTable];
+  [pair.table[0] setAddress:rs.gpu atIndex:0];
+  [pair.table[1] setAddress:rs.gpu atIndex:0];
+  [pair.table[1] setTexture:srcTex.gpuResourceID atIndex:0];
+  id<MTLSamplerState> smp = g->blitSamplers[r->filter == 1u ? 1 : 0];
+  [pair.table[1] setSamplerState:(smp ? smp : g->dummySampler).gpuResourceID atIndex:0];
+  [enc setArgumentTable:pair.table[0] atStages:MTLRenderStageVertex];
+  [enc setArgumentTable:pair.table[1] atStages:MTLRenderStageFragment];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc barrierAfterStages:(MTLStages)kStageFragment
+        beforeQueueStages:(MTLStages)kStageAll
+        visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+  [enc endEncoding];
+  dres->hasContent = true;
+  g->dirtyPso = g->dirtyState = g->dirtyBindings = true;
+  g->argTablesBound = false;
+  return true;
+}
+
+static void drainPendingBlits() {
+  size_t w = 0;
+  for (size_t i = 0; i < g->pendingCopies.size(); i++) {
+    if (!tryExecuteCopyTexture(&g->pendingCopies[i]))
+      g->pendingCopies[w++] = g->pendingCopies[i];
+  }
+  g->pendingCopies.resize(w);
+  w = 0;
+  for (size_t i = 0; i < g->pendingImgClears.size(); i++) {
+    if (!tryExecuteClearImage(&g->pendingImgClears[i]))
+      g->pendingImgClears[w++] = g->pendingImgClears[i];
+  }
+  g->pendingImgClears.resize(w);
+  w = 0;
+  for (size_t i = 0; i < g->pendingMipgens.size(); i++) {
+    if (!tryExecuteMipgen(&g->pendingMipgens[i]))
+      g->pendingMipgens[w++] = g->pendingMipgens[i];
+  }
+  g->pendingMipgens.resize(w);
+  w = 0;
+  for (size_t i = 0; i < g->pendingBlits.size(); i++) {
+    if (!tryExecuteBlit(&g->pendingBlits[i]))
+      g->pendingBlits[w++] = g->pendingBlits[i];
+  }
+  g->pendingBlits.resize(w);
+}
+
+static void handleBlit(const d9mt_wire_rec_blit_texture_view* r) {
+  if (!tryExecuteBlit(r)) {
+    if (g->pendingBlits.size() < 4096)
+      g->pendingBlits.push_back(*r);
+  }
+}
+
+
 static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id* r) {
   if (g->pass.active)
     closePass();
@@ -2119,6 +2507,12 @@ static void handleSession(const d9mt_wire_rec_session* r) {
     if (kv.second && kv.second->pso)
       g->retireNoRes.emplace_back(after, kv.second->pso);
   g->psoCache.clear();
+  g->pendingBlits.clear(); /* v9: their resources just died */
+  g->pendingCopies.clear();
+  g->pendingImgClears.clear();
+  g->pendingMipgens.clear();
+  /* blitPsoCache persists: keyed by pixel format (values), library owned by
+   * the executor — no dead pointers involved. */
   fprintf(stderr, "[serverd] session %s: state-reset...\n", what);
 
   g->vs.reset();
@@ -2140,8 +2534,9 @@ static void handleSession(const d9mt_wire_rec_session* r) {
 
 static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   /* v7: drain worker-built resources (residency + stashed content) into
-   * THIS frame before it closes */
+   * THIS frame before it closes; v9: retry blits whose PSO just landed */
   sweepAsyncCreates();
+  drainPendingBlits();
   const uint32_t slot = g->presentSlot;
   submitFrame();
   g->backbufferWireId = r->backbuffer_wire_id;
@@ -2364,6 +2759,31 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
                                               QOS_CLASS_USER_INTERACTIVE, 0));
   g->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:lq];
 
+  /* S3 v9: the meta-blit library (tiny MSL, compiled once here — init runs
+   * before epoch, sync is fine) + its two samplers. Failure degrades to
+   * blit records being dropped (logged). */
+  {
+    MTL4LibraryDescriptor* ld = [[MTL4LibraryDescriptor alloc] init];
+    ld.source = [NSString stringWithUTF8String:kBlitMsl];
+    NSError* lerr = nil;
+    g->blitLib = [g->compiler newLibraryWithDescriptor:ld error:&lerr];
+    if (!g->blitLib)
+      fprintf(stderr, "[serverd] blit library compile FAILED: %s\n",
+              lerr ? lerr.localizedDescription.UTF8String : "(no error)");
+    MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.normalizedCoordinates = YES;
+    sd.supportArgumentBuffers = YES;
+    sd.minFilter = MTLSamplerMinMagFilterNearest;
+    sd.magFilter = MTLSamplerMinMagFilterNearest;
+    g->blitSamplers[0] = [g->device newSamplerStateWithDescriptor:sd];
+    sd.minFilter = MTLSamplerMinMagFilterLinear;
+    sd.magFilter = MTLSamplerMinMagFilterLinear;
+    g->blitSamplers[1] = [g->device newSamplerStateWithDescriptor:sd];
+  }
+
   /* S3: content heap. CPU mapping only — upload records memcpy regions into
    * the slab ring (see the header comment for why a whole-file
    * newBufferWithBytesNoCopy wrap is unsound over a sparse shared file). */
@@ -2477,6 +2897,26 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
     /* --- S3 v5 session boundary (process-lifetime server) --- */
     case d9mt_wire_op_session:
       handleSession((const d9mt_wire_rec_session*)hdr);
+      break;
+
+    /* --- S3 v9 copy/blit family --- */
+    case d9mt_wire_op_copy_texture:
+      handleCopyTexture((const d9mt_wire_rec_copy_texture*)hdr);
+      break;
+    case d9mt_wire_op_copy_buffer:
+      handleCopyBuffer((const d9mt_wire_rec_copy_buffer*)hdr);
+      break;
+    case d9mt_wire_op_blit_texture_view:
+      handleBlit((const d9mt_wire_rec_blit_texture_view*)hdr);
+      break;
+    case d9mt_wire_op_resolve_texture:
+      handleResolveTexture((const d9mt_wire_rec_resolve_texture*)hdr);
+      break;
+    case d9mt_wire_op_generate_mipmaps:
+      handleGenerateMipmaps((const d9mt_wire_rec_generate_mipmaps*)hdr);
+      break;
+    case d9mt_wire_op_clear_image_view:
+      handleClearImageView((const d9mt_wire_rec_clear_image_view*)hdr);
       break;
 
     /* --- hot-loop state (folded) --- */

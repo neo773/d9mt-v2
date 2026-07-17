@@ -307,6 +307,54 @@ draw_wave_converge(struct d9mt_status *status, uint64_t *frame,
   return -1;
 }
 
+/* v9: converge until the screen shows the checker pattern sampled from
+ * `wire` (binds + draws + presents until the async copy/blit lands).
+ * Requires vsTex/fsTex bound. Returns 0 on success. */
+static int
+checker_converge(struct d9mt_status *status, uint32_t ids[3], uint64_t *frame,
+                 uint64_t wire, const char *what) {
+  for (int w = 1; w <= 30; w++) {
+    struct d9mt_wire_rec_bind_texture_by_id b;
+    memset(&b, 0, sizeof(b));
+    b.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+    b.hdr.size = sizeof(b);
+    b.stages = 0x2;
+    b.slot = 0;
+    b.image_wire_id = wire;
+    b.format = 80;
+    emit(&b, sizeof(b));
+    emit_backbuffer_rt();
+    emit_clear(0.f, 0.f, 1.f);
+    emit_draws(1);
+    emit_present(++*frame);
+    if (wait_u64(&status->frames, *frame, 15000))
+      return -1;
+    uint32_t slot = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+    IOSurfaceRef surf = IOSurfaceLookup(ids[slot]);
+    if (!surf)
+      return -1;
+    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
+    const uint8_t *base = IOSurfaceGetBaseAddress(surf);
+    size_t bpr = IOSurfaceGetBytesPerRow(surf);
+    uint8_t a[4], bb[4], c[4];
+    memcpy(a, base + 30 * bpr + 40 * 4, 4);
+    memcpy(bb, base + 30 * bpr + 120 * 4, 4);
+    memcpy(c, base + 30 * bpr + 200 * 4, 4);
+    IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
+    CFRelease(surf);
+    uint8_t redpx[4] = {0, 0, 255, 255}, greenpx[4] = {0, 255, 0, 255};
+    int a_ok = !memcmp(a, redpx, 4) || !memcmp(a, greenpx, 4);
+    int b_ok = !memcmp(bb, redpx, 4) || !memcmp(bb, greenpx, 4);
+    int alternate = memcmp(a, bb, 4) != 0 && memcmp(a, c, 4) == 0;
+    if (a_ok && b_ok && alternate) {
+      printf("[test_feed] %s: checker verified (wave %d)\n", what, w);
+      return 0;
+    }
+    usleep(30000);
+  }
+  return -1;
+}
+
 static int
 create_file(const char *dir, const char *name, size_t bytes, void **out) {
   char path[1024];
@@ -823,6 +871,59 @@ main(int argc, char **argv) {
            a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
     printf("[test_feed] F4: slot %u checkerboard verified (texture content "
            "crossed the heap)\n", slot);
+
+    /* --- v9: GPU copy crosses the wire. B (wire 201) is created (async,
+     * worker), then copy A(200)->B lands (stashed while B builds, drained
+     * at present), then a draw sampling B must show the checker. --- */
+    struct d9mt_wire_rec_create_texture tb = ct;
+    tb.wire_id = 201;
+    tb.client_handle = 0xB201;
+    emit(&tb, sizeof(tb));
+    struct d9mt_wire_rec_copy_texture cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.hdr.opcode = d9mt_wire_op_copy_texture;
+    cp.hdr.size = sizeof(cp);
+    cp.dst_wire_id = 201;
+    cp.dst_handle = 0xB201;
+    cp.src_wire_id = 200;
+    cp.src_handle = 0xB001;
+    cp.width = 64;
+    cp.height = 64;
+    cp.depth = 1;
+    emit(&cp, sizeof(cp));
+    if (checker_converge(status, ids, &frame, 201, "v9 copy A->B"))
+      FAIL("wire copy A->B never produced the checker (copy did not cross)");
+
+    /* --- v9: scaled meta-blit A -> C (128x128, 2x stretch, nearest). Same
+     * on-screen pattern (cells double in texels, halve in screen scale). --- */
+    struct d9mt_wire_rec_create_texture tc = ct;
+    tc.wire_id = 202;
+    tc.client_handle = 0xB202;
+    tc.width = 128;
+    tc.height = 128;
+    emit(&tc, sizeof(tc));
+    struct d9mt_wire_rec_blit_texture_view bl;
+    memset(&bl, 0, sizeof(bl));
+    bl.hdr.opcode = d9mt_wire_op_blit_texture_view;
+    bl.hdr.size = sizeof(bl);
+    bl.dst_wire_id = 202;
+    bl.dst_handle = 0xB202;
+    bl.src_wire_id = 200;
+    bl.src_handle = 0xB001;
+    bl.dst_format = 80;
+    bl.src_format = 80;
+    bl.dst_x0 = 0;
+    bl.dst_y0 = 0;
+    bl.dst_x1 = 128;
+    bl.dst_y1 = 128;
+    bl.uv[0] = 0.f;
+    bl.uv[1] = 0.f;
+    bl.uv[2] = 1.f;
+    bl.uv[3] = 1.f;
+    bl.filter = 0; /* nearest */
+    emit(&bl, sizeof(bl));
+    if (checker_converge(status, ids, &frame, 202, "v9 blit A->C (2x)"))
+      FAIL("wire scaled blit A->C never produced the checker");
 
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =

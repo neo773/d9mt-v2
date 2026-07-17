@@ -649,6 +649,74 @@ V8 honest flags:
   caught run-8's record — value-level completeness is the client stamp's
   job, and the client no longer emits such records at all).
 
+## V9 — the GPU copy/blit family crosses the wire (the black-server-frame fix)
+
+Milestone context: the visual cutover is LIVE (boot to frame 5600+,
+srvFrames=256/256, 99.9% of presents from the server IOSurface) but the
+server frame was 100% BLACK on menu/legal screens: MtlWireContext
+classified copies/blits/resolves/mipgen as "cold: forward only" — GTA
+COMPOSES those screens with texture copies (UpdateTexture + StretchRect),
+so 1.5M records/window of binds/draws executed against content that was
+assembled by operations the server never received.
+
+What landed (ops 37..42, ABI-appended):
+- **copy_texture (37)** — single-subresource box copy, the composition op.
+- **copy_buffer (38)** — GPU b2b (CPU-visible content still rides
+  upload_buffer; GPU-private staging b2t copies do NOT cross — the
+  copyBufferToTexture tap requires a host-visible source; flagged below).
+- **blit_texture_view (39)** — the meta-blit. The CLIENT normalizes rects
+  exactly like its local path (swap/clamp, uv normalization incl. mirrored
+  sources) and ships the final viewport rect + uv4; the server draws a
+  fullscreen triangle through its own tiny MSL library (compiled once at
+  init via MTL4Compiler), PSOs per {dst pixel format, sampleCount} built
+  ASYNC through the PsoEntry machinery.
+- **resolve_texture (40)** — draw-less Load/MultisampleResolve pass (the
+  local shape; full-subresource, color aspect).
+- **generate_mipmaps (41)** — xfer-encoder generateMipmapsForTexture.
+- **clear_image_view (42)** — FULL-subresource color executes as the
+  mini-pass clear; partial rects / depth-stencil aspects are dropped
+  server-side with one named log (they need the fill/depth-clear draw
+  pipelines — a later slice).
+
+Client: each tap requires BOTH sides wire-eligible; a pseudo-resource side
+skips the record, counted in PROF `copySkip=` (the present copy's drawable
+dst lands here by design). Emission precedes the local forward; creates
+emit lazily inside.
+
+Server one-shot vs building resources — THE subtlety: these records
+execute ONCE (unlike draws, which retry). A record referencing a texture
+still BUILDING on the create worker (the UpdateTexture-right-after-create
+shape, and the gate's own copy/blit scenarios) is STASHED and retried at
+each present (copies, image-clears, mipgens, then blits — cross-family
+stream order is approximated at drain time, flagged). Blits additionally
+stash while their dst-format PSO compiles. Unresolvable/failed-create
+references drop. Execution respects pass boundaries exactly like the
+client (xfer encoder / mini-pass closes the render pass; §4c barriers).
+
+Gate: upload checker to A, wire-copy A→B, draw sampling B → checker
+verified (wave 3: create-stash-drain-execute); scaled 2x blit A→C
+(nearest) → checker verified (wave 4: + async PSO). Everything prior
+green; full clean-room build chain (rm -rf build, d9mtair → bridge →
+driver+server) PASS.
+
+V9 honest flags:
+- Cross-family drain order at present ≠ exact stream order (copy→clear→
+  mipgen→blit within one frame's stash). Composition chains that overwrite
+  the same texel region with DIFFERENT op families in one frame could
+  resolve in the wrong order until the next frame's re-composition.
+- Blit dst format uses the DST TEXTURE's base pixel format (view
+  reinterpretation not modeled); non-2D blit sources sample as 2D (the
+  local path has the same warning).
+- copyBufferToTexture with a GPU-PRIVATE source buffer still doesn't cross
+  (the upload tap needs mapPtr). Not observed in practice; the record
+  shape exists if needed (upload_texture carries CPU bytes only).
+- texture→buffer readbacks stay LOCAL by design (C2 slice: readback
+  routing).
+- A blit executes at the stream position of its drain when stashed — dual
+  frames of staleness worst-case, self-healing per frame.
+- clear_image_view partial/DS drops are the most likely visible residue if
+  a game ColorFills sub-rects (named log will say so).
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

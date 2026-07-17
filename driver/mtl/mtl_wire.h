@@ -183,7 +183,21 @@ enum d9mt_wire_op {
    * (pid watchdog) or an explicit Detach (tests / final teardown). */
   d9mt_wire_op_session = 36,
 
-  d9mt_wire_op_count = 37
+  /* --- Phase S3 v9: the GPU-side COPY/BLIT family. The cutover showed the
+   * server's backbuffer black while 1.5M records/window executed: menu/legal
+   * screens are COMPOSED with texture copies and stretched blits that were
+   * "cold: forward only" — they never crossed. Records carry wire ids +
+   * client handles (create-at-first-use precedes them); either side being
+   * wire-INELIGIBLE (pseudo-resource) skips the record client-side (PROF
+   * copySkip=). texture->buffer readbacks stay LOCAL (C2 slice). */
+  d9mt_wire_op_copy_texture = 37,
+  d9mt_wire_op_copy_buffer = 38,
+  d9mt_wire_op_blit_texture_view = 39,
+  d9mt_wire_op_resolve_texture = 40,
+  d9mt_wire_op_generate_mipmaps = 41,
+  d9mt_wire_op_clear_image_view = 42,
+
+  d9mt_wire_op_count = 43
 };
 
 /* --- record header -------------------------------------------------------
@@ -769,5 +783,77 @@ struct d9mt_wire_rec_session {
   uint32_t session; /* client-side session counter (diagnostics) */
 };
 D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_session) == 16);
+
+/* --- Phase S3 v9 records (opcodes 37..42) ---------------------------------- */
+
+/* One subresource box copy (mirror of the local single-slice encode). */
+struct d9mt_wire_rec_copy_texture {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t dst_wire_id, dst_handle;
+  uint64_t src_wire_id, src_handle;
+  uint32_t dst_mip, dst_layer, src_mip, src_layer;
+  uint32_t dst_x, dst_y, dst_z;
+  uint32_t src_x, src_y, src_z;
+  uint32_t width, height, depth;
+  uint32_t _pad0;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_copy_texture) == 96);
+
+/* GPU buffer-to-buffer copy (device-local; CPU-visible content rides
+ * upload_buffer instead). */
+struct d9mt_wire_rec_copy_buffer {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t dst_wire_id, dst_handle;
+  uint64_t src_wire_id, src_handle;
+  uint64_t dst_offset, src_offset, bytes;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_copy_buffer) == 64);
+
+/* The meta-blit (sampled stretched rect). The CLIENT already normalized the
+ * rects exactly like its local path: dst rect is the final viewport/scissor
+ * (dx0<dx1, dy0<dy1, clamped to the dst mip), uv[4] = {u0,v0,u1,v1} in
+ * source-normalized coordinates (reversed source = uv0>uv1 mirrors). */
+struct d9mt_wire_rec_blit_texture_view {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t dst_wire_id, dst_handle;
+  uint64_t src_wire_id, src_handle;
+  uint32_t dst_format, dst_mip, dst_layer;
+  uint32_t src_format, src_mip, src_layer;
+  int32_t dst_x0, dst_y0, dst_x1, dst_y1;
+  float uv[4];
+  uint32_t filter; /* MtlSamplerFilter: 1 = Linear, else Nearest */
+  uint32_t _pad0;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_blit_texture_view) == 104);
+
+/* MSAA resolve: full-subresource, color aspect (the local path's shape —
+ * store-action MultisampleResolve, no shader). */
+struct d9mt_wire_rec_resolve_texture {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t dst_wire_id, dst_handle;
+  uint64_t src_wire_id, src_handle;
+  uint32_t src_mip, src_layer, dst_mip, dst_layer;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_resolve_texture) == 56);
+
+struct d9mt_wire_rec_generate_mipmaps {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id, client_handle; /* the IMAGE (mipgen covers the chain) */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_generate_mipmaps) == 24);
+
+/* ColorFill / partial clear through a view. The server executes the
+ * FULL-subresource color shape (load-action mini-pass); partial rects and
+ * depth-stencil aspects are dropped server-side (logged once) — they need
+ * the fill/depth-clear draw pipelines, a later slice. */
+struct d9mt_wire_rec_clear_image_view {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t wire_id, client_handle;
+  uint32_t format, mip, layer;
+  uint32_t x, y, width, height;
+  uint32_t aspects;
+  struct d9mt_wire_clear_value value;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_image_view) == 80);
 
 #endif /* D9MT_MTL_WIRE_H */
