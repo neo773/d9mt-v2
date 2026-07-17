@@ -2652,10 +2652,13 @@ WINEMETAL_API void WireRing_quiesce(void);
 struct WMTServerFrame {
   uint64_t texture;      /* obj_handle_t of the cached IOSurface MTLTexture */
   uint64_t frame_serial; /* server-published serial of this frame (diag) */
-  uint32_t width;        /* IOSurface width in texels */
-  uint32_t height;       /* IOSurface height in texels */
+  uint32_t width;        /* IOSurface width in texels (never 0 when usable) */
+  uint32_t height;       /* IOSurface height in texels (never 0 when usable) */
   uint32_t format;       /* WMTPixelFormat of the wrapped texture */
   uint32_t slot;         /* status present_slot this frame came from */
+  uint32_t minted;       /* 1 = texture was freshly wrapped this call — the
+                          * caller must make it resident on its queue before
+                          * using it as a copy/blit source (else GPU fault) */
 };
 WINEMETAL_API uint32_t WireServerFrame_acquire(obj_handle_t device,
                                                uint64_t local_serial,

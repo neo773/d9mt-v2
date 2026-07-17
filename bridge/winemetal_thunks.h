@@ -633,7 +633,8 @@ struct unixcall_wire_server_frame {
   uint32_t out_format;       /* out: WMTPixelFormat */
   uint32_t out_slot;         /* out: present_slot */
   uint32_t out_usable;       /* out: 1 = use the server frame */
-  uint32_t pad;
+  uint32_t out_minted;       /* out: 1 = out_texture was freshly created this
+                              * call (PE must add it to the residency set) */
 };
 
 #pragma pack(pop)

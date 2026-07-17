@@ -149,6 +149,61 @@ to run BEFORE `build-driver.sh` (it emits the `.def` the import lib consumes).
 The first `build-driver` after this change fails the link until the bridge def
 is regenerated — expected.
 
+## Run 11 — deterministic present hang: RESIDENCY + extent hardening
+
+The first cutover (d4f3616) DEADLOCKED GTA IV deterministically: two boots, both
+hung right after the first FF PSO build with 0 presented frames (DIAG=0), never
+reaching the menu (pre-cutover boots to frame 14k fine). Forensic sample: the
+dxvk-cs thread parked in a WINE sync primitive (msync wait, WINEMSYNC=1), a
+second worker on the same address; NOTHING in winemetal.so, no Metal/present/
+IOSurface frames anywhere. That signature = the CS thread is blocked on a
+GPU-completion event that never fired (the completion event is a wine sync
+object, not a winemetal frame) — i.e. the GPU hung on the server-frame present.
+
+ROOT CAUSE (reconciled against the code, not just the symptom): a texture used
+as a copy/blit SOURCE on an MTL4 command queue must be RESIDENT (in the queue's
+residency set), or the GPU faults and the present's completion event never
+signals. Driver textures get this for free — `MtlDeviceImpl::createImage` calls
+`m_residency->allocCreated(handle)` ("resident from creation to retirement",
+mtl_device_impl.cpp). The externally-wrapped IOSurface texture minted inside the
+unix thunk BYPASSED that entirely, so it was non-resident → `copyTexture` /
+`blitTextureView` from it faulted the GPU → `synchronizeWsi`'s completion never
+signalled → the CS thread parked forever. Deterministic because the server has
+published frames (dual execution) even at the legal screen, so `cUseServer`
+became true immediately and every present hit the fault. (The extent, contrary
+to the first hypothesis, was already populated — but see the belt-and-suspenders
+guard below; both are now closed.)
+
+FIX (commit ON TOP of d4f3616):
+1. **Residency** — the real fix. The unix thunk reports `out_minted=1` when it
+   freshly wraps an IOSurface; `acquireServerFrame` (PE) then calls
+   `dev->residency().allocCreated(handle)`, batched and committed by
+   `beforeSubmit` ahead of this present's submit. The unix cache became a fixed
+   8-entry `{id,gen}` table that NEVER releases evicted textures (a release
+   while still referenced by the residency set would re-introduce the fault) —
+   a bounded per-resize leak of small wrapper objects (the 3 steady surfaces
+   never evict; the shared IOSurface pixels are owned by the server pool).
+2. **Extent, made impossible-by-construction** — the unix side refuses a
+   zero-dim IOSurface and returns the wrap's true `[tex width/height]`;
+   `acquireServerFrame` refuses `width==0||height==0` (with a warn-once); and
+   the swapchain source-switch requires a non-null view+image and NONZERO
+   `cServerImage->extent` before `cUseServer` stays true. Any doubt → local
+   backbuffer. A GPU-hazardous present copy is now unreachable.
+3. **Format/usage verified** — the wrap is `BGRA8Unorm`, `MTLStorageModeShared`,
+   `usage = ShaderRead | RenderTarget` (ShaderRead for the scaled-blit render
+   pass source; a valid copy source/dest).
+
+Gate limitation (stated plainly): test_feed cannot present to a real
+CAMetalLayer, so it cannot reproduce the residency fault or prove the fix.
+Builds are green (bridge + driver + server). The REAL proof is the coordinator's
+next GTA IV run booting PAST the legal screen to a menu with DIAG advancing and
+`compare_frames.py` dumping a local/server pair. If it hangs again with the same
+signature, the next suspect is cross-process GPU write/read ordering on the
+shared IOSurface (the client reads it with no fence against the server's GPU
+writes; frame_serial is completion-gated on the SERVER's queue, but the client's
+queue has no dependency edge) — that would need an explicit cross-queue barrier
+or a shared-event wait, not covered here.
+
 ## What ONLY a real-game run can prove (honest)
 
 - test_feed and the build gates prove the SERVER machinery and that the PE code

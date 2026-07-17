@@ -1675,8 +1675,29 @@ namespace dxvk::backend::wire {
     if (!WireServerFrame_acquire(dev->wmtDevice(), localSerial,
                                  kServerLagFrames, &f))
       return false;
-    if (f.texture == 0u || f.width == 0u || f.height == 0u)
+    /* Hard extent guard (run-11 hang): a zero-extent source drives a
+     * zero/out-of-bounds present copy -> GPU fault -> the present's completion
+     * event never signals -> the CS thread parks forever. Never present such a
+     * frame; fall back to the always-ready local backbuffer. */
+    if (f.texture == 0u || f.width == 0u || f.height == 0u) {
+      static bool s_warned = false;
+      if (f.texture != 0u && !s_warned) {
+        s_warned = true;
+        Logger::warn(str::format("acquireServerFrame: server texture has zero "
+          "extent (", f.width, "x", f.height, ") — falling back to local"));
+      }
       return false;
+    }
+
+    /* Residency (THE run-11 hang fix): a copy/blit SOURCE must be resident on
+     * the client's MTL4 queue. Driver textures are added at creation; an
+     * externally-wrapped IOSurface texture is not, so make each freshly-minted
+     * wrap resident here. allocCreated batches a userspace add committed by
+     * beforeSubmit ahead of this present's submit (synchronizeWsi runs later in
+     * the same closure). The unix cache keeps the texture alive, so no removal
+     * is scheduled — the bounded per-resize leak is documented server-side. */
+    if (f.minted)
+      dev->residency().allocCreated(f.texture);
 
     const MtlFormat fmt = MtlFormat(f.format);
 

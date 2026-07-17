@@ -6958,26 +6958,56 @@ _WireRing_quiesce(void *obj) {
  * {present_slot, frame_serial (GPU-done), iosurface_id[], iosurface_serial[]}.
  * The client wraps the published IOSurface as an MTLTexture on ITS OWN device
  * (IOSurface backing is shared cross-device/cross-process) and blits it into
- * the drawable. The wrap is cached per {id, generation}: IOSurfaceLookup is
- * ~4us and the newTextureWithDescriptor:iosurface: wrap ~10us — paid once per
- * generation, not per present. The cache owns one +1 reference; a generation
- * change releases the old texture and mints a new one. Not ARC (this file uses
- * explicit retain/release, see _MTLDevice_newSharedTexture). */
-static IOSurfaceID     wire_srv_tex_id  = 0;
-static uint64_t        wire_srv_tex_gen = 0;
-static id<MTLTexture>  wire_srv_tex     = nil;
+ * the drawable. IOSurfaceLookup is ~4us and the newTextureWithDescriptor:
+ * iosurface: wrap ~10us, so the wraps are cached per {IOSurfaceID, generation}
+ * — the pool generation (iosurface_pool.m g_generation) bumps only on resize,
+ * so exactly the 3 rotating slot surfaces stay hot; a resize adds a few more.
+ *
+ * OWNERSHIP / RESIDENCY (the run-11 hang fix): a texture used as a copy/blit
+ * SOURCE must be RESIDENT on the client's MTL4 command queue, or the GPU faults
+ * and the present's completion event never signals (the CS thread parks
+ * forever on the wine sync object — exactly the observed deadlock). Driver
+ * textures get this via MtlResidencyTracker::allocCreated at creation; an
+ * externally-wrapped IOSurface texture does NOT, so the PE side adds each
+ * freshly-minted wrap to the residency set (signalled by out_minted). Because
+ * the residency set references these textures for the queue's lifetime, the
+ * cache NEVER releases them (a release while still referenced would fault):
+ * entries evicted from the fixed table are intentionally leaked (they stay
+ * alive + resident). The leak is bounded — one small MTLTexture wrapper per
+ * distinct {id,generation} beyond the table window, i.e. per resize, NOT per
+ * frame (the 3 steady surfaces never evict). The IOSurface pixels themselves
+ * are owned by the server pool, never by these wrappers. Not ARC (explicit
+ * retain/release, see _MTLDevice_newSharedTexture). */
+#define WIRE_SRV_TEX_CACHE 8u
+static struct {
+  IOSurfaceID    id;
+  uint64_t       gen;
+  id<MTLTexture> tex;   /* owned +1, intentionally never released (see above) */
+} wire_srv_tex_cache[WIRE_SRV_TEX_CACHE];
+static uint32_t wire_srv_tex_next = 0;   /* round-robin eviction cursor */
 
+/* Returns the cached-or-freshly-wrapped texture; *minted set to 1 iff a new
+ * texture was created this call (the PE side must then make it resident). */
 static id<MTLTexture>
-wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen) {
-  if (wire_srv_tex && wire_srv_tex_id == sid && wire_srv_tex_gen == gen)
-    return wire_srv_tex;              /* hot path: same generation, no rewrap */
+wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen,
+                           uint32_t *minted) {
+  *minted = 0;
+  for (uint32_t i = 0; i < WIRE_SRV_TEX_CACHE; i++) {
+    if (wire_srv_tex_cache[i].tex &&
+        wire_srv_tex_cache[i].id == sid && wire_srv_tex_cache[i].gen == gen)
+      return wire_srv_tex_cache[i].tex;   /* hot path: same surface generation */
+  }
 
   IOSurfaceRef surf = IOSurfaceLookup(sid);
   if (!surf)
-    return nil;                       /* id not resolvable this process yet */
+    return nil;                          /* id not resolvable this process yet */
 
   size_t w = IOSurfaceGetWidth(surf);
   size_t h = IOSurfaceGetHeight(surf);
+  if (w == 0 || h == 0) {                /* malformed surface — never present it */
+    CFRelease(surf);
+    return nil;
+  }
   /* The server pool is BGRA8Unorm (matches the D3D9 X8R8G8B8 backbuffer path).
    * A non-BGRA server pool would need format negotiation; documented in
    * HANDOFF-CUTOVER.md as the single-format assumption. */
@@ -6986,6 +7016,8 @@ wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen) 
                                                          width:w
                                                         height:h
                                                      mipmapped:NO];
+  /* ShaderRead: the scaled-present path samples the source in a render pass
+   * (blitTextureView). RenderTarget: keep it a valid copy destination too. */
   desc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
   desc.storageMode = MTLStorageModeShared;   /* IOSurface-backed */
   id<MTLTexture> tex = [device newTextureWithDescriptor:desc iosurface:surf plane:0];
@@ -6994,12 +7026,15 @@ wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen) 
   if (!tex)
     return nil;
 
-  if (wire_srv_tex)
-    [wire_srv_tex release];
-  wire_srv_tex     = tex;                      /* own the +1 from newTexture */
-  wire_srv_tex_id  = sid;
-  wire_srv_tex_gen = gen;
-  return wire_srv_tex;
+  uint32_t slot = wire_srv_tex_next;
+  wire_srv_tex_next = (wire_srv_tex_next + 1u) % WIRE_SRV_TEX_CACHE;
+  /* Evicted entry is intentionally NOT released — it may still sit in the
+   * client residency set; releasing it would fault the GPU. Bounded leak. */
+  wire_srv_tex_cache[slot].id  = sid;
+  wire_srv_tex_cache[slot].gen = gen;
+  wire_srv_tex_cache[slot].tex = tex;         /* own the +1 from newTexture */
+  *minted = 1;
+  return tex;
 }
 
 static NTSTATUS
@@ -7007,6 +7042,7 @@ _WireServerFrame_acquire(void *obj) {
   struct unixcall_wire_server_frame *p = obj;
   p->out_usable = 0;
   p->out_texture = 0;
+  p->out_minted = 0;
   if (!wire_status)
     return STATUS_SUCCESS;
 
@@ -7035,16 +7071,26 @@ _WireServerFrame_acquire(void *obj) {
   if (sid == 0)
     return STATUS_SUCCESS;                      /* empty slot */
 
-  id<MTLTexture> tex = wire_server_lookup_texture((id<MTLDevice>)p->device, sid, gen);
+  uint32_t minted = 0;
+  id<MTLTexture> tex = wire_server_lookup_texture((id<MTLDevice>)p->device, sid, gen, &minted);
   if (!tex)
     return STATUS_SUCCESS;                       /* lookup / wrap failed */
 
+  /* The wrapped texture carries the IOSurface's true dimensions; a zero extent
+   * would drive a zero/out-of-bounds present copy -> GPU fault. Never return a
+   * zero-extent texture as usable (the PE guard double-checks). */
+  uint32_t tw = (uint32_t)[tex width];
+  uint32_t th = (uint32_t)[tex height];
+  if (tw == 0 || th == 0)
+    return STATUS_SUCCESS;
+
   p->out_texture      = (obj_handle_t)tex;
   p->out_frame_serial = fs;
-  p->out_width        = (uint32_t)[tex width];
-  p->out_height       = (uint32_t)[tex height];
+  p->out_width        = tw;
+  p->out_height       = th;
   p->out_format       = (uint32_t)MTLPixelFormatBGRA8Unorm;
   p->out_slot         = slot;
+  p->out_minted       = minted;
   p->out_usable       = 1;
   return STATUS_SUCCESS;
 }

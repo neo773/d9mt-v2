@@ -812,8 +812,20 @@ namespace dxvk {
       // unused server frames.
       Rc<MtlTexture>     cServerImage;
       Rc<MtlTextureView> cServerView;
-      const bool cUseServer = backend::wire::acquireServerFrame(
+      bool cUseServer = backend::wire::acquireServerFrame(
         cDevice, cLocalSerial, cServerImage, cServerView);
+
+      // Belt-and-suspenders: a GPU-hazardous present copy must be impossible by
+      // construction. Only present the server frame when it is fully formed —
+      // a valid view, a backing image, and a NONZERO extent (a zero/garbage
+      // extent drives an out-of-bounds copy that faults the GPU and wedges the
+      // present-completion wait). Any doubt -> local backbuffer.
+      if (cUseServer && (cServerImage == nullptr || cServerView == nullptr
+                      || cServerView->image == nullptr
+                      || cServerImage->extent.width == 0
+                      || cServerImage->extent.height == 0)) {
+        cUseServer = false;
+      }
 
       const Rc<MtlTexture>&     cPresentImage = cUseServer ? cServerImage : cLocalImage;
       const Rc<MtlTextureView>& cPresentView  = cUseServer ? cServerView  : cLocalView;

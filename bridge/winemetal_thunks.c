@@ -1941,5 +1941,6 @@ WireServerFrame_acquire(obj_handle_t device, uint64_t local_serial,
   out->height       = params.out_height;
   out->format       = params.out_format;
   out->slot         = params.out_slot;
+  out->minted       = params.out_minted;
   return 1;
 }
