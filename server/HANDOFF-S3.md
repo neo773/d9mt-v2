@@ -685,3 +685,13 @@ Sizing note for the pace gate: the IOSurface pool is 3 deep and the resize
 path (pool generation bump) already publishes via iosurface_serial[] — the
 client cache MUST key on {id, generation}, not id alone (resize leaks old
 generations by design, HANDOFF-S2 flag 5).
+
+## MILESTONE — boot survival achieved (run 9, S3-v8 @7b2b570, 2026-07-18)
+First full boot survival. GTA IV real run: server + game both alive past frame 2560,
+10+ healthy PROF windows (run 8 died at f=1792). Per window: srvFrames=256/256,
+hb steady ~350-580, stalls=0, execOp=0, heapDrop=0, inel=0 (citizenship rule holding),
+psoSkip 599→0 heal, upl ~71/window. Residual non-fatal (for soak/cutover agents):
+decodeErr=1 (one malformed record, tolerated), srvErr=4 (exec errors counted+continued).
+These are steady-state RENDER QUALITY items, not survival — the good side of the milestone.
+Next: soak (srvExecErr/decodeErr trend over minutes) → visual cutover (IOSurface present +
+autonomous pixel-compare vs client backbuffer dump) → thin recorder (fps) → consolidation.
