@@ -486,8 +486,16 @@ namespace dxvk::backend {
     }
 
     WMTDepthStencilInfo info = {};
-    info.depth_compare_function = WMTCompareFunction(ds.depthCompareOp);
-    info.depth_write_enabled    = ds.depthWrite;
+    /* V12: honor depthTest (D3DRS_ZENABLE). Metal has no test-enable bit —
+     * disabled test maps to compare=Always + write=NO (D3D9 performs no depth
+     * writes with Z disabled). Kept in EXACT lockstep with the render
+     * server's resolveDsso (server/executor.mm) — dual execution must stay
+     * pixel-identical. The FNV hash above covers depthTest, so cached DSSOs
+     * stay distinct. */
+    info.depth_compare_function = ds.depthTest
+      ? WMTCompareFunction(ds.depthCompareOp)
+      : WMTCompareFunctionAlways;
+    info.depth_write_enabled    = ds.depthTest && ds.depthWrite;
 
     auto fillStencil = [&](WMTStencilInfo& s, const MtlStencilState& m) {
       s.enabled                  = ds.stencilEnable;

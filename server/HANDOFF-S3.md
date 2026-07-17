@@ -871,6 +871,101 @@ V11 honest flags:
 - The rotation fix registers images at every present (a few Rc copies) —
   negligible, and self-healing across Reset.
 
+## V12 — depth-chain audit: DSSO depth_test parity + full-DS clears + a
+## depth-tested gate (the clear-but-no-cube investigation, continued)
+
+Context: V11 left the wire CLEAN (decodeErr=0, srvErr=0) and the server
+DRAWING (draws=255, passes=256/window, RT routing correct: color0 ->
+IOSURFACE, ds id -> texture) — yet the published IOSurface held EXACTLY the
+clear color. The handoff's hot lead: `resolveDsso` ignores `depth_test`.
+
+**Hot-lead verdict: the premise was HALF true.** `resolveDsso` does ignore
+`depth_test` — but so does the CLIENT (`MtlDeviceImpl::getDepthStencilState`,
+driver/backend/mtl_device_impl.cpp, applies `depthCompareOp`/`depthWrite`
+unconditionally). There was NO client/server divergence there, so it cannot
+be the local-has-cube/server-has-clear delta for a demo that runs
+ZENABLE=TRUE anyway (test/code_cube3d.c:173). Both sides were, however,
+diverging from D3D9 (ZENABLE=FALSE must disable test AND write), so BOTH
+were fixed in lockstep:
+- server/executor.mm `resolveDsso`: `depth_test==0` -> compare Always +
+  write NO (cache key already spans depth_test — no key change).
+- driver/backend/mtl_device_impl.cpp `getDepthStencilState`: identical
+  mapping (FNV hash already covers depthTest).
+Dual execution stays pixel-identical by construction; ZENABLE=FALSE draws
+against a stale-depth attachment (real-game UI class) are now correct on
+both sides.
+
+**Full depth-chain audit (client mirrored, divergences found and fixed):**
+1. `clear_image_view` (op 42) DROPPED all depth/stencil-aspect clears
+   server-side ("a later slice"). The client executes them as a mini-pass
+   load-action clear. A game whose D3DCLEAR_ZBUFFER lands on the op-42 path
+   (PARTIAL-viewport Clear, i.e. vp/scissor smaller than the surface —
+   d3d9_device.cpp Clear -> fullClear=false -> clearImageView) got NO depth
+   clear EVER server-side -> first-frame depth garbage -> every
+   depth-tested fragment rejected FOREVER over a perfect clear. THE
+   cube-signature-shaped hole in the chain. Fixed for FULL-subresource DS
+   aspects: executes as the standalone mini-pass (depth/stencil attachment
+   + loadAction Clear), mirroring the client's clearRenderTarget mini-pass.
+   Partial rects still drop (they need the depth-clear draw pipeline —
+   genuinely a later slice) but now COUNT per occurrence and name first-8
+   (`clearDsPartialDrop`). NOTE: code_cube3d's own Clear is full-viewport ->
+   op 32 (clear_by_id) -> folds into the pass; both paths now covered.
+2. `clear_by_id` (op 32) with an unresolvable/still-building target was
+   dropped SILENTLY (a still-building ds texture loses its first depth
+   clear with no retry). Now counted (`clearDropUnresolved`) + first-8
+   named with wire id/aspects/reason.
+3. `set_rt` resolving the ds ref to named-but-nil runs the pass WITHOUT a
+   depth attachment (client renders WITH) — silent divergence, one frame
+   per late create. Now counted (`dsUnresolvedBinds`) + first-8 named.
+4. Draws against a ds attachment with the DEFAULT depth state (no
+   set_depth_stencil_state record ever seen) now count (`dssoDefaulted`) +
+   first-8 named.
+5. Verified NOT divergent: pass depth/stencil load-store shape (Clear/Load
+   + Store both sides; client's Rule B store=DontCare is perf-only), D24S8
+   -> wire format 260 (Depth32Float_Stencil8, client maps BEFORE emission),
+   depth texture creation (Private + RenderTarget usage), Metal-4 PSO
+   (depth format is NOT in the MTL4 pipeline descriptor — mtl_pso_cache.h
+   states it, bridge confirms), stencil-aspect gating by format, viewport
+   znear/zfar and scissor defaults, folded clear-then-draw ordering.
+
+srv-stats gained `depth{clrDrop= clrPart= dsUnres= dssoDef=}` (per-window
+deltas). All four MUST read 0 on a healthy cube run.
+
+**Gate: v12 DEPTH-TESTED CUBE (server/test_feed.c).** The v11 minimal-cube
+hand-crafted state with the reproducer's REAL depth semantics decoded from
+code_cube3d + the client's emission shape: auto-DS texture create (2D,
+format 260, usage 0x40), ds bound via set_rt, D3DCLEAR_ZBUFFER-shaped
+clear_by_id (aspects 0x2, depth 1.0, folds into the draw pass),
+set_depth_stencil_state depth_test=1 write=1 compare LESSEQUAL(3) — then
+draw A (triangle at z=0) must PRODUCE pixels (garbage depth rejects it);
+then compare LESS(1) write=0 + the fullscreen z=0 RED draw must be
+REJECTED over the triangle (0<0, proves the test ENGAGES) and ACCEPTED
+outside it (0<1.0, proves the clear VALUE landed). Center=magenta +
+corner=red or FAIL. Runs inside the existing build-server gate.
+
+Expected cube-run signature after V12: srv-stats unchanged on the happy
+path (draws=255, passes=256, skip=1{psoPend=1}) PLUS
+`depth{clrDrop=0 clrPart=0 dsUnres=0 dssoDef=0}` — any nonzero bucket names
+the exact depth divergence with first-8 logs. If the gate PASSES and the
+real reproducer STILL publishes clear-only, the remaining suspects are
+outside the depth chain (only the real 40s run can prove: real record
+sizes/against-the-wire state deltas the gate can't synthesize — e.g. the
+demo's exact viewport/push-block traffic, or a second RT/state record the
+gate doesn't emit).
+
+V12 honest flags:
+- The depth_test fix changes BOTH sides identically; if a game relied on
+  the old always-tested behavior it changes local rendering too (that
+  behavior was a D3D9 spec violation — DXVK maps ZENABLE the same way).
+- Partial-rect DS clears still drop (counted now). If `clrPart` is nonzero
+  on a real title, that title needs the depth-clear draw pipeline slice.
+- `clearDropUnresolved` clears are still LOST, not stashed (unlike op-42
+  img clears, op 32 has no retry queue) — the counter tells whether that
+  matters in practice before we build the stash.
+- ONLY the real reproducer can prove the cube renders: the gate proves the
+  server's depth chain executes the demo-shaped stream correctly, not that
+  the demo's actual wire traffic contains what the gate synthesizes.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

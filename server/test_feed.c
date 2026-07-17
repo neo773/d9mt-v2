@@ -1209,6 +1209,178 @@ main(int argc, char **argv) {
       }
     }
 
+    /* --- V12 DEPTH-TESTED CUBE: the reproducer's depth chain. The real
+     * demo runs with EnableAutoDepthStencil (D3DFMT_D24S8 -> wire format
+     * 260 = Depth32Float_Stencil8, the client's D24S8 mapping),
+     * D3DRS_ZENABLE=TRUE + ZFUNC default LESSEQUAL, and clears via
+     * D3DCLEAR_ZBUFFER (aspects 0x2, depth 1.0) folded into the draw pass.
+     * Draw A (triangle, LESSEQUAL vs cleared 1.0, write ON) must PRODUCE
+     * pixels — depth garbage (missing clear) rejects it. Draw B (fullscreen
+     * RED at z=0, LESS, write OFF) must be REJECTED over the triangle
+     * (0<0 false: proves the test engages) and ACCEPTED elsewhere
+     * (0<1.0: proves the clear VALUE landed). --- */
+    {
+      /* the auto depth-stencil: usage 0x40 (DepthStencil), private */
+      struct d9mt_wire_rec_create_texture ct;
+      memset(&ct, 0, sizeof(ct));
+      ct.hdr.opcode = d9mt_wire_op_create_texture;
+      ct.hdr.size = sizeof(ct);
+      ct.wire_id = 960;
+      ct.client_handle = 0xD960;
+      ct.type = 1; /* 2D */
+      ct.format = 260; /* Depth32Float_Stencil8 (client D24S8 mapping) */
+      ct.width = 640;
+      ct.height = 480;
+      ct.depth = 1;
+      ct.mip_levels = 1;
+      ct.array_layers = 1;
+      ct.sample_count = 1;
+      ct.usage = 0x40; /* MtlUsage::DepthStencil */
+      emit(&ct, sizeof(ct));
+
+      int depthOk = 0;
+      for (int w = 1; w <= 30 && !depthOk; w++) {
+        /* RT: backbuffer color + the wire depth attachment */
+        struct d9mt_wire_rec_set_render_targets_by_id rt4;
+        memset(&rt4, 0, sizeof(rt4));
+        rt4.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt4.hdr.size = sizeof(rt4);
+        rt4.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rt4.color[0].format = 80;
+        rt4.color[0].width = 640;
+        rt4.color[0].height = 480;
+        rt4.color[0].sample_count = 1;
+        rt4.depth_stencil.image_wire_id = 960;
+        rt4.depth_stencil.format = 260;
+        rt4.depth_stencil.width = 640;
+        rt4.depth_stencil.height = 480;
+        rt4.depth_stencil.sample_count = 1;
+        emit(&rt4, sizeof(rt4));
+
+        /* D3D9 Clear(TARGET|ZBUFFER): two per-view clear_by_id records,
+         * exactly the client's emission shape (depth first) */
+        struct d9mt_wire_rec_clear_render_target_by_id zclr;
+        memset(&zclr, 0, sizeof(zclr));
+        zclr.hdr.opcode = d9mt_wire_op_clear_render_target_by_id;
+        zclr.hdr.size = sizeof(zclr);
+        zclr.image_wire_id = 960;
+        zclr.clear_aspects = 0x2; /* depth only (D3DCLEAR_ZBUFFER) */
+        zclr.value.depth = 1.f;
+        emit(&zclr, sizeof(zclr));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+
+        /* depth state A: ZENABLE + ZWRITEENABLE + LESSEQUAL (demo default) */
+        struct d9mt_wire_rec_set_depth_stencil_state dss;
+        memset(&dss, 0, sizeof(dss));
+        dss.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+        dss.hdr.size = sizeof(dss);
+        dss.depth_compare_op = 3; /* LessEqual */
+        dss.depth_test = 1;
+        dss.depth_write = 1;
+        dss.front.compare_op = dss.back.compare_op = 7; /* Always */
+        dss.front.read_mask = dss.back.read_mask = 0xFF;
+        dss.front.write_mask = dss.back.write_mask = 0xFF;
+        emit(&dss, sizeof(dss));
+
+        /* draw A: the cube triangle (VB/IB/push data live from the v11
+         * scenario; re-bind for wave independence) */
+        emit_bind_shader(0, 0xA005);
+        emit_bind_shader(1, 0xA006);
+        struct {
+          struct d9mt_wire_rec_set_vertex_layout rec;
+          struct d9mt_wire_vertex_attr attr;
+          struct d9mt_wire_vertex_layout lay;
+        } vl4 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl4), 0}, 1, 1},
+                 {0, 0, 900 /* RGB32Float */, 0},
+                 {0, 12, 0, 0}};
+        emit(&vl4, sizeof(vl4));
+        struct d9mt_wire_rec_bind_vertex_buffer bvb2;
+        memset(&bvb2, 0, sizeof(bvb2));
+        bvb2.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+        bvb2.hdr.size = sizeof(bvb2);
+        bvb2.binding = 0;
+        bvb2.stride = 12;
+        bvb2.buf.buffer = 0xC950;
+        bvb2.buf.length = 36;
+        emit(&bvb2, sizeof(bvb2));
+        struct d9mt_wire_rec_bind_index_buffer bib2;
+        memset(&bib2, 0, sizeof(bib2));
+        bib2.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+        bib2.hdr.size = sizeof(bib2);
+        bib2.buf.buffer = 0xC951;
+        bib2.buf.length = 8;
+        bib2.index_type = 0;
+        emit(&bib2, sizeof(bib2));
+        struct {
+          struct d9mt_wire_rec_push_data rec;
+          float mvp[16];
+        } pd3 = {{{d9mt_wire_op_push_data, sizeof(pd3), 0}, 1, 0, 64, 0},
+                 {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}};
+        emit(&pd3, sizeof(pd3));
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } di2 = {{{d9mt_wire_op_draw_indexed, sizeof(di2), 0}, 1, 0},
+                 {{3, 1, 0, 0, 0, 0}}};
+        emit(&di2, sizeof(di2));
+
+        /* depth state B: LESS, write OFF — the fullscreen z=0 draw must be
+         * rejected over the triangle (0<0) and accepted over the clear
+         * (0<1). */
+        dss.depth_compare_op = 1; /* Less */
+        dss.depth_write = 0;
+        emit(&dss, sizeof(dss));
+        emit_bind_shader(0, 0xA001); /* vsMain: fullscreen, z=0 */
+        emit_bind_shader(1, 0xA002); /* fsMain: solid red */
+        struct d9mt_wire_rec_set_vertex_layout vl5 = {
+            {d9mt_wire_op_set_vertex_layout, sizeof(vl5), 0}, 0, 0};
+        emit(&vl5, sizeof(vl5));
+        emit_draws(1);
+
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v12 depth-cube: frame never presented");
+        uint32_t s5 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf4 = IOSurfaceLookup(ids[s5]);
+        if (!sf4)
+          FAIL("v12 depth-cube: IOSurfaceLookup failed");
+        IOSurfaceLock(sf4, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *b4 = IOSurfaceGetBaseAddress(sf4);
+        size_t r4 = IOSurfaceGetBytesPerRow(sf4);
+        uint8_t center[4], corner[4];
+        memcpy(center, b4 + 280 * r4 + 266 * 4, 4); /* triangle centroid */
+        memcpy(corner, b4 + 2 * r4 + 636 * 4, 4);   /* outside triangle */
+        IOSurfaceUnlock(sf4, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf4);
+        uint8_t magenta[4] = {255, 0, 255, 255}, red[4] = {0, 0, 255, 255};
+        if (!memcmp(center, magenta, 4) && !memcmp(corner, red, 4)) {
+          depthOk = 1;
+          printf("[test_feed] v12 depth-cube: depth clear + LESSEQUAL accept "
+                 "+ LESS reject all verified (wave %d)\n", w);
+        } else if (w == 30) {
+          FAIL("v12 depth-cube: center=%02x%02x%02x%02x (want magenta: depth-"
+               "tested draw produced pixels + later draw rejected) corner="
+               "%02x%02x%02x%02x (want red: fullscreen accepted vs cleared "
+               "1.0) — the depth chain diverges",
+               center[0], center[1], center[2], center[3],
+               corner[0], corner[1], corner[2], corner[3]);
+        } else {
+          usleep(30000);
+        }
+      }
+
+      /* restore demo-neutral depth state (test off) for later scenarios */
+      struct d9mt_wire_rec_set_depth_stencil_state dssOff;
+      memset(&dssOff, 0, sizeof(dssOff));
+      dssOff.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+      dssOff.hdr.size = sizeof(dssOff);
+      dssOff.depth_compare_op = 7; /* Always */
+      dssOff.front.compare_op = dssOff.back.compare_op = 7;
+      dssOff.front.read_mask = dssOff.back.read_mask = 0xFF;
+      dssOff.front.write_mask = dssOff.back.write_mask = 0xFF;
+      emit(&dssOff, sizeof(dssOff));
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the

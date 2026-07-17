@@ -470,9 +470,18 @@ struct Exec {
    * black vs skipping-everything' discriminator). Logged every 256 presents
    * as deltas. */
   uint64_t skipNoRt = 0, skipPsoFail = 0, skipNoShader = 0, skipNoIndex = 0;
+  /* V12 depth-chain buckets: every dropped/defaulted depth behavior must
+   * count and name itself (first-8 logs at the drop sites). */
+  uint64_t clearDropUnresolved = 0; /* clear_by_id target never resolved */
+  uint64_t clearDsPartialDrop = 0;  /* clear_image_view partial-rect DS drop */
+  uint64_t dsUnresolvedBinds = 0;   /* set_rt ds named but texture nil */
+  uint64_t dssoDefaulted = 0;       /* draw w/ ds attachment before any
+                                       set_depth_stencil_state record */
+  bool depthStencilSeen = false;
   struct StatsSnap {
     uint64_t draws = 0, skipped = 0, pend = 0, noRt = 0, psoFail = 0,
-             noShader = 0, noIndex = 0, encoders = 0, uploads = 0;
+             noShader = 0, noIndex = 0, encoders = 0, uploads = 0,
+             clrDrop = 0, clrDsPart = 0, dsUnres = 0, dssoDef = 0;
   } statsSnap;
 
   /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
@@ -984,8 +993,17 @@ static id<MTLDepthStencilState> resolveDsso() {
     return it->second;
 
   MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
-  desc.depthCompareFunction = (MTLCompareFunction)g->depthStencil.depth_compare_op;
-  desc.depthWriteEnabled = g->depthStencil.depth_write != 0;
+  /* V12: honor depth_test. Metal has no test-enable bit — disabled test maps
+   * to compare=Always + write=NO (a disabled depth test performs no depth
+   * writes either, per the D3D9 Z-enable contract). MIRRORS the client's
+   * getDepthStencilState (mtl_device_impl.cpp) exactly — both sides changed
+   * together; the wire record has carried depth_test since S2. The cache key
+   * spans depth_compare_op..end of record, so depth_test is already keyed. */
+  const bool depthTest = g->depthStencil.depth_test != 0;
+  desc.depthCompareFunction = depthTest
+      ? (MTLCompareFunction)g->depthStencil.depth_compare_op
+      : MTLCompareFunctionAlways;
+  desc.depthWriteEnabled = depthTest && g->depthStencil.depth_write != 0;
   if (g->depthStencil.stencil_enable) {
     auto fill = [](const d9mt_wire_stencil_face& f) {
       MTLStencilDescriptor* s = [[MTLStencilDescriptor alloc] init];
@@ -1150,6 +1168,17 @@ static void flushDynamicState() {
   }
 
   id<MTLDepthStencilState> dsso = g->pass.ds.tex ? resolveDsso() : nil;
+  if (dsso && !g->depthStencilSeen) {
+    /* V12: drawing against a depth attachment with the DEFAULT depth state
+     * (no set_depth_stencil_state record arrived) — name it, it means the
+     * server is guessing what the client depth-tests with. */
+    g->dssoDefaulted++;
+    static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] draw #%d: ds attachment bound but NO "
+                      "set_depth_stencil_state record seen — default DSSO "
+                      "(Always/no-write) in use\n", n);
+  }
   if (dsso && (first || dsso != g->lastDsso)) {
     g->lastDsso = dsso;
     [enc setDepthStencilState:dsso];
@@ -2083,31 +2112,52 @@ static bool tryExecuteClearImage(const d9mt_wire_rec_clear_image_view* r) {
   const uint32_t mipW = (uint32_t)tex.width >> r->mip ? (uint32_t)tex.width >> r->mip : 1u;
   const uint32_t mipH = (uint32_t)tex.height >> r->mip ? (uint32_t)tex.height >> r->mip : 1u;
   const bool fullRect = r->x == 0 && r->y == 0 && r->width >= mipW && r->height >= mipH;
-  if (!(r->aspects & 0x1u) || !fullRect) {
-    /* partial rects / depth-stencil need the fill / depth-clear draw
-     * pipelines — a later slice. Named once. */
-    static bool warned = false;
-    if (!warned) {
-      warned = true;
-      fprintf(stderr, "[serverd] clear_image_view: partial/DS clear dropped "
-                      "(aspects=0x%x rect=%u,%u %ux%u of %ux%u)\n",
+  if (!fullRect) {
+    /* partial rects need the fill / depth-clear draw pipelines — a later
+     * slice. V12: counted per occurrence, named first-8 (a dropped partial
+     * DEPTH clear leaves garbage that can reject every later fragment). */
+    g->clearDsPartialDrop++;
+    static int warned = 0;
+    if (warned++ < 8) {
+      fprintf(stderr, "[serverd] clear_image_view #%d: partial clear dropped "
+                      "(wire=%llu aspects=0x%x rect=%u,%u %ux%u of %ux%u)\n",
+              warned, (unsigned long long)r->wire_id,
               r->aspects, r->x, r->y, r->width, r->height, mipW, mipH);
     }
     return true;
   }
-  /* full-subresource color: the standalone mini-pass shape */
+  /* full-subresource: the standalone mini-pass shape (V12: DS aspects too —
+   * a full DS clear is a plain load-action clear on the depth/stencil
+   * attachment, exactly the client's clearRenderTarget mini-pass; only
+   * PARTIAL rects need the depth-clear draw pipeline). */
   if (g->pass.active)
     closePass();
   Pass saved = g->pass;
   g->pass = Pass();
-  g->pass.color[0].tex = tex;
-  g->pass.color[0].format = tex.pixelFormat;
-  g->pass.color[0].baseMip = r->mip;
-  g->pass.color[0].baseLayer = r->layer;
-  g->pass.color[0].named = true;
-  g->pass.clearColor[0] = true;
-  g->pass.clearValues[0] = MTLClearColorMake(r->value.color[0], r->value.color[1],
-                                             r->value.color[2], r->value.color[3]);
+  if (r->aspects & 0x1u) {
+    g->pass.color[0].tex = tex;
+    g->pass.color[0].format = tex.pixelFormat;
+    g->pass.color[0].baseMip = r->mip;
+    g->pass.color[0].baseLayer = r->layer;
+    g->pass.color[0].named = true;
+    g->pass.clearColor[0] = true;
+    g->pass.clearValues[0] = MTLClearColorMake(r->value.color[0], r->value.color[1],
+                                               r->value.color[2], r->value.color[3]);
+  } else {
+    g->pass.ds.tex = tex;
+    g->pass.ds.format = tex.pixelFormat;
+    g->pass.ds.baseMip = r->mip;
+    g->pass.ds.baseLayer = r->layer;
+    g->pass.ds.named = true;
+    if (r->aspects & 0x2u) {
+      g->pass.clearDepth = true;
+      g->pass.depthClear = r->value.depth;
+    }
+    if (r->aspects & 0x4u) {
+      g->pass.clearStencil = true;
+      g->pass.stencilClear = r->value.stencil;
+    }
+  }
   g->pass.pending = true;
   materializePass();
   closePass();
@@ -2361,6 +2411,16 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
   for (uint32_t i = 0; i < 4; i++)
     resolve(r->color[i], fresh.color[i]);
   resolve(r->depth_stencil, fresh.ds);
+  if (fresh.ds.named && !fresh.ds.tex) {
+    /* V12: a named-but-nil ds means this pass renders WITHOUT the depth
+     * attachment the client renders WITH — silent divergence class. */
+    g->dsUnresolvedBinds++;
+    static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] set_rt #%d: ds wire=%llu UNRESOLVED — pass "
+                      "will run without depth attachment\n", n,
+              (unsigned long long)r->depth_stencil.image_wire_id);
+  }
   { /* v11 substitution audit: name the first RT binds' routing */
     static int n = 0;
     if (n++ < 8)
@@ -2423,8 +2483,18 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
     target.backbuffer = true;
   } else {
     auto res = lookupWire(r->image_wire_id);
-    if (!res || !observeReady(res) || !res->texture)
-      return; /* unresolvable/building clear target — drop silently */
+    if (!res || !observeReady(res) || !res->texture) {
+      /* unresolvable/building clear target. V12: a dropped DEPTH clear is
+       * the garbage-rejects-everything class — count + name first-8. */
+      g->clearDropUnresolved++;
+      static int n = 0;
+      if (n++ < 8)
+        fprintf(stderr, "[serverd] clear_by_id #%d DROPPED: wire=%llu "
+                        "aspects=0x%x %s\n", n,
+                (unsigned long long)r->image_wire_id, r->clear_aspects,
+                !res ? "unresolved" : "still building");
+      return;
+    }
     target.tex = res->texture;
     target.format = res->texture.pixelFormat;
     target.named = true;
@@ -2469,6 +2539,7 @@ static void resetFoldedState() {
     b.color_dst = b.alpha_dst = 0u; /* Zero */
     b.color_src = b.alpha_src = 1u; /* One */
   }
+  g->depthStencilSeen = false; /* V12: default-DSSO observability */
   g->depthStencil = d9mt_wire_rec_set_depth_stencil_state();
   g->depthStencil.depth_compare_op = 7u; /* Always */
   g->depthStencil.front.compare_op = g->depthStencil.back.compare_op = 7u;
@@ -2620,10 +2691,15 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       now.noIndex = g->skipNoIndex;
       now.encoders = atomic_load_explicit(&g->status->encoders, memory_order_relaxed);
       now.uploads = atomic_load_explicit(&g->status->uploads_executed, memory_order_relaxed);
+      now.clrDrop = g->clearDropUnresolved;
+      now.clrDsPart = g->clearDsPartialDrop;
+      now.dsUnres = g->dsUnresolvedBinds;
+      now.dssoDef = g->dssoDefaulted;
       const Exec::StatsSnap& p = g->statsSnap;
       fprintf(stderr, "[serverd] srv-stats: draws=%llu skip=%llu{psoPend=%llu "
                       "psoFail=%llu noSh=%llu noRt=%llu noIdx=%llu} passes=%llu "
-                      "upl=%llu /window\n",
+                      "upl=%llu depth{clrDrop=%llu clrPart=%llu dsUnres=%llu "
+                      "dssoDef=%llu} /window\n",
               (unsigned long long)(now.draws - p.draws),
               (unsigned long long)(now.skipped - p.skipped),
               (unsigned long long)(now.pend - p.pend),
@@ -2632,7 +2708,11 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
               (unsigned long long)(now.noRt - p.noRt),
               (unsigned long long)(now.noIndex - p.noIndex),
               (unsigned long long)(now.encoders - p.encoders),
-              (unsigned long long)(now.uploads - p.uploads));
+              (unsigned long long)(now.uploads - p.uploads),
+              (unsigned long long)(now.clrDrop - p.clrDrop),
+              (unsigned long long)(now.clrDsPart - p.clrDsPart),
+              (unsigned long long)(now.dsUnres - p.dsUnres),
+              (unsigned long long)(now.dssoDef - p.dssoDef));
       g->statsSnap = now;
     }
   }
@@ -3076,6 +3156,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       break;
     case d9mt_wire_op_set_depth_stencil_state:
       g->depthStencil = *(const d9mt_wire_rec_set_depth_stencil_state*)hdr;
+      g->depthStencilSeen = true; /* V12: default-DSSO observability */
       g->dirtyState = true;
       break;
     case d9mt_wire_op_set_blend_mode: {
