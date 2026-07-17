@@ -7022,7 +7022,9 @@ wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen,
   desc.storageMode = MTLStorageModeShared;   /* IOSurface-backed */
   id<MTLTexture> tex = [device newTextureWithDescriptor:desc iosurface:surf plane:0];
   CFRelease(surf);                            /* the texture retains the surface */
-  [desc release];
+  /* desc came from the texture2DDescriptor... class factory = AUTORELEASED;
+   * the per-unixcall pool owns it. Releasing it here double-frees at pool
+   * drain (c0000005 in unixcall 216 — the cutover boot hang). */
   if (!tex)
     return nil;
 
