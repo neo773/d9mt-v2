@@ -1,0 +1,36 @@
+bridge/winemetal.h
+  s_9dc0f2092159a8::t_183cb41df3d17d 2579-2581
+server/d9mt_status.h
+  s_9dc0f2092159a8::t_06c2cf3bce70f1 31-36
+  s_9dc0f2092159a8::t_e9d8d7f784cb0a 108
+  s_9dc0f2092159a8::t_cebd1fafae1caf 134
+bridge/unix/winemetal_unix.c
+  s_9dc0f2092159a8::t_b48771de42258d 6855-6856
+server/test_feed.c
+  s_9dc0f2092159a8::t_eee4129f513e8f 902-915,917-918,926-934,942-943
+server/consumer.m
+  s_9dc0f2092159a8::t_a91e152acce2c8 122,124-130,132-133
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_50050bcc6c7535 1670-1671
+server/executor.mm
+  s_9dc0f2092159a8::t_dfd7d1f93e9516 1773-1785,1787-1805,1808-1809
+  s_9dc0f2092159a8::t_cc4f745c502766 1831,1837
+server/HANDOFF-S3.md
+  s_9dc0f2092159a8::t_83b5f182c6a893 452-509
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "45af7531ecf9188e9da045750bdd823277f3d640",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
