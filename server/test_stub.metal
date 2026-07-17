@@ -48,3 +48,31 @@ fragment float4 fsTex(VsTexOut in [[stage_in]],
   constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
   return tex.sample(s, in.uv);
 }
+
+/* S3 v11 minimal-cube gate: REAL vertex fetch (stage_in from a wire vertex
+ * buffer), REAL index fetch, and a constant matrix through the push block
+ * (buffer 20, 32-byte shared reservation — the client's pushData layout).
+ * A missing input degenerates the draw to zero pixels — the exact failure
+ * shape of the cube reproducer. */
+struct CubePush {
+  float4 shared0; /* D3D9SharedPushData reservation (32 B) */
+  float4 shared1;
+  float4x4 mvp;
+};
+struct CubeVsIn {
+  float3 pos [[attribute(0)]];
+};
+struct CubeVsOut {
+  float4 pos [[position]];
+};
+
+vertex CubeVsOut cubeVs(CubeVsIn in [[stage_in]],
+                        constant CubePush& p [[buffer(20)]]) {
+  CubeVsOut o;
+  o.pos = p.mvp * float4(in.pos, 1.0);
+  return o;
+}
+
+fragment float4 cubeFs(CubeVsOut in [[stage_in]]) {
+  return float4(1.0, 0.0, 1.0, 1.0); /* magenta */
+}

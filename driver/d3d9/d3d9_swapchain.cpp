@@ -753,6 +753,21 @@ namespace dxvk {
     // thread flags matching render targets + stamps presentFrame records).
     backend::wire::noteBackbuffer(swapImage);
 
+    // render-server S3 v11: register EVERY backbuffer image — with
+    // BackBufferCount > 1 the rotation means the game draws into a
+    // different image each frame than the one noteBackbuffer saw at the
+    // previous present, so the single-pointer compare never flagged any
+    // render target and the server's published IOSurface stayed black.
+    {
+      std::vector<Rc<MtlTexture>> swapImages;
+      swapImages.reserve(m_backBuffers.size());
+      for (const auto& bb : m_backBuffers)
+        if (bb != nullptr && bb->GetCommonTexture() != nullptr)
+          swapImages.push_back(bb->GetCommonTexture()->GetImage());
+      backend::wire::noteSwapchainImages(swapImages.data(),
+        uint32_t(swapImages.size()));
+    }
+
     // MSAA backbuffer: resolve into the single-sample surface and present
     // from THAT (D3D9 allows a multisampled swapchain; a raw MSAA -> drawable
     // copy is invalid in Metal and displays scrambled sample blocks).

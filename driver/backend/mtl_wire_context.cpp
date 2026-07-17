@@ -149,6 +149,22 @@ namespace dxvk::backend {
     std::mutex g_backbufferMutex;
     Rc<MtlTexture> g_backbuffer;
 
+    /* S3 v11: ALL swapchain backbuffer images (app thread writes from
+     * CreateBackBuffers; CS producer reads). Membership flags RT binds —
+     * the single-image compare above stays only for the present record's
+     * source id. Tiny (<= 4 entries), scanned under the mutex per RT bind. */
+    std::vector<Rc<MtlTexture>> g_swapImages;
+
+    bool isSwapchainImage(const MtlTexture* img) {
+      if (img == nullptr)
+        return false;
+      std::lock_guard<std::mutex> lock(g_backbufferMutex);
+      for (const auto& s : g_swapImages)
+        if (s.ptr() == img)
+          return true;
+      return false;
+    }
+
     Rc<MtlTexture> currentBackbuffer() {
       std::lock_guard<std::mutex> lock(g_backbufferMutex);
       return g_backbuffer;
@@ -399,6 +415,7 @@ namespace dxvk::backend {
     }
     { std::lock_guard<std::mutex> lock(g_backbufferMutex);
       g_backbuffer = nullptr;
+      g_swapImages.clear();
     }
     m_claimed = false;
     g_wireClaimed.store(false, std::memory_order_release);
@@ -487,6 +504,19 @@ namespace dxvk::backend {
   void* MtlWireContext::reserveBytes(uint16_t op, uint32_t bytes) {
     if (!m_claimed || !g_wt.active)
       return nullptr;
+
+    /* S3 v11 structural guard: NESTED emission (reserving while a record is
+     * still pending) writes the inner record over the outer one's bytes —
+     * the exact corruption that zero-dim'd the backbuffer create and threw
+     * srvErr=4 decode errors. Refuse the inner record; the caller's
+     * create-at-first-use retries at the next (un-nested) use. */
+    if (g_wt.pending) {
+      static std::atomic<uint32_t> warned = { 0u };
+      if (warned.fetch_add(1u, std::memory_order_relaxed) < 8u)
+        Logger::err(str::format("MtlWireContext: NESTED record emission "
+          "refused (op ", op, " inside a pending record) — caller must hoist"));
+      return nullptr;
+    }
 
     /* S3 v4: never stream into a dead ring. The present path latches
      * g_serverDead when the server heartbeat freezes for >3 s — cheaper and
@@ -832,27 +862,46 @@ namespace dxvk::backend {
     }
     /* All driver textures are MtlTextureImpl (device + presenter); its
      * `info` member is the ORIGINAL MtlImageCreateInfo (MtlUsage bits +
-     * cube), which the record mirrors. */
+     * cube), which the record mirrors. S3 v11: fields are computed and
+     * VALIDATED before any ring reservation — a create record with a zero
+     * dimension must never be EMITTED (the server clamp is only the
+     * backstop; a rejected create dummy-resolves the id forever). */
     auto* impl = static_cast<MtlTextureImpl*>(image.ptr());
+    d9mt_wire_rec_create_texture f = {};
+    f.type = uint32_t(impl->info.type);
+    f.format = uint32_t(impl->info.format != MtlFormat::Invalid
+      ? impl->info.format : image->info().format);
+    f.width = impl->info.extent.width ? impl->info.extent.width
+                                      : image->info().extent.width;
+    f.height = impl->info.extent.height ? impl->info.extent.height
+                                        : image->info().extent.height;
+    f.depth = impl->info.extent.depth ? impl->info.extent.depth : 1u;
+    f.mip_levels = impl->info.mipLevels ? impl->info.mipLevels
+                                        : image->info().mipLevels;
+    f.array_layers = impl->info.arrayLayers ? impl->info.arrayLayers
+                                            : image->info().numLayers;
+    f.sample_count = impl->info.sampleCount ? impl->info.sampleCount : 1u;
+    f.usage = uint32_t(impl->info.usage);
+    f.cube = impl->info.cube ? 1u : 0u;
+    if (!f.width || !f.height || !f.depth || !f.mip_levels || !f.array_layers ||
+        !(f.format & 0xFFFFu)) {
+      static std::atomic<uint32_t> warned = { 0u };
+      if (warned.fetch_add(1u, std::memory_order_relaxed) < 8u)
+        Logger::err(str::format("MtlWireContext: REFUSING zero-dim create_texture "
+          "emission: ", f.width, "x", f.height, "x", f.depth, " fmt=", f.format,
+          " mips=", f.mip_levels, " layers=", f.array_layers,
+          " (stamped eligible but info incomplete at emission — deferring)"));
+      return 0u; /* no id assigned: retried at the next use */
+    }
+
     auto* r = beginRecord<d9mt_wire_rec_create_texture>(d9mt_wire_op_create_texture);
     if (!r)
       return 0u;
     image->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
-    r->wire_id = image->wireId;
-    r->client_handle = image->texture.tex;
-    r->type = uint32_t(impl->info.type);
-    r->format = uint32_t(impl->info.format != MtlFormat::Invalid
-      ? impl->info.format : image->info().format);
-    r->width = impl->info.extent.width ? impl->info.extent.width
-                                       : image->info().extent.width;
-    r->height = impl->info.extent.height ? impl->info.extent.height
-                                         : image->info().extent.height;
-    r->depth = impl->info.extent.depth ? impl->info.extent.depth : 1u;
-    r->mip_levels = impl->info.mipLevels;
-    r->array_layers = impl->info.arrayLayers;
-    r->sample_count = impl->info.sampleCount;
-    r->usage = uint32_t(impl->info.usage);
-    r->cube = impl->info.cube ? 1u : 0u;
+    f.wire_id = image->wireId;
+    f.client_handle = image->texture.tex;
+    f.hdr = r->hdr;
+    *r = f;
     endRecord();
     return image->wireId;
   }
@@ -1320,16 +1369,28 @@ namespace dxvk::backend {
 
     /* S2 twin (op 30): attachments named by IMAGE wire id so the server can
      * resolve them; the client's backbuffer is flagged for IOSurface
-     * substitution. Creates emit first (ensureTextureCreated), so the by-id
-     * record only ever references known ids. */
+     * substitution.
+     *
+     * S3 v11 ROOT-CAUSE FIX (the black-frame bug): creates are HOISTED
+     * fully BEFORE beginRecord. The old code called ensureTextureCreated
+     * from inside the OPEN by-id record — a NESTED record emission that
+     * wrote the create over the pending record's bytes at the same ring
+     * position. The backbuffer is the one image whose FIRST wire use is the
+     * RT bind, so precisely its create record got corrupted (zero-dim
+     * garbage -> server clamp reject -> dummy substitution -> the published
+     * IOSurface never received a single draw) and the clobbered stream
+     * produced the constant srvErr=4 decode errors. reserveBytes now also
+     * refuses nesting structurally (see below). */
     if (wired()) {
       Rc<MtlTexture> bb = currentBackbuffer();
+      d9mt_wire_rt_id_ref refs[MtlRenderTargets::MaxColorTargets + 1u] = {};
       auto fillIdRef = [&](d9mt_wire_rt_id_ref& dst, const Rc<MtlTextureView>& view) {
         dst = d9mt_wire_rt_id_ref();
         if (view == nullptr || view->image == nullptr)
           return;
         dst.image_wire_id = ensureTextureCreated(view->image);
-        if (bb != nullptr && view->image.ptr() == bb.ptr())
+        if ((bb != nullptr && view->image.ptr() == bb.ptr()) ||
+            isSwapchainImage(view->image.ptr()))
           dst.flags |= D9MT_WIRE_RT_FLAG_BACKBUFFER;
         dst.format = uint32_t(view->key.format);
         const MtlImageInfo& info = view->image->info();
@@ -1339,11 +1400,14 @@ namespace dxvk::backend {
         dst.base_mip = view->key.baseMip;
         dst.base_layer = view->key.baseLayer;
       };
+      for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++)
+        fillIdRef(refs[i], targets.color[i]);
+      fillIdRef(refs[MtlRenderTargets::MaxColorTargets], targets.depthStencil);
       if (auto* r = beginRecord<d9mt_wire_rec_set_render_targets_by_id>(
             d9mt_wire_op_set_render_targets_by_id)) {
         for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++)
-          fillIdRef(r->color[i], targets.color[i]);
-        fillIdRef(r->depth_stencil, targets.depthStencil);
+          r->color[i] = refs[i];
+        r->depth_stencil = refs[MtlRenderTargets::MaxColorTargets];
         r->feedback_loop = feedbackLoop;
         endRecord();
       }
@@ -1418,7 +1482,8 @@ namespace dxvk::backend {
       if (auto* r = beginRecord<d9mt_wire_rec_clear_render_target_by_id>(
             d9mt_wire_op_clear_render_target_by_id)) {
         r->image_wire_id = id;
-        if (bb != nullptr && view->image.ptr() == bb.ptr())
+        if ((bb != nullptr && view->image.ptr() == bb.ptr()) ||
+            isSwapchainImage(view->image.ptr()))
           r->flags |= D9MT_WIRE_RT_FLAG_BACKBUFFER;
         r->clear_aspects = clear;
         r->discard_aspects = discard;
@@ -1799,6 +1864,14 @@ namespace dxvk::backend::wire {
   void noteBackbuffer(const Rc<MtlTexture>& image) {
     std::lock_guard<std::mutex> lock(g_backbufferMutex);
     g_backbuffer = image;
+  }
+
+  void noteSwapchainImages(const Rc<MtlTexture>* images, uint32_t count) {
+    std::lock_guard<std::mutex> lock(g_backbufferMutex);
+    g_swapImages.clear();
+    for (uint32_t i = 0u; i < count; i++)
+      if (images[i] != nullptr)
+        g_swapImages.push_back(images[i]);
   }
 
   void presentObserved() {

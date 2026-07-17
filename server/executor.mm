@@ -466,6 +466,15 @@ struct Exec {
   uint32_t presentSlot = 0;
   uint64_t backbufferWireId = 0;
 
+  /* S3 v11 skip-reason buckets + periodic render-stats (the 'drawing-and-
+   * black vs skipping-everything' discriminator). Logged every 256 presents
+   * as deltas. */
+  uint64_t skipNoRt = 0, skipPsoFail = 0, skipNoShader = 0, skipNoIndex = 0;
+  struct StatsSnap {
+    uint64_t draws = 0, skipped = 0, pend = 0, noRt = 0, psoFail = 0,
+             noShader = 0, noIndex = 0, encoders = 0, uploads = 0;
+  } statsSnap;
+
   /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
    * per-{format,sampleCount} PSOs built ASYNC through PsoEntry; a blit
    * whose PSO is still compiling is STASHED and drained at present (a
@@ -540,8 +549,13 @@ static void ensureCmdbuf() {
 
 static void closePass();
 static void closeXfer();
+static void flushPendingClears();
 
 static void submitFrame() {
+  /* v11: a clear-only frame (no draw ever materialized the pass) must not
+   * lose its folded clears at the frame boundary — the client's local
+   * execution flushes them at present too. */
+  flushPendingClears();
   closePass();
   closeXfer();
   if (!g->cmdbuf)
@@ -1190,17 +1204,20 @@ static bool prepareDraw() {
   }
   if (!g->pass.pending && !g->pass.active) {
     atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
+    g->skipNoRt++;
     return false;
   }
   if (!g->pass.active) {
     if (!passHasValidAttachment()) {
       atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
+      g->skipNoRt++;
       return false;
     }
     materializePass();
   }
   if (!g->pass.active) { /* encoder creation failed */
     atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
+    g->skipNoRt++;
     return false;
   }
 
@@ -1215,6 +1232,10 @@ static bool prepareDraw() {
       if (pending)
         atomic_fetch_add_explicit(&g->status->draws_skipped_pending_pso, 1,
                                   memory_order_relaxed);
+      else if (!g->vs || !g->vs->library)
+        g->skipNoShader++;
+      else
+        g->skipPsoFail++;
       return false;
     }
     if (pso != g->lastPso) {
@@ -2319,7 +2340,11 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
     out.format = pixelFormat(ref.format);
     out.baseMip = ref.base_mip;
     out.baseLayer = ref.base_layer;
-    if (ref.flags & D9MT_WIRE_RT_FLAG_BACKBUFFER) {
+    /* v11: substitute on the FLAG or on identity with the LAST PRESENTED
+     * backbuffer (the present record teaches which wire id is live — the
+     * multi-backbuffer rotation belt). */
+    if ((ref.flags & D9MT_WIRE_RT_FLAG_BACKBUFFER) ||
+        (ref.image_wire_id && ref.image_wire_id == g->backbufferWireId)) {
       out.backbuffer = true;
       out.tex = d9mt_pool_texture((int)g->presentSlot);
       out.format = MTLPixelFormatBGRA8Unorm; /* IOSurface pool format */
@@ -2336,6 +2361,19 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
   for (uint32_t i = 0; i < 4; i++)
     resolve(r->color[i], fresh.color[i]);
   resolve(r->depth_stencil, fresh.ds);
+  { /* v11 substitution audit: name the first RT binds' routing */
+    static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] set_rt #%d: color0 id=%llu flags=0x%x -> %s, "
+                      "ds id=%llu -> %s (lastPresentBB=%llu slot=%u)\n", n,
+              (unsigned long long)r->color[0].image_wire_id, r->color[0].flags,
+              fresh.color[0].backbuffer ? "IOSURFACE"
+              : (fresh.color[0].tex ? "texture" : (fresh.color[0].named ? "UNRESOLVED" : "none")),
+              (unsigned long long)r->depth_stencil.image_wire_id,
+              fresh.ds.backbuffer ? "IOSURFACE"
+              : (fresh.ds.tex ? "texture" : (fresh.ds.named ? "UNRESOLVED" : "none")),
+              (unsigned long long)g->backbufferWireId, g->presentSlot);
+  }
   fresh.pending = true;
   g->pass = fresh;
   g->dirtyPso = g->dirtyState = true;
@@ -2561,6 +2599,43 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   const uint32_t slot = g->presentSlot;
   submitFrame();
   g->backbufferWireId = r->backbuffer_wire_id;
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] present #%d: serial=%llu bbWire=%llu slot=%u\n",
+              n, (unsigned long long)r->frame_serial,
+              (unsigned long long)r->backbuffer_wire_id, slot); }
+
+  /* v11: per-window render stats — the drawing-vs-skipping discriminator */
+  {
+    const uint64_t frames =
+        atomic_load_explicit(&g->status->frames, memory_order_relaxed);
+    if ((frames & 255u) == 255u) {
+      Exec::StatsSnap now;
+      now.draws = atomic_load_explicit(&g->status->draws_executed, memory_order_relaxed);
+      now.skipped = atomic_load_explicit(&g->status->draws_skipped, memory_order_relaxed);
+      now.pend = atomic_load_explicit(&g->status->draws_skipped_pending_pso, memory_order_relaxed);
+      now.noRt = g->skipNoRt;
+      now.psoFail = g->skipPsoFail;
+      now.noShader = g->skipNoShader;
+      now.noIndex = g->skipNoIndex;
+      now.encoders = atomic_load_explicit(&g->status->encoders, memory_order_relaxed);
+      now.uploads = atomic_load_explicit(&g->status->uploads_executed, memory_order_relaxed);
+      const Exec::StatsSnap& p = g->statsSnap;
+      fprintf(stderr, "[serverd] srv-stats: draws=%llu skip=%llu{psoPend=%llu "
+                      "psoFail=%llu noSh=%llu noRt=%llu noIdx=%llu} passes=%llu "
+                      "upl=%llu /window\n",
+              (unsigned long long)(now.draws - p.draws),
+              (unsigned long long)(now.skipped - p.skipped),
+              (unsigned long long)(now.pend - p.pend),
+              (unsigned long long)(now.psoFail - p.psoFail),
+              (unsigned long long)(now.noShader - p.noShader),
+              (unsigned long long)(now.noRt - p.noRt),
+              (unsigned long long)(now.noIndex - p.noIndex),
+              (unsigned long long)(now.encoders - p.encoders),
+              (unsigned long long)(now.uploads - p.uploads));
+      g->statsSnap = now;
+    }
+  }
 
   /* S3: GPU-completion-gated publication (S2 flag 3). {present_slot,
    * frame_serial, frames} are stored ONLY once the frame's serial signals on
@@ -2654,6 +2729,7 @@ static void handleDrawIndexed(const d9mt_wire_rec_draw_indexed* r) {
   if (!g->index.bound || !g->index.buf) {
     atomic_fetch_add_explicit(&g->status->draws_skipped, r->count,
                               memory_order_relaxed);
+    g->skipNoIndex += r->count;
     return;
   }
   if (!prepareDraw()) {

@@ -776,6 +776,101 @@ V10 honest flags:
 - kMaxTexTrack widens StageState by ~6 KB per stage (id arrays) — noise.
 - Converting-format uploads (compute-conversion textures) still local-only.
 
+## V11 — THE BLACK-FRAME ROOT CAUSE: nested record emission corrupted the
+## backbuffer's create (+ observability, RT-routing audit, rotation fixes)
+
+The 40-second cube reproducer (`WAIT=25 D9MT_PROFILE=1 D9MT_SERVERD_PATH=…
+scripts/run-test.sh code_cube3d --no-build`) named it: `[serverd] REJECT
+create_texture wire=9: zero dimension/mips/layers` — the SWAPCHAIN
+BACKBUFFER's create crossed as garbage, the v7/v8 clamp (correctly)
+rejected it, the id dummy-resolved forever, and every clear/draw targeting
+the backbuffer landed in the dummy while the published IOSurface stayed
+black. srvErr=4 (a decode-error CODE, not a count — it was never named)
+was the same corruption's other face.
+
+**Root cause (client)**: MtlWireContext::bindRenderTargets called
+ensureTextureCreated INSIDE the open set_render_targets_by_id record
+(fillIdRef after beginRecord) — a NESTED record emission that wrote the
+create record over the pending record's bytes at the same ring position.
+The backbuffer is the one image whose FIRST wire use is the RT bind
+(everything else creates at texture/buffer binds, outside records), so
+precisely its create was corrupted, on every real title, forever. The
+comment above the code even said "Creates emit first". Three fixes, class
+level:
+1. HOIST: bindRenderTargets computes all refs (creates included) into
+   locals before beginRecord.
+2. STRUCTURAL: reserveBytes refuses reservation while a record is pending
+   (named err, first 8) — nested emission is now impossible; the refused
+   inner create retries at the next un-nested use.
+3. EMISSION GUARD: ensureTextureCreated validates its computed fields
+   (nonzero dims/mips/layers/format) BEFORE reserving; incomplete info
+   defers the create (named err) instead of shipping garbage. mips/layers
+   gained m_info fallbacks.
+
+**Also fixed — the multi-backbuffer rotation gap** (would have been the
+NEXT black screen): noteBackbuffer tracks only the present-source image;
+with BackBufferCount > 1 the rotation means frame N draws into a different
+image than the one noted at present N-1, so the pointer compare never
+flags. Now: PresentImage registers ALL swapchain backbuffer images
+(wire::noteSwapchainImages; set membership flags RT binds), and the server
+ALSO substitutes any RT whose wire id equals the LAST PRESENTED
+backbuffer id (the present record teaches the live id — the belt for
+flag-less binds).
+
+**And a folded-clear frame-boundary bug caught by the new gate**: a
+clear-only frame (no draw materializes the pass) lost its folded clears at
+present; submitFrame now runs flushPendingClears first.
+
+Observability (permanent):
+- srvErr semantics: it is the status ERROR CODE (4 = decode). The decode
+  error site now logs first-8 with opcode/size/tail/head and the dropped
+  byte count ("the drop loses every record in [tail,head)" — creates lost
+  in that window dummy-resolve forever).
+- `[serverd] srv-stats: draws=N skip=N{psoPend,psoFail,noSh,noRt,noIdx}
+  passes=N upl=N /window` every 256 presents — the drawing-vs-skipping
+  discriminator.
+- First-8 `set_rt` logs: color0/ds wire id + flags and WHERE each resolved
+  (IOSURFACE / texture / UNRESOLVED), plus lastPresentBB + slot; first-8
+  `present` logs (serial, bbWire, slot). Cross-checkable by eye.
+
+**CORRECTION (coordinator's GPU-readback dump pair, mid-slice)**: the
+server CLEARS correctly into the published IOSurface — routing/
+substitution/publication all work; what's missing server-side is the
+DRAW's pixels (cube: perfect clear color, zero geometry). The unified
+theory ties both faces to the SAME corruption above: the nested-emission
+decode error doesn't just zero one create — the recovery DROPS the whole
+[tail, head) window, and at boot that window holds the VB/IB creates,
+uploads and constants. Clears survive (flag-based, re-emitted every
+frame); the draw INPUTS don't — draws then fetch zeros, degenerate, and
+raster nothing over a perfect clear. Fixing the nesting removes the drops
+removes the input loss.
+
+Gates: (a) alternating-backbuffer scenario — two backbuffer ids alternate
+as RT with distinct clear colors; frame 3 drops the FLAG and relies on
+present-id learning; the published surface must hold each frame's color
+(single completion-gated reads). Caught the folded-clear bug on its first
+run. (b) MINIMAL-CUBE scenario — the reproducer's failure shape: wire
+vertex buffer (real fetched bytes through stage_in), wire index buffer,
+the WVP matrix through the push block (buffer 20, past the 32-byte shared
+reservation), one indexed draw; asserts the draw PRODUCES pixels (centroid
+magenta) over the demo's exact clear color with the outside untouched.
+PASSES server-side (wave 3) — the server's minimal-draw path is proven
+sound, so the reproducer's zero-pixel draw was client-stream corruption
+(the nesting bug), not executor logic. Full clean-room chain PASS.
+Expected cube-run signature after this fix: NO backbuffer
+"REJECT create_texture", decodeErr staying 0, srvErr staying 0, server
+dump = clear + cube.
+
+V11 honest flags:
+- The nesting guard makes the corruption class impossible but a refused
+  inner record is DEFERRED, not emitted — callers that only ever reference
+  a resource inside records would never create it (none exist today;
+  the guard logs if one appears).
+- srv-stats logs are per-256-presents (not per PROF window) — correlate by
+  frame counts.
+- The rotation fix registers images at every present (a few Rc copies) —
+  negligible, and self-healing across Reset.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

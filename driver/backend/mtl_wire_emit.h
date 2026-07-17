@@ -52,6 +52,15 @@ namespace dxvk::backend::wire {
    * assigns/reads the wire id on its own thread. */
   void noteBackbuffer(const Rc<MtlTexture>& image);
 
+  /* App thread (CreateBackBuffers, init + Reset): register EVERY swapchain
+   * backbuffer image. S3 v11: with BackBufferCount > 1 the rotation means
+   * frame N draws into a different image than the one noteBackbuffer saw at
+   * present N-1 — a single-pointer compare never matches, no RT bind ever
+   * carries the BACKBUFFER flag, and the server renders into plain textures
+   * while its published IOSurface stays black. Membership in THIS set is
+   * what flags render targets. Replaces the previous set (Reset). */
+  void noteSwapchainImages(const Rc<MtlTexture>* images, uint32_t count);
+
   /* App thread (PresentImage, after the present was queued): bumps the
    * local present counter and samples the server's produced-frame serial;
    * feeds the PROF `srvFrames`/`srvPace` fields. Cheap (one unixcall). */

@@ -1005,9 +1005,221 @@ main(int argc, char **argv) {
     printf("[test_feed] v10 updtex-shape: offset sub-rect upload landed, "
            "checker preserved outside the box\n");
 
+    /* --- v11: alternating backbuffers (the GTA rotation shape). Two
+     * backbuffer wire ids alternate as the render target; the published
+     * IOSurface must ALWAYS hold the last-drawn frame. Frame 3 drops the
+     * FLAG and relies on the server learning the live id from the present
+     * record (the id-substitution belt). Single pixel reads: publication
+     * is completion-gated. --- */
+    {
+      struct AltStep {
+        uint64_t id;
+        uint32_t flags;
+        float rr, gg, bb2;
+        uint8_t expect[4]; /* BGRA */
+      } steps[3] = {
+        {900, D9MT_WIRE_RT_FLAG_BACKBUFFER, 1.f, 0.f, 0.f, {0, 0, 255, 255}},
+        {901, D9MT_WIRE_RT_FLAG_BACKBUFFER, 0.f, 1.f, 0.f, {0, 255, 0, 255}},
+        {901, 0u /* NO flag: id-learn from the last present */, 0.f, 0.f, 1.f,
+         {255, 0, 0, 255}},
+      };
+      for (int i = 0; i < 3; i++) {
+        struct d9mt_wire_rec_set_render_targets_by_id rt2;
+        memset(&rt2, 0, sizeof(rt2));
+        rt2.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt2.hdr.size = sizeof(rt2);
+        rt2.color[0].image_wire_id = steps[i].id;
+        rt2.color[0].flags = steps[i].flags;
+        rt2.color[0].format = 80;
+        rt2.color[0].width = 640;
+        rt2.color[0].height = 480;
+        rt2.color[0].sample_count = 1;
+        emit(&rt2, sizeof(rt2));
+        emit_clear(steps[i].rr, steps[i].gg, steps[i].bb2);
+        struct d9mt_wire_rec_present_frame pf2 = {
+            {d9mt_wire_op_present_frame, sizeof(pf2), 0}, ++frame, steps[i].id};
+        emit(&pf2, sizeof(pf2));
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v11 alternating-bb: frame %d never presented", i);
+        uint32_t s3v = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf2 = IOSurfaceLookup(ids[s3v]);
+        if (!sf2)
+          FAIL("v11: IOSurfaceLookup failed");
+        IOSurfaceLock(sf2, kIOSurfaceLockReadOnly, NULL);
+        uint8_t px2[4];
+        memcpy(px2, IOSurfaceGetBaseAddress(sf2), 4);
+        IOSurfaceUnlock(sf2, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf2);
+        if (memcmp(px2, steps[i].expect, 4) != 0)
+          FAIL("v11 alternating-bb frame %d (id=%llu flags=0x%x): pixel "
+               "%02x%02x%02x%02x want %02x%02x%02x%02x — %s",
+               i, (unsigned long long)steps[i].id, steps[i].flags,
+               px2[0], px2[1], px2[2], px2[3],
+               steps[i].expect[0], steps[i].expect[1], steps[i].expect[2],
+               steps[i].expect[3],
+               steps[i].flags ? "flagged substitution broken"
+                              : "present-id learning broken");
+      }
+      printf("[test_feed] v11 alternating backbuffers: 3 frames (2 flagged + "
+             "1 id-learned) all published correctly\n");
+    }
+
+    /* --- v11 MINIMAL CUBE: the reproducer's failure shape. Wire vertex
+     * buffer (real fetched bytes) + wire index buffer + a constant matrix
+     * through the push block + one indexed draw. A missing input (VB/IB
+     * content, stride, constants) degenerates to ZERO pixels over a
+     * perfect clear — exactly the cube/GTA dump pair. Assert the draw
+     * PRODUCES pixels (center magenta) over the demo's clear color. --- */
+    {
+      /* VB: a half-size triangle in clip space (identity mvp) — must NOT
+       * cover the corner probe */
+      float verts[9] = {-0.5f, -0.5f, 0.f, 0.5f, -0.5f, 0.f, -0.5f, 0.5f, 0.f};
+      struct d9mt_wire_rec_create_buffer cbv;
+      memset(&cbv, 0, sizeof(cbv));
+      cbv.hdr.opcode = d9mt_wire_op_create_buffer;
+      cbv.hdr.size = sizeof(cbv);
+      cbv.wire_id = 950;
+      cbv.client_handle = 0xC950;
+      cbv.size = sizeof(verts);
+      emit(&cbv, sizeof(cbv));
+      uint64_t vg = 0;
+      uint64_t voff = heap_put(verts, sizeof(verts), &vg);
+      struct d9mt_wire_rec_upload_buffer ubv;
+      memset(&ubv, 0, sizeof(ubv));
+      ubv.hdr.opcode = d9mt_wire_op_upload_buffer;
+      ubv.hdr.size = sizeof(ubv);
+      ubv.wire_id = 950;
+      ubv.client_handle = 0xC950;
+      ubv.size = sizeof(verts);
+      ubv.heap_offset = voff;
+      ubv.heap_generation = vg;
+      emit(&ubv, sizeof(ubv));
+
+      /* IB: one triangle, u16 */
+      uint16_t idx[4] = {0, 1, 2, 0};
+      struct d9mt_wire_rec_create_buffer cbi = cbv;
+      cbi.wire_id = 951;
+      cbi.client_handle = 0xC951;
+      cbi.size = sizeof(idx);
+      emit(&cbi, sizeof(cbi));
+      uint64_t ig = 0;
+      uint64_t ioff = heap_put(idx, sizeof(idx), &ig);
+      struct d9mt_wire_rec_upload_buffer ubi = ubv;
+      ubi.wire_id = 951;
+      ubi.client_handle = 0xC951;
+      ubi.size = sizeof(idx);
+      ubi.heap_offset = ioff;
+      ubi.heap_generation = ig;
+      emit(&ubi, sizeof(ubi));
+
+      /* shaders: cubeVs (stage_in + push-block matrix) / cubeFs (magenta) */
+      emit_shader(952, 0xA005, 0, "cubeVs", lib, lib_size);
+      emit_shader(953, 0xA006, 1, "cubeFs", lib, lib_size);
+      emit_bind_shader(0, 0xA005);
+      emit_bind_shader(1, 0xA006);
+
+      /* vertex layout: one float3 attr at binding 0, stride 12 */
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vl2 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl2), 0}, 1, 1},
+               {0, 0, 900 /* RGB32Float */, 0},
+               {0, 12, 0, 0}};
+      emit(&vl2, sizeof(vl2));
+
+      struct d9mt_wire_rec_bind_vertex_buffer bvb;
+      memset(&bvb, 0, sizeof(bvb));
+      bvb.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+      bvb.hdr.size = sizeof(bvb);
+      bvb.binding = 0;
+      bvb.stride = 12;
+      bvb.buf.buffer = 0xC950;
+      bvb.buf.length = sizeof(verts);
+      emit(&bvb, sizeof(bvb));
+
+      struct d9mt_wire_rec_bind_index_buffer bib;
+      memset(&bib, 0, sizeof(bib));
+      bib.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bib.hdr.size = sizeof(bib);
+      bib.buf.buffer = 0xC951;
+      bib.buf.length = sizeof(idx);
+      bib.index_type = 0; /* u16 */
+      emit(&bib, sizeof(bib));
+
+      /* the WVP matrix through the push block (identity; column-major).
+       * stages=1 (vertex only) => the server shifts past the 32-byte
+       * shared reservation, where CubePush.mvp reads it. */
+      struct {
+        struct d9mt_wire_rec_push_data rec;
+        float mvp[16];
+      } pd2 = {{{d9mt_wire_op_push_data, sizeof(pd2), 0}, 1, 0, 64, 0},
+               {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}};
+      emit(&pd2, sizeof(pd2));
+
+      /* converge: clear to the demo's dark blue, one indexed draw, expect
+       * MAGENTA at center (draw produced pixels) + dark blue at corner */
+      int cubeOk = 0;
+      for (int w = 1; w <= 30 && !cubeOk; w++) {
+        struct d9mt_wire_rec_set_render_targets_by_id rt3;
+        memset(&rt3, 0, sizeof(rt3));
+        rt3.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt3.hdr.size = sizeof(rt3);
+        rt3.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rt3.color[0].format = 80;
+        rt3.color[0].width = 640;
+        rt3.color[0].height = 480;
+        rt3.color[0].sample_count = 1;
+        emit(&rt3, sizeof(rt3));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } di = {{{d9mt_wire_op_draw_indexed, sizeof(di), 0}, 1, 0},
+                {{3, 1, 0, 0, 0, 0}}};
+        emit(&di, sizeof(di));
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v11 cube: frame never presented");
+        uint32_t s4 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf3 = IOSurfaceLookup(ids[s4]);
+        if (!sf3)
+          FAIL("v11 cube: IOSurfaceLookup failed");
+        IOSurfaceLock(sf3, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *b3 = IOSurfaceGetBaseAddress(sf3);
+        size_t r3 = IOSurfaceGetBytesPerRow(sf3);
+        uint8_t center[4], corner[4];
+        memcpy(center, b3 + 280 * r3 + 266 * 4, 4); /* triangle centroid */
+        memcpy(corner, b3 + 2 * r3 + 636 * 4, 4); /* top-right: outside tri */
+        IOSurfaceUnlock(sf3, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf3);
+        uint8_t magenta[4] = {255, 0, 255, 255}, dkblue[4] = {40, 16, 16, 255};
+        if (!memcmp(center, magenta, 4) && !memcmp(corner, dkblue, 4)) {
+          cubeOk = 1;
+          printf("[test_feed] v11 minimal-cube: draw produced pixels over the "
+                 "clear (wave %d) — VB/IB/push-matrix all crossed\n", w);
+        } else if (w == 30) {
+          FAIL("v11 minimal-cube: center=%02x%02x%02x%02x corner=%02x%02x%02x%02x"
+               " — draw produced no/wrong pixels (the reproducer shape)",
+               center[0], center[1], center[2], center[3],
+               corner[0], corner[1], corner[2], corner[3]);
+        } else {
+          usleep(30000);
+        }
+      }
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
-     * ALIASING (reset broken); blue (the clear) = draw skipped. */
+     * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the
+     * TEXTURED fullscreen pipeline (the cube scenario left its own bound). */
+    emit_bind_shader(0, 0xA003);
+    emit_bind_shader(1, 0xA004);
+    { /* fullscreen shape needs no vertex fetch: empty layout again */
+      struct d9mt_wire_rec_set_vertex_layout vl3 = {
+          {d9mt_wire_op_set_vertex_layout, sizeof(vl3), 0}, 0, 0};
+      emit(&vl3, sizeof(vl3));
+    }
     struct d9mt_wire_rec_bind_texture_by_id stale;
     memset(&stale, 0, sizeof(stale));
     stale.hdr.opcode = d9mt_wire_op_bind_texture_by_id;

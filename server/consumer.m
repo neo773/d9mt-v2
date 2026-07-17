@@ -105,7 +105,16 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
                  (uint64_t)hdr->size > cap - idx ||
                  head - tail < (uint64_t)hdr->size) {
         /* A malformed stream cannot be resynced (lengths chain the walk):
-         * count it and drop everything up to the published head. */
+         * count it and drop everything up to the published head. S3 v11:
+         * NAMED — this is status error code 4 (srvErr=4), and the drop
+         * loses every record in [tail, head): creates/uploads emitted in
+         * that window never resolve again (dummy binds forever). */
+        { static int n = 0;
+          if (n++ < 8)
+            fprintf(stderr, "[serverd] DECODE ERROR #%d: opcode=%u size=%u at "
+                            "tail=%llu head=%llu (dropping %llu bytes to head)\n",
+                    n, hdr->opcode, hdr->size, (unsigned long long)tail,
+                    (unsigned long long)head, (unsigned long long)(head - tail)); }
         atomic_fetch_add_explicit(&ring->decode_errors, 1,
                                   memory_order_relaxed);
         atomic_store_explicit(&status->error, d9mt_status_err_decode,
