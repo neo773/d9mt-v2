@@ -112,6 +112,17 @@ namespace dxvk::backend {
      * resolves); counted per attempt for the PROF `inel=` field. */
     std::atomic<uint64_t> g_wireIneligible = { 0u };
 
+    /* Consolidation C1 instrument (docs/RENDER_SERVER_SPEC + HANDOFF-
+     * CONSOLIDATION.md): the migration to server-only may only remove the
+     * local-render FALLBACK once it is proven never needed while the server
+     * is healthy. g_serverEverProduced latches on the first usable server
+     * frame; after that, any present that still falls back to local WHILE the
+     * wire is attached and the server is alive is a "healthy fallback" — it
+     * MUST read 0 over a soak before C3 removes the fallback. PE-side only, no
+     * wire-ABI change; surfaced in the PROF line as `fbHealthy=`. */
+    std::atomic<bool>     g_serverEverProduced = { false };
+    std::atomic<uint64_t> g_fallbackWhileHealthy = { 0u };
+
     /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
 
     /* Monotonic wire identity (spec: client-assigned u64). 0 = "no wire
@@ -1670,11 +1681,20 @@ namespace dxvk::backend::wire {
     if (device == nullptr)
       return false;
 
+    /* C1: past the attached+alive gates now. A false return from here on, once
+     * the server has EVER produced a usable frame, is a fallback-while-healthy
+     * (the metric C3 must see at 0 before it may drop the local fallback). */
+    auto healthyFallback = []() -> bool {
+      if (g_serverEverProduced.load(std::memory_order_relaxed))
+        g_fallbackWhileHealthy.fetch_add(1u, std::memory_order_relaxed);
+      return false;
+    };
+
     auto* dev = static_cast<MtlDeviceImpl*>(device.ptr());
     WMTServerFrame f = { };
     if (!WireServerFrame_acquire(dev->wmtDevice(), localSerial,
                                  kServerLagFrames, &f))
-      return false;
+      return healthyFallback();
     /* Hard extent guard (run-11 hang): a zero-extent source drives a
      * zero/out-of-bounds present copy -> GPU fault -> the present's completion
      * event never signals -> the CS thread parks forever. Never present such a
@@ -1686,7 +1706,7 @@ namespace dxvk::backend::wire {
         Logger::warn(str::format("acquireServerFrame: server texture has zero "
           "extent (", f.width, "x", f.height, ") — falling back to local"));
       }
-      return false;
+      return healthyFallback();
     }
 
     /* Residency (THE run-11 hang fix): a copy/blit SOURCE must be resident on
@@ -1725,6 +1745,7 @@ namespace dxvk::backend::wire {
 
     outImage = tex;
     outView  = view;
+    g_serverEverProduced.store(true, std::memory_order_relaxed);
     return true;
   }
 
@@ -1765,7 +1786,8 @@ namespace dxvk::backend::prof {
       " heapDrop=", s.heap_dropped,
       " execOp=", s.server_exec_opcode,
       " rej=", s.server_creates_rejected,
-      " inel=", g_wireIneligible.load(std::memory_order_relaxed));
+      " inel=", g_wireIneligible.load(std::memory_order_relaxed),
+      " fbHealthy=", g_fallbackWhileHealthy.load(std::memory_order_relaxed));
     prev = s;
   }
 
