@@ -717,6 +717,65 @@ V9 honest flags:
 - clear_image_view partial/DS drops are the most likely visible residue if
   a game ColorFills sub-rects (named log will say so).
 
+## V10 — UpdateTexture content path: diagnosis instrumentation + the FF slot-cap fix
+
+V9 retest: still black server frames; PROF showed inel exploding to
+~7k (+~2/frame — cumulative, not delta) and NO copySkip field. Audit
+findings, in order of certainty:
+
+1. **copySkip was never in the PROF line** (my v9 edit silently no-op'd
+   against the merged fbHealthy line — unasserted replace; v10 edits
+   assert). FIXED — with it absent, the inel counter absorbed all
+   attention. inel's +2/frame growth profile matches the PRESENT COPY
+   (drawable + IOSurface wraps, both pseudo-resources BY DESIGN) — likely
+   benign noise, now disambiguated: the first 24 ineligible attempts log
+   kind/dims/format/usage/ptr client-side (`wire-inel image/buffer: ...`).
+2. **The UPDTEX path was audited end-to-end and its content SHOULD cross**:
+   UpdateTexture → UpdateTextureFromBuffer (non-converting) packs the
+   sysmem bytes into a canonical AllocStagingBuffer slice (wire-eligible,
+   mapped) and calls ctx->copyBufferToTexture(dst image, ..., staging,
+   rowAlign=0) — exactly the existing upload tap, whose tight-pitch math
+   matches packImageData's layout. Design (a) from the brief IS the
+   existing mechanism. If it skips, it now COUNTS (copySkip) and NAMES
+   itself (`wire b2t upload SKIPPED: dst ineligible | src unmapped ...`,
+   first 8). The CONVERTING-format branch (compute conversion) still does
+   not cross — flagged, not the A8R8G8B8 menu-art shape.
+3. **A real black-composition bug found and fixed: the server's texture/
+   sampler STATE arrays capped at 16 slots.** FF-shaped shaders (the
+   likely menu path — this project's FF ubershaders bind 80+ registers as
+   5 type-arrays x 16 through the AB word path) had every bind at slot >=
+   16 silently dropped to the dummy: black FF draws with perfectly healthy
+   rec/draw counters. v10: tracking arrays are kMaxTexTrack=256 (the whole
+   uint8 AB reg space); the classic argument-TABLE loop stays 16 (its
+   Metal capacity); the AB word path reads the full range. If the menu is
+   FF-composed, THIS was the black.
+4. **No more silent copy family**: first-8 named server logs for
+   copy_texture / blit executions and upload_texture (wire/fmt/mip/box) —
+   the next run's log will show menu-art uploads landing (or their skip
+   reasons client-side).
+
+Gate: the UPDTEX SHAPE — a partial sub-rect upload with an offset (dirty
+box, solid red 32x32 at texel 16,16) into the live checker texture:
+inside-box points that would alternate under the checker are BOTH red,
+outside points keep alternating (offset/pitch path proven). Calling the
+MtlContext API directly from the harness is NOT feasible (wine-only);
+the wire-shape gate + the named client-side logs are the contract.
+Full clean-room chain (rm -rf build; air → bridge → driver+server) PASS.
+
+V10 honest flags:
+- The black-frame root cause is a HYPOTHESIS RANKING, not a proof: (a) FF
+  slot cap (fixed here, high confidence if menu is FF), (b) an upload-tap
+  skip (now named if it happens), (c) something downstream of correct
+  uploads (the first-8 upload logs will show wire ids + boxes to compare
+  against D9MT-UPDTEX spam). The next run discriminates all three.
+- Decode rule for the retest: `copySkip=` small & static + `upload_texture`
+  logs showing 1024x1024-ish boxes = content crossing, look at (a);
+  `copySkip=` growing + `wire b2t upload SKIPPED` lines = the tap, look at
+  the named reason; `inel=` growing at ~2/frame with `wire-inel image:`
+  naming drawable/IOSurface wraps = benign present noise.
+- kMaxTexTrack widens StageState by ~6 KB per stage (id arrays) — noise.
+- Converting-format uploads (compute-conversion textures) still local-only.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

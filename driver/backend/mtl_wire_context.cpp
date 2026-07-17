@@ -615,7 +615,10 @@ namespace dxvk::backend {
     if (storage->wireId)
       return true;
     if (!storage->wireEligible) { /* v8: pseudo-resource — never on the wire */
-      g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      const uint64_t n = g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      if (n < 24u) /* v10: name WHO fails eligibility, not just how often */
+        Logger::warn(str::format("wire-inel buffer: size=", storage->size,
+          " handle=", storage->handle.buf, " ptr=", reinterpret_cast<uintptr_t>(storage.ptr())));
       return false;
     }
     auto* r = beginRecord<d9mt_wire_rec_create_buffer>(d9mt_wire_op_create_buffer);
@@ -816,7 +819,15 @@ namespace dxvk::backend {
     if (image->wireId)
       return image->wireId;
     if (!image->wireEligible) { /* v8: pseudo-resource — never on the wire */
-      g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      const uint64_t n = g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      if (n < 24u) { /* v10: name WHO fails eligibility */
+        auto* impl = static_cast<MtlTextureImpl*>(image.ptr());
+        Logger::warn(str::format("wire-inel image: ", impl->info.extent.width, "x",
+          impl->info.extent.height, "x", impl->info.extent.depth,
+          " fmt=", uint32_t(impl->info.format), " mips=", impl->info.mipLevels,
+          " layers=", impl->info.arrayLayers, " usage=", uint32_t(impl->info.usage),
+          " ptr=", reinterpret_cast<uintptr_t>(image.ptr())));
+      }
       return 0u;
     }
     /* All driver textures are MtlTextureImpl (device + presenter); its
@@ -1525,6 +1536,17 @@ namespace dxvk::backend {
     if (wired() && g_wt.heap && dst != nullptr && src != nullptr) {
       const uint64_t texId = ensureTextureCreated(dst);
       const void* bytes = src->mapPtr(off);
+      if (!texId || !bytes) {
+        /* v10: THE UpdateTexture content shape — a skip here is a black
+         * texture server-side. Counted + the first few named. */
+        const uint64_t n = g_copySkips.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+          Logger::warn(str::format("wire b2t upload SKIPPED: ",
+            !texId ? "dst ineligible" : "src unmapped (GPU-private staging)",
+            " dst=", extent.width, "x", extent.height,
+            " fmt=", uint32_t(format != MtlFormat::Invalid ? format : dst->format),
+            " mip=", dstSub.mipLevel));
+      }
       if (texId && bytes) {
         const MtlFormat fmt = format != MtlFormat::Invalid ? format : dst->format;
         MtlDeviceSize bytesPerRow = 0u, bytesPerImage = 0u, total = 0u;
@@ -1937,6 +1959,7 @@ namespace dxvk::backend::prof {
       " execOp=", s.server_exec_opcode,
       " rej=", s.server_creates_rejected,
       " inel=", g_wireIneligible.load(std::memory_order_relaxed),
+      " copySkip=", g_copySkips.load(std::memory_order_relaxed),
       " fbHealthy=", g_fallbackWhileHealthy.load(std::memory_order_relaxed));
     prev = s;
   }

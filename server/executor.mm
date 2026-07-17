@@ -102,7 +102,13 @@ namespace {
 constexpr uint32_t kVertexBufferBaseIndex = 3u;
 constexpr uint32_t kPushConstantIndex = 20u;
 constexpr uint32_t kMaxStreams = 16u;
-constexpr uint32_t kMaxTexSlots = 16u;
+constexpr uint32_t kMaxTexSlots = 16u;   /* classic argument-TABLE capacity */
+/* S3 v10: STATE tracking is wider than the table — FF-shaped shaders bind
+ * texture/sampler registers up to 80+ (5 type-arrays x 16) through the AB
+ * word path; the old 16-slot arrays silently dummy'd every bind >= 16
+ * (black FF composition, the menu-screen class). uint8 reg => 256 covers
+ * the whole space. */
+constexpr uint32_t kMaxTexTrack = 256u;
 constexpr uint32_t kFanMaxVerts = 16386u;
 constexpr uint32_t kUploadSlabBytes = 2u << 20;
 
@@ -286,10 +292,10 @@ struct CbvBinding {
 
 struct StageState {
   CbvBinding cbvs[8];
-  bool texBound[kMaxTexSlots] = {};
+  bool texBound[kMaxTexTrack] = {};
   /* S3: resolved REAL texture (or view) per slot; nil = dummy-bound. */
-  id<MTLTexture> textures[kMaxTexSlots] = {};
-  id<MTLSamplerState> samplers[kMaxTexSlots] = {};
+  id<MTLTexture> textures[kMaxTexTrack] = {};
+  id<MTLSamplerState> samplers[kMaxTexTrack] = {};
   uint8_t pushData[4096] = {};
   uint32_t pushExtent = 0;
   bool pushDirty = false;
@@ -1038,12 +1044,12 @@ static void flushBindings() {
               v = g->dummyBuffer.gpuAddress;
             break;
           case 1: /* Texture */
-            v = (e.second < kMaxTexSlots && b.textures[e.second])
+            v = b.textures[e.second] /* uint8 reg: kMaxTexTrack covers all */
                     ? b.textures[e.second].gpuResourceID._impl
                     : g->dummyTexture.gpuResourceID._impl;
             break;
           case 2: /* Sampler */
-            v = (e.second < kMaxTexSlots && b.samplers[e.second])
+            v = b.samplers[e.second]
                     ? b.samplers[e.second].gpuResourceID._impl
                     : g->dummySampler.gpuResourceID._impl;
             break;
@@ -1787,6 +1793,11 @@ static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
     destinationOrigin:origin];
   res->hasContent = true;
   atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] upload_texture #%d: wire=%llu fmt=%u mip=%u "
+                      "box %u,%u %ux%u\n", n, (unsigned long long)r->wire_id,
+              r->format & 0xFFFFu, r->mip, r->x, r->y, r->width, r->height); }
 }
 
 static void drainStash(const std::shared_ptr<Resource>& res) {
@@ -1885,7 +1896,7 @@ static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
       tex = resolveTexView(res, r);
   }
   for (uint32_t st = 0; st < 2; st++) {
-    if (r->stages & (1u << st) && r->slot < kMaxTexSlots) {
+    if (r->stages & (1u << st) && r->slot < kMaxTexTrack) {
       g->stages[st].textures[r->slot] = tex;
       g->stages[st].texBound[r->slot] = r->image_wire_id != 0;
     }
@@ -1952,6 +1963,11 @@ static bool tryExecuteCopyTexture(const d9mt_wire_rec_copy_texture* r) {
       destinationLevel:r->dst_mip
      destinationOrigin:MTLOriginMake(r->dst_x, r->dst_y, r->dst_z)];
   dres->hasContent = true;
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] copy_texture #%d: %llu->%llu %ux%u @%u,%u\n", n,
+              (unsigned long long)r->src_wire_id, (unsigned long long)r->dst_wire_id,
+              r->width, r->height, r->dst_x, r->dst_y); }
   return true;
 }
 
@@ -2227,6 +2243,11 @@ static bool tryExecuteBlit(const d9mt_wire_rec_blit_texture_view* r) {
   dres->hasContent = true;
   g->dirtyPso = g->dirtyState = g->dirtyBindings = true;
   g->argTablesBound = false;
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] blit #%d: %llu->%llu rect %d,%d-%d,%d\n", n,
+              (unsigned long long)r->src_wire_id, (unsigned long long)r->dst_wire_id,
+              r->dst_x0, r->dst_y0, r->dst_x1, r->dst_y1); }
   return true;
 }
 
@@ -3075,7 +3096,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
        * only; the flush binds the dummy so sampling stays defined. */
       const auto* r = (const d9mt_wire_rec_bind_texture*)hdr;
       for (uint32_t st = 0; st < 2; st++) {
-        if (r->stages & (1u << st) && r->slot < kMaxTexSlots)
+        if (r->stages & (1u << st) && r->slot < kMaxTexTrack)
           g->stages[st].texBound[r->slot] = r->view != 0;
       }
       g->dirtyBindings = true;
@@ -3084,7 +3105,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
     case d9mt_wire_op_bind_sampler: {
       const auto* r = (const d9mt_wire_rec_bind_sampler*)hdr;
       for (uint32_t st = 0; st < 2; st++) {
-        if (r->stages & (1u << st) && r->slot < kMaxTexSlots) {
+        if (r->stages & (1u << st) && r->slot < kMaxTexTrack) {
           auto res = r->sampler ? lookupHandle(r->sampler) : nullptr;
           g->stages[st].samplers[r->slot] =
               res && res->ready.load(std::memory_order_acquire) == 1

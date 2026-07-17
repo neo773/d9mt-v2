@@ -925,6 +925,86 @@ main(int argc, char **argv) {
     if (checker_converge(status, ids, &frame, 202, "v9 blit A->C (2x)"))
       FAIL("wire scaled blit A->C never produced the checker");
 
+    /* --- v10: the UpdateTexture SHAPE — a partial sub-rect upload (dirty
+     * box with an offset, exactly what D9MT-UPDTEX emits) into the LIVE
+     * texture A: solid red 32x32 at texel (16,16). Inside the box two
+     * points that would ALTERNATE under the checker must both be RED;
+     * outside the box the checker must survive. --- */
+    static uint8_t redbox[32 * 32 * 4];
+    for (size_t k = 0; k < sizeof(redbox); k += 4) {
+      redbox[k] = 0;
+      redbox[k + 1] = 0;
+      redbox[k + 2] = 255;
+      redbox[k + 3] = 255;
+    }
+    {
+      uint64_t bgen = 0;
+      uint64_t boff = heap_put(redbox, sizeof(redbox), &bgen);
+      struct d9mt_wire_rec_upload_texture ub;
+      memset(&ub, 0, sizeof(ub));
+      ub.hdr.opcode = d9mt_wire_op_upload_texture;
+      ub.hdr.size = sizeof(ub);
+      ub.wire_id = 200;
+      ub.client_handle = 0xB001;
+      ub.x = 16;
+      ub.y = 16;
+      ub.width = 32;
+      ub.height = 32;
+      ub.depth = 1;
+      ub.row_pitch = 32 * 4;
+      ub.format = 80;
+      ub.heap_offset = boff;
+      ub.heap_generation = bgen;
+      ub.data_size = sizeof(redbox);
+      emit(&ub, sizeof(ub));
+    }
+    int boxOk = 0;
+    for (int w = 1; w <= 30 && !boxOk; w++) {
+      struct d9mt_wire_rec_bind_texture_by_id rb;
+      memset(&rb, 0, sizeof(rb));
+      rb.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+      rb.hdr.size = sizeof(rb);
+      rb.stages = 0x2;
+      rb.slot = 0;
+      rb.image_wire_id = 200;
+      rb.format = 80;
+      emit(&rb, sizeof(rb));
+      emit_backbuffer_rt();
+      emit_clear(0.f, 0.f, 1.f);
+      emit_draws(1);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("timeout (v10 updtex-shape wave)");
+      uint32_t s2 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+      IOSurfaceRef sf = IOSurfaceLookup(ids[s2]);
+      if (!sf)
+        FAIL("IOSurfaceLookup failed (v10)");
+      IOSurfaceLock(sf, kIOSurfaceLockReadOnly, NULL);
+      const uint8_t *bs = IOSurfaceGetBaseAddress(sf);
+      size_t br = IOSurfaceGetBytesPerRow(sf);
+      uint8_t in1[4], in2[4], o1[4], o2[4];
+      memcpy(in1, bs + 240 * br + 240 * 4, 4); /* texel (24,32) — in box */
+      memcpy(in2, bs + 240 * br + 320 * 4, 4); /* texel (32,32) — in box */
+      memcpy(o1, bs + 30 * br + 40 * 4, 4);    /* texel (4,4)  — outside */
+      memcpy(o2, bs + 30 * br + 120 * 4, 4);   /* texel (12,4) — outside */
+      IOSurfaceUnlock(sf, kIOSurfaceLockReadOnly, NULL);
+      CFRelease(sf);
+      uint8_t redpx2[4] = {0, 0, 255, 255}, greenpx2[4] = {0, 255, 0, 255};
+      int insideRed = !memcmp(in1, redpx2, 4) && !memcmp(in2, redpx2, 4);
+      int outsideChecker =
+          (!memcmp(o1, redpx2, 4) || !memcmp(o1, greenpx2, 4)) &&
+          (!memcmp(o2, redpx2, 4) || !memcmp(o2, greenpx2, 4)) &&
+          memcmp(o1, o2, 4) != 0;
+      if (insideRed && outsideChecker)
+        boxOk = 1;
+      else
+        usleep(30000);
+    }
+    if (!boxOk)
+      FAIL("v10 updtex-shape sub-rect upload never landed correctly");
+    printf("[test_feed] v10 updtex-shape: offset sub-rect upload landed, "
+           "checker preserved outside the box\n");
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. */
