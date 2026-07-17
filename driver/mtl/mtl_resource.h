@@ -220,6 +220,12 @@ namespace dxvk {
     // read on the CS thread; the destructor (any thread) only reads it —
     // ordered by the final Rc release.
     uint64_t        wireId     = 0u;
+    // render-server S3 v8: WIRE CITIZENSHIP stamped AT CREATION. Only
+    // backings minted by the canonical device paths (createBuffer /
+    // renameBuffer) with validated-complete info are wire-eligible;
+    // hand-built wrappers and internal temporaries never get a wire id and
+    // dummy-resolve server-side. Never inferred at emission time.
+    bool            wireEligible = false;
   };
 
   class MtlDevice;
@@ -326,6 +332,12 @@ namespace dxvk {
     MtlImageInfo     m_info         = { };
     // render-server S2 identity (see MtlAllocation::wireId).
     uint64_t         wireId         = 0u;
+    // render-server S3 v8: wire citizenship (see MtlAllocation::wireEligible).
+    // Set ONLY by MtlDeviceImpl::createImage after validating the create
+    // info is complete (all extents > 0, base format in the known enum);
+    // presenter drawable wraps / dump temporaries stay ineligible — their
+    // half-initialized info poisoned the server (run-8 "1x0x0" record).
+    bool             wireEligible   = false;
 
     const MtlImageInfo& info() const { return m_info; }
 

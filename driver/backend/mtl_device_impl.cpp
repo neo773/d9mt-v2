@@ -21,6 +21,18 @@ namespace dxvk::backend {
       return WMTPixelFormat(uint32_t(format));
     }
 
+    /* S3 v8 wire citizenship: an image is wire-eligible only when its
+     * create info is COMPLETE — all extents nonzero, mips/layers nonzero,
+     * base format inside the known MTLPixelFormat range. Hand-built
+     * wrappers (presenter drawables, temporaries) never qualify. */
+    bool wireEligibleImage(const MtlImageCreateInfo& info) {
+      const uint32_t f = uint32_t(info.format) & 0xFFFFu;
+      return info.extent.width > 0u && info.extent.height > 0u
+          && info.extent.depth > 0u
+          && info.mipLevels > 0u && info.arrayLayers > 0u
+          && f > 0u && f <= 640u;
+    }
+
     WMTTextureType wmtTextureType(const MtlImageCreateInfo& info) {
       if (info.cube)
         return info.arrayLayers > 6u ? WMTTextureTypeCubeArray : WMTTextureTypeCube;
@@ -198,6 +210,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
     storage->residencyDevice = this;
+    storage->wireEligible = info.size > 0u; /* v8: canonical birth */
     m_residency->allocCreated(handle);   // resident from creation to retirement
     buffer->assignStorage(std::move(storage));
     m_diagBuffersCreated++;
@@ -240,6 +253,7 @@ namespace dxvk::backend {
     texture->extent = info.extent;
     texture->gpuResourceId = texInfo.gpu_resource_id;
     texture->info = info;
+    texture->wireEligible = wireEligibleImage(info); /* v8: canonical birth */
     /* Base-class metadata the frontend reads via image->info() and
      * mipLevelExtent() — unset it reports 1x1 extents (UpdateTexture upload
      * regions collapse to a single texel: black game textures). */
@@ -390,6 +404,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
     storage->residencyDevice = this;
+    storage->wireEligible = impl->size > 0u; /* v8: canonical rename */
     m_residency->allocCreated(handle);   // renamed backing resident until it retires
     m_diagBuffersRenamed++;
     return storage;

@@ -573,6 +573,82 @@ V7 honest flags:
 - The 640 format-ceiling clamp is deliberately loose (real MTLPixelFormat
   max ~600); marker-masked formats pass through as before.
 
+## V8 — wire citizenship at birth + provable consumer/worker decoupling
+
+Run 8: SIX HEALTHY WINDOWS (~1,530 real GTA frames rendered natively,
+srvFrames at rate, psoSkip 299→0 heal, uploads flowing, the v7 clamp
+caught the ORIGINAL execOp=27 killer: wire=4 "format outside known enum").
+Death at f≈1792: breadcrumb "create_texture #15 wire=44 fmt=256 1x0x0
+mips=1 layers=0" — ZERO dims (the v7 clamps only checked maxima); the
+worker wedged on it AND the heartbeat froze (violating the worker-wedge-
+degrades promise). Class-level fixes, per architectural review:
+
+### FIX 1 — wire citizenship stamped AT CREATION (never inferred)
+
+Both killers (wire=4 garbage format, wire=44 zero dims) are the same
+class: PSEUDO-RESOURCES — MtlTextureImpl/MtlAllocation objects born
+OUTSIDE the canonical device create paths (presenter drawable wraps,
+half-initialized temporaries) whose `info` is incomplete BY DESIGN.
+Create-at-first-use assumed complete pedigree; that assumption was false.
+- `MtlAllocation::wireEligible` / `MtlTexture::wireEligible` (default
+  FALSE) are set only by the canonical mints: `MtlDeviceImpl::createBuffer`
+  (+ `renameBuffer` — renames stay eligible) and `createImage` after
+  `wireEligibleImage()` validates completeness (all extents > 0,
+  mips/layers > 0, base format in (0, 640]).
+- `ensureStorageCreated`/`ensureTextureCreated` refuse ineligible
+  resources before assigning any id: binds carry id 0 and dummy-resolve
+  server-side (existing graceful path). Counted per attempt in the new
+  PROF field `inel=` (PE-local, no ABI).
+- Server clamps extended as the backstop that should now never fire:
+  ZERO width/height/depth/mips/layers and zero-size buffers reject
+  (v7 only checked maxima — exactly the run-8 gap).
+
+### FIX 2 — consumer provably decoupled from the worker
+
+Audit of every consumer-side touch of a building Resource (documented
+here as the contract): `observeReady` = one acquire load; sweep = load +
+vector shuffle; stash = memcpy + ack; job dispatch = mutex held for a
+push only; the worker holds NO lock during Metal calls. There is NO
+our-code wait coupling the threads. The run-8 heartbeat freeze therefore
+came from BELOW our code: both threads share ONE MTLDevice, and a wedged
+`newTextureWithDescriptor` can hold device-internal locks that the
+consumer's next Metal call (encoder/commit) blocks on. That coupling
+cannot be removed while sharing a device — but the TRIGGER class is gone
+(FIX 1 + zero-clamps mean no malformed descriptor ever reaches Metal),
+and the wedge gate proves the healthy-value path stays decoupled.
+- WATCHDOG thread (diagnostics only): every second, names (a) a worker
+  Metal call that has not returned in >5 s — `WEDGED: create worker stuck
+  Ns in newTexture wire=.. fmt=.. WxHxD ...` with the exact values — and
+  (b) a consumer stuck inside one wire opcode with frozen progress >5 s.
+- TEST HOOK `D9MT_WEDGE_CREATE_MS` (env, read once at executor init, test
+  harness only): first texture create sleeps N ms inside the instrumented
+  window.
+
+Gates (all PASSING): pseudo-resource records (run-8 zero-dim shape +
+garbage format 0x9999 + the v7 absurd-extent) rejected + counted
+(creates_rejected == 3 exactly — legal creates unaffected) with the
+consumer provably alive; WEDGE SIMULATION — worker blocked 6 s inside its
+first create: heartbeat ticks, 100+ records consume, a present completes,
+quiesce+begin ack, the >5 s WEDGED breadcrumb prints, and the server
+detaches cleanly after the wedge expires. Sessions/stale-probe/storm/
+flood/pid-watchdog unchanged; full-clean build-driver PASS (bridge
+untouched this round: `inel=` is PE-computed).
+
+V8 honest flags:
+- The residual consumer↔worker coupling is Metal-internal (shared
+  MTLDevice locks). If a HEALTHY create ever wedges (memory pressure —
+  watch the breadcrumb's cumulative-MB watermark), the heartbeat may
+  still freeze with it; the WEDGED log + execOp will say so explicitly.
+  The definitive fix in that case is texture memory budgeting or the
+  cutover (single-copy textures).
+- Eligibility is stamped at 3 mint sites today; a future non-canonical
+  creation path must either stamp or stay off the wire — grep
+  `wireEligible` when adding one.
+- The 640 format ceiling accepts nonexistent-but-in-range values (fmt=256
+  passes the format check; it now fails the ZERO-dims check that actually
+  caught run-8's record — value-level completeness is the client stamp's
+  job, and the client no longer emits such records at all).
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

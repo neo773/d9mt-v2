@@ -391,6 +391,16 @@ struct Exec {
   std::deque<CreateJob> creatQueue;
   bool creatStop = false;
 
+  /* S3 v8 watchdog: pure diagnostics, no unblocking — names a wedged worker
+   * job (an ObjC call that never returned) and a stuck consumer record.
+   * workerJobDesc is written by the worker BEFORE the release-store of
+   * workerJobStartMs and only overwritten after clearing it. */
+  std::thread watchdog;
+  std::atomic<bool> watchdogStop = { false };
+  std::atomic<uint64_t> workerJobStartMs = { 0 }; /* 0 = idle */
+  char workerJobDesc[160] = {};
+  uint32_t wedgeTestMs = 0; /* D9MT_WEDGE_CREATE_MS — TEST HOOK ONLY */
+
   /* S3 v7: worker-built resources awaiting consumer-side observation
    * (residency add + stash drain). Consumer-only; swept at present and at
    * every reference point. */
@@ -1265,6 +1275,10 @@ static bool rejectCreate(const char* what, uint64_t wireId, const char* why) {
 }
 
 static void handleCreateBuffer(const d9mt_wire_rec_create_buffer* r) {
+  if (r->size == 0u) { /* v8: pseudo-resource signature */
+    rejectCreate("create_buffer", r->wire_id, "zero size");
+    return;
+  }
   if (r->size > (1ull << 30)) { /* > 1 GiB: no D3D9 buffer is this big */
     rejectCreate("create_buffer", r->wire_id, "size > 1 GiB");
     return;
@@ -1331,6 +1345,10 @@ static MTLTextureDescriptor* textureDescriptorFor(const d9mt_wire_rec_create_tex
  * and dispatches. */
 static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
   const uint32_t fmt = r->format & 0xFFFFu;
+  /* v8: ZERO dims are the pseudo-resource signature (run-8 killer was
+   * "1x0x0 layers=0" — the v7 clamps only checked maxima). */
+  if (!r->width || !r->height || !r->depth || !r->mip_levels || !r->array_layers)
+    { rejectCreate("create_texture", r->wire_id, "zero dimension/mips/layers"); return; }
   if (r->width > 16384u || r->height > 16384u || r->depth > 2048u)
     { rejectCreate("create_texture", r->wire_id, "extent > 16384/2048"); return; }
   if (r->mip_levels > 15u)
@@ -1361,6 +1379,50 @@ static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
   g->creatCv.notify_one();
 }
 
+static uint64_t monotonicMsSrv() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* S3 v8 watchdog thread: every second, name (a) a create-worker Metal call
+ * that has not returned in >5 s — with the exact values that wedged it —
+ * and (b) a consumer stuck inside one wire opcode with NO progress for
+ * >5 s. Diagnostics only (a stuck ObjC call cannot be aborted); one line
+ * per incident. */
+static void watchdogMain() {
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0); /* not frame-critical */
+  uint64_t warnedJob = 0;
+  uint32_t lastOp = 0;
+  uint64_t lastProgress = 0, opSinceMs = 0;
+  bool warnedOp = false;
+  while (!g->watchdogStop.load(std::memory_order_acquire)) {
+    usleep(1000000);
+    const uint64_t now = monotonicMsSrv();
+    const uint64_t js = g->workerJobStartMs.load(std::memory_order_acquire);
+    if (js && now - js > 5000 && warnedJob != js) {
+      warnedJob = js;
+      fprintf(stderr, "[serverd] WEDGED: create worker stuck %llus in %s\n",
+              (unsigned long long)((now - js) / 1000), g->workerJobDesc);
+    }
+    const uint32_t op =
+        atomic_load_explicit(&g->status->exec_opcode, memory_order_relaxed);
+    const uint64_t prog =
+        atomic_load_explicit(&g->status->progress, memory_order_relaxed);
+    if (op == 0 || op != lastOp || prog != lastProgress) {
+      lastOp = op;
+      lastProgress = prog;
+      opSinceMs = now;
+      warnedOp = false;
+    } else if (op && now - opSinceMs > 5000 && !warnedOp) {
+      warnedOp = true;
+      fprintf(stderr, "[serverd] WEDGED: consumer stuck inside wire opcode %u "
+                      "for %llus (progress frozen)\n",
+              op - 1, (unsigned long long)((now - opSinceMs) / 1000));
+    }
+  }
+}
+
 /* S3 v2: the create worker. newLibraryWithData takes milliseconds per
  * library and boot storms carry hundreds — running it on the consumer
  * starved ring consumption (and heap acks) for >5 s and tripped the client
@@ -1385,7 +1447,12 @@ static void createWorkerMain() {
         dispatch_data_t data = dispatch_data_create(
             job.bytes.data(), job.bytes.size(), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
         NSError* err = nil;
+        snprintf(g->workerJobDesc, sizeof(g->workerJobDesc),
+                 "newLibraryWithData wire=%llu (%zu B)",
+                 (unsigned long long)job.meta.wire_id, job.bytes.size());
+        g->workerJobStartMs.store(monotonicMsSrv(), std::memory_order_release);
         id<MTLLibrary> lib = [g->device newLibraryWithData:data error:&err];
+        g->workerJobStartMs.store(0, std::memory_order_release);
         if (!lib) {
           job.res->ready.store(2, std::memory_order_release);
           atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
@@ -1431,7 +1498,22 @@ static void createWorkerMain() {
                   t.format & 0xFFFFu, t.width, t.height, t.depth, t.mip_levels,
                   t.array_layers, t.sample_count, t.usage, t.cube,
                   (unsigned long long)(cum >> 20));
+        snprintf(g->workerJobDesc, sizeof(g->workerJobDesc),
+                 "newTexture wire=%llu fmt=%u %ux%ux%u mips=%u layers=%u usage=0x%x",
+                 (unsigned long long)t.wire_id, t.format & 0xFFFFu, t.width,
+                 t.height, t.depth, t.mip_levels, t.array_layers, t.usage);
+        g->workerJobStartMs.store(monotonicMsSrv(), std::memory_order_release);
+        if (g->wedgeTestMs) { /* TEST HOOK: simulate a wedged create once */
+          static std::atomic<bool> wedgedOnce = { false };
+          bool expected = false;
+          if (wedgedOnce.compare_exchange_strong(expected, true)) {
+            fprintf(stderr, "[serverd] TEST: wedging create worker %u ms\n",
+                    g->wedgeTestMs);
+            usleep((useconds_t)g->wedgeTestMs * 1000u);
+          }
+        }
         id<MTLTexture> tex = [g->device newTextureWithDescriptor:textureDescriptorFor(&t)];
+        g->workerJobStartMs.store(0, std::memory_order_release);
         if (!tex) {
           job.res->ready.store(2, std::memory_order_release);
           atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
@@ -1460,7 +1542,11 @@ static void createWorkerMain() {
         sd.maxAnisotropy = r.max_anisotropy ? r.max_anisotropy : 1;
         sd.normalizedCoordinates = YES;
         sd.supportArgumentBuffers = YES;
+        snprintf(g->workerJobDesc, sizeof(g->workerJobDesc),
+                 "newSamplerState wire=%llu", (unsigned long long)r.wire_id);
+        g->workerJobStartMs.store(monotonicMsSrv(), std::memory_order_release);
         id<MTLSamplerState> smp = [g->device newSamplerStateWithDescriptor:sd];
+        g->workerJobStartMs.store(0, std::memory_order_release);
         if (!smp) {
           job.res->ready.store(2, std::memory_order_release);
           atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
@@ -2329,6 +2415,15 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
   /* S3 v2: the create worker (QoS declared inside — main.m discipline) */
   g->creatWorker = std::thread(createWorkerMain);
 
+  /* S3 v8: watchdog (diagnostics) + the wedge-simulation TEST hook */
+  if (const char* w = getenv("D9MT_WEDGE_CREATE_MS")) {
+    g->wedgeTestMs = (uint32_t)atoi(w);
+    if (g->wedgeTestMs)
+      fprintf(stderr, "[serverd] TEST HOOK armed: first texture create wedges %u ms\n",
+              g->wedgeTestMs);
+  }
+  g->watchdog = std::thread(watchdogMain);
+
   if (livenessClear())
     return 1;
 
@@ -2603,6 +2698,10 @@ extern "C" void
 d9mt_executor_finish(void) {
   if (!g)
     return;
+  if (g->watchdog.joinable()) {
+    g->watchdogStop.store(true, std::memory_order_release);
+    g->watchdog.join();
+  }
   /* stop the create worker (drains queued jobs first — cheap, bounded) */
   if (g->creatWorker.joinable()) {
     {

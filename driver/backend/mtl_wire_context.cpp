@@ -106,6 +106,12 @@ namespace dxvk::backend {
     /* PE-side attach counter (log correlation with the unix "attach #N"). */
     std::atomic<uint32_t> g_claimSeq = { 0u };
 
+    /* S3 v8: binds referencing wire-INELIGIBLE resources (pseudo-resources
+     * born outside the canonical create paths — presenter wraps, half-
+     * initialized temporaries). They never get a wire id (server dummy-
+     * resolves); counted per attempt for the PROF `inel=` field. */
+    std::atomic<uint64_t> g_wireIneligible = { 0u };
+
     /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
 
     /* Monotonic wire identity (spec: client-assigned u64). 0 = "no wire
@@ -591,6 +597,10 @@ namespace dxvk::backend {
       return false;
     if (storage->wireId)
       return true;
+    if (!storage->wireEligible) { /* v8: pseudo-resource — never on the wire */
+      g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      return false;
+    }
     auto* r = beginRecord<d9mt_wire_rec_create_buffer>(d9mt_wire_op_create_buffer);
     if (!r)
       return false;
@@ -788,6 +798,10 @@ namespace dxvk::backend {
       return 0u;
     if (image->wireId)
       return image->wireId;
+    if (!image->wireEligible) { /* v8: pseudo-resource — never on the wire */
+      g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
+      return 0u;
+    }
     /* All driver textures are MtlTextureImpl (device + presenter); its
      * `info` member is the ORIGINAL MtlImageCreateInfo (MtlUsage bits +
      * cube), which the record mirrors. */
@@ -1669,7 +1683,8 @@ namespace dxvk::backend::prof {
       " upl=", s.server_uploads - prev.server_uploads,
       " heapDrop=", s.heap_dropped,
       " execOp=", s.server_exec_opcode,
-      " rej=", s.server_creates_rejected);
+      " rej=", s.server_creates_rejected,
+      " inel=", g_wireIneligible.load(std::memory_order_relaxed));
     prev = s;
   }
 

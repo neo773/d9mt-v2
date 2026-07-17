@@ -566,16 +566,39 @@ main(int argc, char **argv) {
     u4.data_size = sizeof(mip4);
     emit(&u4, sizeof(u4));
 
-    if (wait_u64(&status->creates_rejected, 1, 5000))
-      FAIL("poisoned create_texture not rejected (creates_rejected=%" PRIu64 ")",
+    /* v8 pseudo-resource shapes (should never be EMITTED by the v8 client —
+     * wire citizenship — but the server clamps stay as backstop): the run-8
+     * killer "1x0x0 layers=0" and a garbage format. */
+    struct d9mt_wire_rec_create_texture zt = pt;
+    zt.wire_id = 998;
+    zt.client_handle = 0xBAD2;
+    zt.width = 1;
+    zt.height = 0; /* zero dimension */
+    zt.depth = 0;
+    zt.mip_levels = 1;
+    zt.array_layers = 0;
+    emit(&zt, sizeof(zt));
+    struct d9mt_wire_rec_create_texture ft2 = pt;
+    ft2.wire_id = 997;
+    ft2.client_handle = 0xBAD3;
+    ft2.width = 4;
+    ft2.height = 4;
+    ft2.depth = 1;
+    ft2.mip_levels = 1;
+    ft2.array_layers = 1;
+    ft2.format = 0x9999; /* outside the known enum */
+    emit(&ft2, sizeof(ft2));
+
+    if (wait_u64(&status->creates_rejected, 3, 5000))
+      FAIL("poisoned creates not rejected (creates_rejected=%" PRIu64 " want 3)",
            (uint64_t)atomic_load_explicit(&status->creates_rejected, memory_order_relaxed));
     if (wait_u64(&status->progress, g_head, 5000))
       FAIL("consumer stalled after poisoned create (the execOp=27 hang shape)");
-    if (atomic_load_explicit(&status->creates_rejected, memory_order_relaxed) != 1)
-      FAIL("creates_rejected=%" PRIu64 " want exactly 1 (legal creates rejected?)",
+    if (atomic_load_explicit(&status->creates_rejected, memory_order_relaxed) != 3)
+      FAIL("creates_rejected=%" PRIu64 " want exactly 3 (legal creates rejected?)",
            (uint64_t)atomic_load_explicit(&status->creates_rejected, memory_order_relaxed));
-    printf("[test_feed] v7: poisoned create rejected+counted, consumer alive; "
-           "2992x1934 RT + 1024^2 mipped queued to the worker\n");
+    printf("[test_feed] v8: poisoned/zero-dim/garbage-format creates rejected+"
+           "counted, consumer alive; big legal creates on the worker\n");
   }
 
   const char *libpath = argc >= 3 ? argv[2] : NULL;
@@ -1134,6 +1157,150 @@ main(int argc, char **argv) {
       FAIL("watchdog: shm dir NOT removed after client death");
     printf("[test_feed] pid watchdog: server exited + cleaned shm after "
            "client death\n");
+  }
+
+  /* --- S3 v8 wedge simulation: the create worker is artificially blocked
+   * for 6 s inside its first texture create (D9MT_WEDGE_CREATE_MS test
+   * hook). The consumer/heartbeat MUST stay decoupled: hb ticks, records
+   * consume, presents complete, quiesce/begin ack — all while the worker
+   * is wedged; the >5 s watchdog prints its WEDGED breadcrumb. --- */
+  {
+    char wdir[900];
+    snprintf(wdir, sizeof(wdir), "%s/d9mt-test-XXXXXX", tmp ? tmp : "/tmp");
+    if (!mkdtemp(wdir))
+      FAIL("wedge mkdtemp: %s", strerror(errno));
+    void *r3, *s3, *h3;
+    if (create_file(wdir, "ring", sizeof(struct d9mt_wire_ring) + (1u << 20), &r3) ||
+        create_file(wdir, "status", sizeof(struct d9mt_status), &s3) ||
+        create_file(wdir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + (1u << 20), &h3))
+      return 1;
+    struct d9mt_wire_ring *wr = r3;
+    wr->capacity = 1u << 20;
+    wr->data_offset = sizeof(struct d9mt_wire_ring);
+    wr->magic = D9MT_WIRE_RING_MAGIC;
+    struct d9mt_wire_heap *wh = h3;
+    wh->capacity = 1u << 20;
+    wh->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+    wh->magic = D9MT_WIRE_HEAP_MAGIC;
+    struct d9mt_status *ws = s3;
+
+    /* rebase the producer globals onto this scenario's ring */
+    g_ring = wr;
+    g_data = (uint8_t *)r3 + sizeof(struct d9mt_wire_ring);
+    g_head = 0;
+
+    /* spawn with the wedge hook armed */
+    int envc = 0;
+    while (environ[envc])
+      envc++;
+    char **wenv = malloc(sizeof(char *) * (envc + 2));
+    for (int i = 0; i < envc; i++)
+      wenv[i] = environ[i];
+    wenv[envc] = "D9MT_WEDGE_CREATE_MS=6000";
+    wenv[envc + 1] = NULL;
+    pid_t wpid;
+    char *wargv[] = {(char *)server_bin, wdir, "64", "64", NULL};
+    if (posix_spawn(&wpid, server_bin, NULL, NULL, wargv, wenv))
+      FAIL("wedge posix_spawn failed");
+    free(wenv);
+    for (int i = 0;; i++) {
+      if (atomic_load_explicit(&ws->epoch, memory_order_acquire) == 1)
+        break;
+      int wst;
+      if (waitpid(wpid, &wst, WNOHANG) == wpid)
+        FAIL("wedge server died before ready (0x%x)", wst);
+      if (i >= 1000)
+        FAIL("wedge server not ready");
+      usleep(10000);
+    }
+
+    /* trip the wedge: one legal texture create */
+    struct d9mt_wire_rec_create_texture wt;
+    memset(&wt, 0, sizeof(wt));
+    wt.hdr.opcode = d9mt_wire_op_create_texture;
+    wt.hdr.size = sizeof(wt);
+    wt.wire_id = 1;
+    wt.client_handle = 0x1;
+    wt.type = 1;
+    wt.format = 80;
+    wt.width = 64;
+    wt.height = 64;
+    wt.depth = 1;
+    wt.mip_levels = 1;
+    wt.array_layers = 1;
+    wt.sample_count = 1;
+    emit(&wt, sizeof(wt));
+    usleep(200000); /* let the worker enter the wedge */
+
+    /* 1. heartbeat keeps ticking while the worker is wedged */
+    uint64_t whb0 = atomic_load_explicit(&ws->heartbeat, memory_order_acquire);
+    usleep(500000);
+    uint64_t whb1 = atomic_load_explicit(&ws->heartbeat, memory_order_acquire);
+    if (whb1 <= whb0)
+      FAIL("heartbeat FROZE while the worker was wedged (%" PRIu64 ") — "
+           "consumer coupled to worker", whb0);
+
+    /* 2. records keep consuming; binds to the building texture dummy-resolve */
+    struct d9mt_wire_rec_bind_texture_by_id wb;
+    memset(&wb, 0, sizeof(wb));
+    wb.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+    wb.hdr.size = sizeof(wb);
+    wb.stages = 0x2;
+    wb.slot = 0;
+    wb.image_wire_id = 1;
+    wb.format = 80;
+    emit(&wb, sizeof(wb));
+    for (uint32_t i = 0; i < 100; i++) {
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
+      emit(&sr, sizeof(sr));
+    }
+    if (wait_u64(&ws->progress, g_head, 3000))
+      FAIL("consumer stalled while worker wedged");
+
+    /* 3. presents complete during the wedge (sweep must not block) */
+    emit_backbuffer_rt();
+    emit_clear(1.f, 0.f, 0.f);
+    emit_present(1);
+    if (wait_u64(&ws->frames, 1, 5000))
+      FAIL("present did not complete while worker wedged");
+
+    /* 4. quiesce + begin ack during the wedge */
+    emit_session(0, 1);
+    if (wait_u64(&ws->epoch, 2, 3000))
+      FAIL("quiesce did not ack while worker wedged");
+    emit_session(1, 2);
+    if (wait_u64(&ws->epoch, 3, 3000))
+      FAIL("session begin did not ack while worker wedged");
+    printf("[test_feed] wedge sim: hb ticked, %u records consumed, present + "
+           "quiesce/begin acked — consumer provably decoupled\n", 103);
+
+    /* let the wedge expire so the worker can drain, then detach cleanly */
+    usleep(6000000);
+    struct d9mt_wire_rec_nul wdetach = {{d9mt_wire_op_detach, 8, 0}};
+    emit(&wdetach, sizeof(wdetach));
+    int wst = -1, wexited = 0;
+    for (int i = 0; i < 800; i++) {
+      if (waitpid(wpid, &wst, WNOHANG) == wpid) {
+        wexited = 1;
+        break;
+      }
+      usleep(10000);
+    }
+    if (!wexited) {
+      kill(wpid, SIGKILL);
+      FAIL("wedge server did not exit after detach");
+    }
+    if (!WIFEXITED(wst) || WEXITSTATUS(wst) != 0)
+      FAIL("wedge server exit status 0x%x", wst);
+    char p3[1024];
+    snprintf(p3, sizeof(p3), "%s/ring", wdir);
+    unlink(p3);
+    snprintf(p3, sizeof(p3), "%s/status", wdir);
+    unlink(p3);
+    snprintf(p3, sizeof(p3), "%s/heap", wdir);
+    unlink(p3);
+    rmdir(wdir);
   }
 
   /* teardown */
