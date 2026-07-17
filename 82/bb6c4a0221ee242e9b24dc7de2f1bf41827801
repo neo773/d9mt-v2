@@ -1,0 +1,29 @@
+docs/SOURCE_OF_TRUTH.md
+  s_9dc0f2092159a8::t_a05eae4f1f64b1 76-81
+driver/backend/mtl_context_impl.h
+  s_9dc0f2092159a8::t_ad291ccfd628cb 91-92
+driver/mtl/mtl_wire.h
+  s_9dc0f2092159a8::t_fb6bdc81d44e87 20-21
+driver/d3d9/d3d9_swapchain.cpp
+  s_9dc0f2092159a8::t_bdb714908420b7 896-899
+driver/mtl/mtl_presenter.h
+  s_9dc0f2092159a8::t_de55fe70102e78 21-26
+server/README.md
+  s_9dc0f2092159a8::t_8880242ab56ad1 23-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "82bb6c4a0221ee242e9b24dc7de2f1bf41827801",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
