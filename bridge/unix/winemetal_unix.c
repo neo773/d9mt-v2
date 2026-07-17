@@ -27,6 +27,7 @@
 #import <Metal/MTLResidencySet.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/QuartzCore.h>
+#import <IOSurface/IOSurface.h>
 #include "objc/objc-runtime.h"
 #include <bootstrap.h>
 #include <mach/mach_port.h>
@@ -6952,6 +6953,102 @@ _WireRing_quiesce(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- S3 cutover: server IOSurface present source ------------------------- *
+ * The render server renders GTA's stream into an IOSurface pool and publishes
+ * {present_slot, frame_serial (GPU-done), iosurface_id[], iosurface_serial[]}.
+ * The client wraps the published IOSurface as an MTLTexture on ITS OWN device
+ * (IOSurface backing is shared cross-device/cross-process) and blits it into
+ * the drawable. The wrap is cached per {id, generation}: IOSurfaceLookup is
+ * ~4us and the newTextureWithDescriptor:iosurface: wrap ~10us — paid once per
+ * generation, not per present. The cache owns one +1 reference; a generation
+ * change releases the old texture and mints a new one. Not ARC (this file uses
+ * explicit retain/release, see _MTLDevice_newSharedTexture). */
+static IOSurfaceID     wire_srv_tex_id  = 0;
+static uint64_t        wire_srv_tex_gen = 0;
+static id<MTLTexture>  wire_srv_tex     = nil;
+
+static id<MTLTexture>
+wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen) {
+  if (wire_srv_tex && wire_srv_tex_id == sid && wire_srv_tex_gen == gen)
+    return wire_srv_tex;              /* hot path: same generation, no rewrap */
+
+  IOSurfaceRef surf = IOSurfaceLookup(sid);
+  if (!surf)
+    return nil;                       /* id not resolvable this process yet */
+
+  size_t w = IOSurfaceGetWidth(surf);
+  size_t h = IOSurfaceGetHeight(surf);
+  /* The server pool is BGRA8Unorm (matches the D3D9 X8R8G8B8 backbuffer path).
+   * A non-BGRA server pool would need format negotiation; documented in
+   * HANDOFF-CUTOVER.md as the single-format assumption. */
+  MTLTextureDescriptor *desc =
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                         width:w
+                                                        height:h
+                                                     mipmapped:NO];
+  desc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+  desc.storageMode = MTLStorageModeShared;   /* IOSurface-backed */
+  id<MTLTexture> tex = [device newTextureWithDescriptor:desc iosurface:surf plane:0];
+  CFRelease(surf);                            /* the texture retains the surface */
+  [desc release];
+  if (!tex)
+    return nil;
+
+  if (wire_srv_tex)
+    [wire_srv_tex release];
+  wire_srv_tex     = tex;                      /* own the +1 from newTexture */
+  wire_srv_tex_id  = sid;
+  wire_srv_tex_gen = gen;
+  return wire_srv_tex;
+}
+
+static NTSTATUS
+_WireServerFrame_acquire(void *obj) {
+  struct unixcall_wire_server_frame *p = obj;
+  p->out_usable = 0;
+  p->out_texture = 0;
+  if (!wire_status)
+    return STATUS_SUCCESS;
+
+  uint32_t version = atomic_load_explicit(&wire_status->version, memory_order_acquire);
+  if (version < 2u)
+    return STATUS_SUCCESS;                     /* pre-S2 server: no frames */
+
+  uint64_t frames = atomic_load_explicit(&wire_status->frames, memory_order_relaxed);
+  if (frames == 0u)
+    return STATUS_SUCCESS;                      /* nothing presented yet */
+
+  uint64_t fs   = atomic_load_explicit(&wire_status->frame_serial, memory_order_relaxed);
+  uint32_t slot = atomic_load_explicit(&wire_status->present_slot, memory_order_relaxed);
+
+  /* Pace gate: the server's completed serial must be within `lag_frames` of
+   * the present the client is about to do. `local - fs > lag` = too stale ->
+   * fall back to the always-ready local backbuffer. Server-ahead is fine
+   * (present the freshest completed frame). */
+  if (p->local_serial > fs && (p->local_serial - fs) > p->lag_frames)
+    return STATUS_SUCCESS;
+
+  if (slot >= D9MT_STATUS_SLOTS)
+    return STATUS_SUCCESS;
+  IOSurfaceID sid = atomic_load_explicit(&wire_status->iosurface_id[slot], memory_order_relaxed);
+  uint64_t    gen = atomic_load_explicit(&wire_status->iosurface_serial[slot], memory_order_relaxed);
+  if (sid == 0)
+    return STATUS_SUCCESS;                      /* empty slot */
+
+  id<MTLTexture> tex = wire_server_lookup_texture((id<MTLDevice>)p->device, sid, gen);
+  if (!tex)
+    return STATUS_SUCCESS;                       /* lookup / wrap failed */
+
+  p->out_texture      = (obj_handle_t)tex;
+  p->out_frame_serial = fs;
+  p->out_width        = (uint32_t)[tex width];
+  p->out_height       = (uint32_t)[tex height];
+  p->out_format       = (uint32_t)MTLPixelFormatBGRA8Unorm;
+  p->out_slot         = slot;
+  p->out_usable       = 1;
+  return STATUS_SUCCESS;
+}
+
 /* --- autorelease-pool dispatch wrappers --------------------------------- *
  * Wine threads have no NSAutoreleasePool, so every autoreleased object a
  * Metal/CA call produces on this side would leak for the process lifetime
@@ -7091,6 +7188,7 @@ D9MT_POOLED(_MTL4CommandBuffer_encodeSpatialScale)
  * raw (pure POSIX, no ObjC — see their comments). */
 D9MT_POOLED(_WireRing_attach)
 D9MT_POOLED(_WireRing_stats)
+D9MT_POOLED(_WireServerFrame_acquire)
 D9MT_POOLED(_MTLDevice_supportsFamily)
 D9MT_POOLED(_MTLDevice_supportsPlacementSparse)
 D9MT_POOLED(_MTLDevice_supportsTextureSampleCount)
@@ -7424,6 +7522,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WireRing_stats_pooled,                                       /* 213 */
     &_WireRing_detach,                                             /* 214 */
     &_WireRing_quiesce,                                            /* 215 */
+    &_WireServerFrame_acquire_pooled,                              /* 216 */
 
 };
 
@@ -7660,6 +7759,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WireRing_stats_pooled,                                       /* 213 */
     &_WireRing_detach,                                             /* 214 */
     &_WireRing_quiesce,                                            /* 215 */
+    &_WireServerFrame_acquire_pooled,                              /* 216 */
 
 };
 #endif

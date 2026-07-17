@@ -620,6 +620,22 @@ struct unixcall_wirering_stats {
   struct WMTMemoryPointer out; /* struct WMTWireStats* (PE memory) */
 };
 
+/* S3 cutover (code 216): resolve the server's completed IOSurface frame into a
+ * client-device MTLTexture. All members 8-byte / arch-invariant. */
+struct unixcall_wire_server_frame {
+  uint64_t device;           /* in: obj_handle_t client MTLDevice */
+  uint64_t local_serial;     /* in: this present's local serial */
+  uint64_t lag_frames;       /* in: max frames the server may lag */
+  uint64_t out_texture;      /* out: obj_handle_t wrapped MTLTexture (0 = none) */
+  uint64_t out_frame_serial; /* out: server-published serial (diag) */
+  uint32_t out_width;        /* out */
+  uint32_t out_height;       /* out */
+  uint32_t out_format;       /* out: WMTPixelFormat */
+  uint32_t out_slot;         /* out: present_slot */
+  uint32_t out_usable;       /* out: 1 = use the server frame */
+  uint32_t pad;
+};
+
 #pragma pack(pop)
 
 #endif

@@ -22,9 +22,27 @@
 
 #include "../util/rc/util_rc_ptr.h"
 
-namespace dxvk { class MtlTexture; }
+namespace dxvk { class MtlTexture; class MtlTextureView; class MtlDevice; }
 
 namespace dxvk::backend::wire {
+
+  /* App thread (PresentImage): the local present serial this frame will use
+   * (matches the counter the server echoes as status.frame_serial). Captured
+   * into the present closure so the CS-thread server-frame gate compares like
+   * for like. */
+  uint64_t nextPresentSerial();
+
+  /* CS thread (inside the present closure): the S3 VISUAL CUTOVER source
+   * switch. When the wire is live, the server is not dead, and it has published
+   * a completed frame within the lag budget for `localSerial` in a valid slot
+   * with a nonzero IOSurface id, wraps that IOSurface (unix-cached per
+   * {id,generation}) as a borrowed MtlTexture + full-image view and returns
+   * true — the caller blits THOSE into the drawable instead of the local
+   * backbuffer. Returns false for a per-present fallback to the local
+   * backbuffer (wire disabled, server dead, frame too stale, or lookup
+   * failure); dual execution keeps the local frame always ready. */
+  bool acquireServerFrame(const Rc<MtlDevice>& device, uint64_t localSerial,
+                          Rc<MtlTexture>& outImage, Rc<MtlTextureView>& outView);
 
   /* Any thread. No-op when the resource never got a wire identity. */
   void queueDestroy(uint64_t wireId, uint64_t clientHandle);

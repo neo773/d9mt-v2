@@ -1923,3 +1923,23 @@ WireRing_quiesce(void) {
   uint64_t dummy = 0;
   UNIX_CALL(215, &dummy);
 }
+
+WINEMETAL_API uint32_t
+WireServerFrame_acquire(obj_handle_t device, uint64_t local_serial,
+                        uint64_t lag_frames, struct WMTServerFrame *out) {
+  struct unixcall_wire_server_frame params;
+  memset(&params, 0, sizeof(params));
+  params.device       = device;
+  params.local_serial = local_serial;
+  params.lag_frames   = lag_frames;
+  UNIX_CALL(216, &params);
+  if (!params.out_usable || !out)
+    return 0;
+  out->texture      = params.out_texture;
+  out->frame_serial = params.out_frame_serial;
+  out->width        = params.out_width;
+  out->height       = params.out_height;
+  out->format       = params.out_format;
+  out->slot         = params.out_slot;
+  return 1;
+}

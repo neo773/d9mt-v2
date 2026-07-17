@@ -2635,4 +2635,31 @@ WINEMETAL_API void WireRing_detach(void);
  * AFTER writing the session record. */
 WINEMETAL_API void WireRing_quiesce(void);
 
+/* ---------------------------------------------------------------------------
+ * S3 cutover: present the render server's completed IOSurface frame.
+ *
+ * The server publishes {present_slot, frame_serial (GPU-done), iosurface_id[],
+ * iosurface_serial[] (generation)} in status v2/v3. WireServerFrame_acquire
+ * reads that block and, when the server has a fresh frame for `local_serial`
+ * (within `lag_frames`) in a valid slot with a nonzero IOSurface id, does the
+ * IOSurfaceLookup + newTextureWithDescriptor:iosurface: wrap on the client's
+ * own MTLDevice (cached per {id, generation}) and returns the wrapped
+ * MTLTexture handle in `out`. The client present path then blits THAT into the
+ * drawable instead of its own backbuffer. Returns 1 when `out` is usable, 0
+ * for a per-present fallback to the local backbuffer (no server frame yet, too
+ * stale, bad slot/id, or lookup failure). All IOSurface/Metal work stays on
+ * the unix side; the returned handle is owned by the unix-side cache. */
+struct WMTServerFrame {
+  uint64_t texture;      /* obj_handle_t of the cached IOSurface MTLTexture */
+  uint64_t frame_serial; /* server-published serial of this frame (diag) */
+  uint32_t width;        /* IOSurface width in texels */
+  uint32_t height;       /* IOSurface height in texels */
+  uint32_t format;       /* WMTPixelFormat of the wrapped texture */
+  uint32_t slot;         /* status present_slot this frame came from */
+};
+WINEMETAL_API uint32_t WireServerFrame_acquire(obj_handle_t device,
+                                               uint64_t local_serial,
+                                               uint64_t lag_frames,
+                                               struct WMTServerFrame *out);
+
 #endif

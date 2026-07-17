@@ -84,6 +84,7 @@ clang++ -arch x86_64 -dynamiclib \
   -weak_framework Foundation -weak_framework CoreGraphics \
   -weak_framework QuartzCore -weak_framework ColorSync -weak_framework Cocoa \
   -framework MetalFX \
+  -weak_framework IOSurface \
   -lsqlite3 -lm -lpthread
 echo "  -> $OUT/winemetal.so ($(wc -c < "$OUT/winemetal.so") bytes)"
 

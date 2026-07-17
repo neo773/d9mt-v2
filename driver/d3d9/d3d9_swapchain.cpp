@@ -19,37 +19,30 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <thread>
 #include <chrono>
 
 namespace dxvk {
 
-  // --- Gated backbuffer readback (SOURCE_OF_TRUTH §4b bug 2) ------------------
-  // When the trigger file C:/d9mt-test/DUMP exists, copy the app's rendered
-  // backbuffer into a CPU-readable buffer, synchronously wait for the GPU, and
-  // write a tiny header (u32 width, u32 height) + raw BGRA8 pixels to
-  // C:/d9mt-test/rt_dump.bin. Reliable autonomous verifier (no screencapture).
+  // --- Gated texture readback (SOURCE_OF_TRUTH §4b bug 2 + S3 cutover verify) -
+  // Copy a rendered texture into a CPU-readable buffer, give the GPU a bounded
+  // moment to finish, and write a tiny header (u32 width, u32 height) + raw
+  // BGRA8 pixels to `path`. Reliable autonomous verifier (no screencapture).
   // Runs on the CS thread inside the present lambda, only when triggered.
-  static void DumpBackbufferIfRequested(
+  static void DumpTextureToFile(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
     const Rc<MtlTexture>&      image,
           uint32_t             paramsW,
-          uint32_t             paramsH) {
+          uint32_t             paramsH,
+    const char*                path) {
     if (ctx == nullptr || device == nullptr || image == nullptr)
       return;
 
-    // Trigger check (Windows-side fopen accepts forward-slash C: paths).
-    FILE* trig = std::fopen("C:/d9mt-test/DUMP", "rb");
-    if (trig == nullptr)
-      return;
-    std::fclose(trig);
-    // One-shot: remove the trigger so we dump exactly one frame.
-    std::remove("C:/d9mt-test/DUMP");
-
-    // The backbuffer MtlTexture's extent is not always populated (backend
-    // gap); fall back to the create-info extent, then to the swapchain's
-    // present-params size.
+    // The MtlTexture's extent is not always populated (backend gap); fall back
+    // to the create-info extent, then to the swapchain's present-params size.
     uint32_t w = uint32_t(image->extent.width);
     uint32_t h = uint32_t(image->extent.height);
     if (!w || !h) { w = image->info().extent.width;  h = image->info().extent.height; }
@@ -92,17 +85,96 @@ namespace dxvk {
       return;
     }
 
-    FILE* out = std::fopen("C:/d9mt-test/rt_dump.bin", "wb");
+    FILE* out = std::fopen(path, "wb");
     if (out == nullptr) {
-      Logger::warn("D3D9 dump: could not open rt_dump.bin for write");
+      Logger::warn(str::format("D3D9 dump: could not open ", path, " for write"));
       return;
     }
     std::fwrite(&w, sizeof(uint32_t), 1u, out);
     std::fwrite(&h, sizeof(uint32_t), 1u, out);
     std::fwrite(src, 1u, size_t(imageBytes), out);
     std::fclose(out);
-    Logger::info(str::format("D3D9 dump: wrote rt_dump.bin ", w, "x", h,
+    Logger::info(str::format("D3D9 dump: wrote ", path, " ", w, "x", h,
       " (", imageBytes, " bytes) fmt=", uint32_t(image->format)));
+  }
+
+  // Legacy single-backbuffer verifier: dump the local backbuffer to
+  // C:/d9mt-test/rt_dump.bin when the trigger file C:/d9mt-test/DUMP exists.
+  static void DumpBackbufferIfRequested(
+          MtlContext*          ctx,
+    const Rc<MtlDevice>&       device,
+    const Rc<MtlTexture>&      image,
+          uint32_t             paramsW,
+          uint32_t             paramsH) {
+    FILE* trig = std::fopen("C:/d9mt-test/DUMP", "rb");
+    if (trig == nullptr)
+      return;
+    std::fclose(trig);
+    std::remove("C:/d9mt-test/DUMP");   // one-shot
+    DumpTextureToFile(ctx, device, image, paramsW, paramsH, "C:/d9mt-test/rt_dump.bin");
+  }
+
+  // --- S3 cutover autonomous correctness harness -----------------------------
+  // Replaces human eyes: dump BOTH the local backbuffer AND the server's
+  // IOSurface for the SAME present serial, so scripts/compare_frames.py can
+  // decide PASS/FAIL offline. Gated by env D9MT_CUTOVER_VERIFY=1 AND either the
+  // one-shot trigger file C:/d9mt-test/CUTOVER_DUMP, or an auto every-N-frames
+  // cadence (D9MT_CUTOVER_VERIFY_EVERY, default 600) into a 3-deep file ring.
+  // Both surfaces are the SAME logical frame rendered two ways (client Metal vs
+  // server Metal); a near-match (modulo the documented S3 stubs) proves the
+  // cutover. No-op unless BOTH images are present.
+  static bool CutoverVerifyEnabled() {
+    static const bool s_on = (env::getEnvVar("D9MT_CUTOVER_VERIFY") == "1");
+    return s_on;
+  }
+
+  static void CutoverVerifyDumpPair(
+          MtlContext*          ctx,
+    const Rc<MtlDevice>&       device,
+    const Rc<MtlTexture>&      localImage,
+    const Rc<MtlTexture>&      serverImage,
+          uint32_t             paramsW,
+          uint32_t             paramsH,
+          uint64_t             frameCount) {
+    if (!CutoverVerifyEnabled() || localImage == nullptr || serverImage == nullptr)
+      return;
+
+    // Trigger 1: one-shot trigger file.
+    bool trigger = false;
+    int  ring    = -1;
+    FILE* trig = std::fopen("C:/d9mt-test/CUTOVER_DUMP", "rb");
+    if (trig != nullptr) {
+      std::fclose(trig);
+      std::remove("C:/d9mt-test/CUTOVER_DUMP");
+      trigger = true;
+    }
+
+    // Trigger 2: auto cadence into a 3-deep ring.
+    if (!trigger) {
+      static const uint64_t every = [] {
+        std::string v = env::getEnvVar("D9MT_CUTOVER_VERIFY_EVERY");
+        uint64_t n = v.empty() ? 0u : std::strtoull(v.c_str(), nullptr, 10);
+        return n ? n : 600u;
+      }();
+      if (frameCount != 0u && (frameCount % every) == 0u) {
+        trigger = true;
+        ring    = int((frameCount / every) % 3u);
+      }
+    }
+    if (!trigger)
+      return;
+
+    char localPath[64];
+    char srvPath[64];
+    if (ring < 0) {
+      std::snprintf(localPath, sizeof(localPath), "C:/d9mt-test/rt_dump_local.bin");
+      std::snprintf(srvPath,   sizeof(srvPath),   "C:/d9mt-test/rt_dump_server.bin");
+    } else {
+      std::snprintf(localPath, sizeof(localPath), "C:/d9mt-test/rt_dump_local_%d.bin", ring);
+      std::snprintf(srvPath,   sizeof(srvPath),   "C:/d9mt-test/rt_dump_server_%d.bin", ring);
+    }
+    DumpTextureToFile(ctx, device, localImage,  paramsW, paramsH, localPath);
+    DumpTextureToFile(ctx, device, serverImage, paramsW, paramsH, srvPath);
   }
 
   static uint16_t MapGammaControlPoint(float x) {
@@ -694,6 +766,11 @@ namespace dxvk {
     // Bump frame ID for the acquire below.
     m_wctx->frameId += 1;
 
+    // render-server S3 cutover: capture the present serial on THIS (app) thread
+    // so the CS-thread server-frame pace gate compares against the same counter
+    // the server echoes as status.frame_serial.
+    const uint64_t localSerial = backend::wire::nextPresentSerial();
+
     // The ENTIRE present — drawable acquire, blit, signal, present, release —
     // runs on the CS thread. Acquiring nextDrawable on the producer thread and
     // releasing it on the CS thread let >maximumDrawableCount(3) drawables go
@@ -709,7 +786,8 @@ namespace dxvk {
       cFrameId      = m_wctx->frameId,
       cParamsW      = uint32_t(m_presentParams.BackBufferWidth),
       cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
-      cSignal       = m_wctx->frameLatencySignal
+      cSignal       = m_wctx->frameLatencySignal,
+      cLocalSerial  = localSerial
     ] (MtlContext* ctx) {
       // MSAA backbuffer -> single-sample resolve surface; everything below
       // (dump, copy, blit) consumes the resolved image.
@@ -721,12 +799,35 @@ namespace dxvk {
         ctx->resolveTexture(cResolveImage, cSrcImage, region,
           cSrcImage->info().format, MtlResolveMode::Average, MtlResolveMode::SampleZero);
       }
-      const Rc<MtlTexture>&     cPresentImage = cResolveImage != nullptr ? cResolveImage : cSrcImage;
-      const Rc<MtlTextureView>& cPresentView  = cResolveView  != nullptr ? cResolveView  : cSrcView;
+      const Rc<MtlTexture>&     cLocalImage = cResolveImage != nullptr ? cResolveImage : cSrcImage;
+      const Rc<MtlTextureView>& cLocalView  = cResolveView  != nullptr ? cResolveView  : cSrcView;
 
-      // Gated backbuffer readback (verifier) — before the present copy, on
-      // the fully-rendered app backbuffer. No-op unless the trigger exists.
-      DumpBackbufferIfRequested(ctx, cDevice, cPresentImage, cParamsW, cParamsH);
+      // render-server S3 VISUAL CUTOVER: when the server has published a
+      // completed frame within the pace budget for this present serial, present
+      // ITS IOSurface instead of our locally-rendered backbuffer. Per-present
+      // fallback to the local backbuffer (wire disabled, server dead, frame too
+      // stale, or IOSurface lookup failure) is silent and seamless — dual
+      // execution keeps the local frame always ready. This is the ONLY present-
+      // source change; git revert of this commit restores dual-execution +
+      // unused server frames.
+      Rc<MtlTexture>     cServerImage;
+      Rc<MtlTextureView> cServerView;
+      const bool cUseServer = backend::wire::acquireServerFrame(
+        cDevice, cLocalSerial, cServerImage, cServerView);
+
+      const Rc<MtlTexture>&     cPresentImage = cUseServer ? cServerImage : cLocalImage;
+      const Rc<MtlTextureView>& cPresentView  = cUseServer ? cServerView  : cLocalView;
+
+      // Gated backbuffer readback (legacy verifier) — always on the LOCAL
+      // backbuffer. No-op unless the trigger exists.
+      DumpBackbufferIfRequested(ctx, cDevice, cLocalImage, cParamsW, cParamsH);
+
+      // S3 cutover autonomous correctness: dump the LOCAL backbuffer AND the
+      // server IOSurface for this SAME present serial so the comparator can
+      // decide PASS/FAIL offline (no human eyes). No-op unless gated + a server
+      // frame exists this present.
+      CutoverVerifyDumpPair(ctx, cDevice, cLocalImage, cServerImage,
+        cParamsW, cParamsH, cFrameId);
 
       // Acquire the drawable HERE (CS thread) — one thread owns the whole
       // acquire/present/release cycle.
@@ -740,8 +841,8 @@ namespace dxvk {
         return;
       }
 
-      // Copy the app's rendered back buffer into the acquired drawable
-      // before presenting (D3D9 Present = backbuffer -> front/drawable).
+      // Copy the chosen source (server frame or local back buffer) into the
+      // acquired drawable before presenting (D3D9 Present = source -> drawable).
       if (cPresentView != nullptr && cPresentView->image != nullptr && cDrawable.texture != nullptr) {
         const MtlSize src = cPresentView->image->extent;
         const MtlSize dst = cDrawable.texture->extent;

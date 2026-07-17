@@ -1647,6 +1647,66 @@ namespace dxvk::backend::wire {
     }
   }
 
+  uint64_t nextPresentSerial() {
+    return g_localPresents.load(std::memory_order_relaxed) + 1u;
+  }
+
+  /* S3 cutover pace budget: present the server frame while it is at most this
+   * many presents behind the client. 2 tolerates one in-flight frame plus the
+   * completion-gate latency without ever showing a stale frame; larger values
+   * trade freshness for fewer fallbacks. */
+  static constexpr uint64_t kServerLagFrames = 2u;
+
+  bool acquireServerFrame(const Rc<MtlDevice>& device, uint64_t localSerial,
+                          Rc<MtlTexture>& outImage, Rc<MtlTextureView>& outView) {
+    outImage = nullptr;
+    outView  = nullptr;
+
+    /* Fallback gates paid before any unixcall. */
+    if (!g_wireAttached.load(std::memory_order_acquire))
+      return false;
+    if (g_serverDead.load(std::memory_order_acquire))
+      return false;
+    if (device == nullptr)
+      return false;
+
+    auto* dev = static_cast<MtlDeviceImpl*>(device.ptr());
+    WMTServerFrame f = { };
+    if (!WireServerFrame_acquire(dev->wmtDevice(), localSerial,
+                                 kServerLagFrames, &f))
+      return false;
+    if (f.texture == 0u || f.width == 0u || f.height == 0u)
+      return false;
+
+    const MtlFormat fmt = MtlFormat(f.format);
+
+    /* Borrowed wrap, exactly like the presenter's drawable wrap
+     * (mtl_presenter_impl.cpp): the texture handle is owned by the unix-side
+     * {id,generation} cache, so the image mirror carries NO owned ref (no
+     * teardown at Rc drop); the view retains +1 for the present's lifetime. */
+    Rc<MtlTextureImpl> tex = new MtlTextureImpl();
+    tex->texture.tex        = f.texture;
+    tex->format             = fmt;
+    tex->extent             = { f.width, f.height, 1u };
+    tex->m_info.type        = MtlImageType::e2D;
+    tex->m_info.format      = fmt;
+    tex->m_info.extent      = { f.width, f.height, 1u };
+    tex->m_info.mipLevels   = 1u;
+    tex->m_info.numLayers   = 1u;
+    tex->m_info.sampleCount = 1u;
+    tex->m_info.usage       = MtlTextureUsageRenderTarget;
+
+    Rc<MtlTextureViewImpl> view = new MtlTextureViewImpl();
+    view->owned      = WmtTexture::retain(f.texture);
+    view->view.tex   = f.texture;
+    view->image      = tex.ptr();
+    view->key.format = fmt;
+
+    outImage = tex;
+    outView  = view;
+    return true;
+  }
+
 }
 
 /* --- PROF-line wire stats (declared in mtl_profiler.h) ---------------------
