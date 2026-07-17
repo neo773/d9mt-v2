@@ -1,0 +1,33 @@
+server/test_feed.c
+  s_9dc0f2092159a8::t_e9b3be91d9f4f5 1212-1383
+server/HANDOFF-S3.md
+  s_9dc0f2092159a8::t_d17700d4e365c7 874-968
+server/executor.mm
+  s_9dc0f2092159a8::t_f491a4384c8506 2115-2124,2129-2132,2137-2160
+  s_9dc0f2092159a8::t_8070013a1cec43 996-1006
+  s_9dc0f2092159a8::t_59b01b582d22a9 473-480,483-484
+  s_9dc0f2092159a8::t_73fe1be10802ac 2542
+  s_9dc0f2092159a8::t_18547d7f2dff28 2694-2697,2701-2702,2711-2715
+  s_9dc0f2092159a8::t_c18255277d2ce9 2486-2497
+  s_9dc0f2092159a8::t_6747e376eb972e 3159
+  s_9dc0f2092159a8::t_85b948f27996ac 1171-1181
+  s_9dc0f2092159a8::t_17ad8dd4c77b18 2414-2423
+driver/backend/mtl_device_impl.cpp
+  s_9dc0f2092159a8::t_b56494489be9a9 489-498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "f8af6aa3a47acb520745c4d31411aacaa45d3e66",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
