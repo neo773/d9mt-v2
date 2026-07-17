@@ -17,8 +17,8 @@
  * transport (decode + count + discard).
  *
  * THIS HEADER COMPILES ON BOTH SIDES OF THE BOUNDARY:
- *   - mingw x86_64 C++17 (driver, PE producer)
- *   - clang arm64/x86_64 ObjC/C11 (bridge unix, consumer)
+ *   - mingw i686 C++17 (driver d3d9.dll, the PE producer — 32-bit PE)
+ *   - clang x86_64 ObjC/C11 (bridge unix consumer) and arm64 (d9mt-serverd)
  * ABI rules (NATIVE_BACKEND_PLAN "Invariants"):
  *   - fixed-width integer/float types ONLY; no pointers, no bool, no enums
  *     as struct fields (opcodes/enum values travel as uint16/uint32),

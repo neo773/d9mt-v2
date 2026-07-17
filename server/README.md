@@ -20,9 +20,8 @@ Outputs: `build/server/d9mt-serverd` (arm64), `build/server/test_feed`
 (x86_64 — deliberately, so every test run crosses the same Rosetta<->native
 boundary as the real wine client).
 
-NOT wired into build-driver.sh yet (that file is owned elsewhere). Spec'd
-integration point: invoke build-server.sh at the END of build-driver.sh,
-non-fatal while experimental.
+build-driver.sh tail-calls build-server.sh at its end (non-fatal while
+experimental), so a normal driver build also builds + gates the server.
 
 ## Running standalone against a synthetic ring
 

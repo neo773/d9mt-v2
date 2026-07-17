@@ -18,11 +18,12 @@
 // and drives the actual scan-out through this interface, whose real impl is a
 // CAMetalLayer + drawable present via winemetal.
 //
-// PHASE-D: no CAMetalLayer / winemetal plumbing here — this header defines the
-// contract, and mtl_presenter_stub.cpp is a log-and-return implementation so the
-// swapchain compiles and links against the seam. Contract 3e (frame-latency
-// signalling) is deadlock-class: the real impl must drive the latency signal from
-// the drawable-present completion handler, never stub it live.
+// This header defines the presenter contract. The REAL implementation lives in
+// backend/mtl_presenter_impl.cpp (CAMetalLayer + drawable present via winemetal,
+// the full Metal 4 present handshake); mtl_presenter_stub.cpp is the link-only
+// log-and-return fallback for stub-device builds/tests. Contract 3e (frame-latency
+// signalling) is deadlock-class: the impl drives the latency signal from the
+// drawable-present completion handler, never stubs it live.
 // ---------------------------------------------------------------------------
 
 namespace dxvk {

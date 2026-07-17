@@ -88,7 +88,8 @@
  *    the PsoVertex* structs. NO depth/stencil format (Metal 4 omits it from
  *    the pipeline descriptor), NO tessellation fields.
  *
- * 10. FRAME-DEFERRED PASS ENCODING (D9MT_NO_DEFERRED=1 reverts to immediate).
+ * 10. FRAME-DEFERRED PASS ENCODING (OPT-IN: D9MT_DEFERRED=1; default OFF —
+ *      it serializes CPU/GPU, see deferredPassesEnabled()).
  *    Ported from mtld3d's passes.rs. closePass() no longer ends a live
  *    encoder — it parks a FrameEntry{targets, folded clears, the pass's
  *    CmdChunk} on m_frameEntries; transfers/blits/mini-pass clears park as

@@ -73,6 +73,12 @@ The ONLY path from the PE `d3d9.dll` to Metal is the `winemetal` unixlib
 
 ## 4. Current state (2026-07-11)
 
+> ⚠️ SUPERSEDED — §4/4b/4c below are the 2026-07-11 bring-up snapshot (backend
+> "being replaced", two render bugs, missing barriers). All long since resolved:
+> GTA IV is fully playable, Civ IV runs, the render-server native backend exists.
+> For the CURRENT architecture read `docs/architecture/` (README indexes it) and
+> the `server/HANDOFF-*.md` chain. §4–4c are kept as historical record only.
+
 **DONE and working:**
 - AIR emitter: full SM3 op coverage, differential-tested pixel-identical to
   Apple's own MSL compiler (46/46, `scripts/run-air-diff.sh`). Push data,

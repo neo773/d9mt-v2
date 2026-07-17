@@ -893,10 +893,10 @@ namespace dxvk {
           }
         }
       }
-      // synchronizeWsi: submit the blit, then signalDrawable + present. No
-      // pre-commit waitForDrawable (dxmt omits it; a wait on a drawable the
-      // display never releases blocks the queue timeline forever, so the
-      // completion event after it never fires — the classic wedge).
+      // synchronizeWsi runs the full Metal 4 present handshake: queue
+      // waitForDrawable -> commit -> queue signalDrawable -> drawable present
+      // (mtl_context_record.cpp synchronizeWsi; the pre-commit waitForDrawable
+      // was restored in b610c22 to fix tearing/jitter).
       ctx->synchronizeWsi(cDrawable.sync);
       cPresenter->present(cDrawable);
       Logger::debug("D3D9: frame presented");
