@@ -64,6 +64,10 @@
  *                                          records blitted from the heap
  *   offset 224  u64      heap_consumed     mirror of d9mt_wire_heap.consumed
  *                                          (generation ack; observability)
+ *   offset 232  u64      creates_rejected  v7: create_* records rejected by
+ *                                          the sanity clamps (absurd extent/
+ *                                          mips/layers/format/size); the
+ *                                          wire id dummy-resolves forever
  */
 
 #ifdef __cplusplus
@@ -123,9 +127,10 @@ struct d9mt_status {
   d9mt_status_au64 psos_pending;              /* 208 */
   d9mt_status_au64 uploads_executed;          /* 216 */
   d9mt_status_au64 heap_consumed;             /* 224 */
+  d9mt_status_au64 creates_rejected;          /* 232 (v7) */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 232);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 240);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -147,5 +152,6 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, draws_skipped_pending_pso) == 20
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, psos_pending) == 208);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, uploads_executed) == 216);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heap_consumed) == 224);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, creates_rejected) == 232);
 
 #endif /* D9MT_SERVER_STATUS_H */

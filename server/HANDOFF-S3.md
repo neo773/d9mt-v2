@@ -507,6 +507,72 @@ V6 honest flags:
   ARE retired). If (a) above proves real, the fix is deferring library
   releases to the worker thread itself.
 
+## V7 — create_texture hang: clamps, worker-side creation, reject counter
+
+Run 7 proved the V6 telemetry: `execOp=27` frozen = the consumer stuck
+INSIDE create_texture (op 26), from EARLY boot — no session breadcrumbs at
+all. Retro-correction: V5/V6's "quiesce hang" framing was a timing
+coincidence (device transition == first real texture creates).
+
+**Audit result (honest)**: field-by-field emission vs decode found NO
+transposition — MtlImageCreateInfo maps 1:1 onto the record, MtlImageType
+values (0/1/2) match the server's switch, cube arrayLayers/6 handling
+matches wmtTextureType, and the format marker-bit masking is equivalent
+(`& 0xFFFF` vs `& ~WMTPixelFormatCustomSwizzle`; markers are 0x0010_0000..
+0x0080_0000, base formats < 0x10000). So the poison — if any — is
+value-level, or ENVIRONMENTAL: note that dual-execution DOUBLES texture
+memory, and GTA-scale private allocations server-side can stall
+newTextureWithDescriptor under memory pressure with exactly this signature
+(no crash, no return). The V7 breadcrumb logs a running cumulative-MB
+estimate for precisely this theory.
+
+What landed:
+1. **Sanity clamps on the consumer** (rejectCreate): create_texture with
+   extent > 16384 (depth > 2048), mips > 15, layers > 2048, sampleCount >
+   8, or format outside (0, 640] is REJECTED — counted in the new status
+   field `creates_rejected` (offset 232; WMTWireStats
+   `server_creates_rejected`; PROF `rej=`), first 8 named in the log, and
+   the wire id stays unregistered (dummy-resolves forever). create_buffer
+   > 1 GiB likewise. A rejected create can never hang the consumer.
+2. **Texture + sampler creation moved to the create worker** — the
+   consumer's V4 contract (decode, dispatch, memcpy ONLY) is now fully
+   honored; a wedged newTextureWithDescriptor freezes the WORKER, the
+   heartbeat keeps ticking, and draws referencing the building resource
+   skip/dummy-resolve. Machinery: Resource is registered ready=0 before
+   dispatch (stream-order lookups always resolve); uploads arriving while
+   building STASH their bytes on the Resource (heap region acked at stash);
+   the consumer applies residency + stash drains the first time it OBSERVES
+   ready==1 (observeReady — MTLResidencySet mutation stays consumer-side),
+   with a per-present sweep (sweepAsyncCreates) for never-referenced ones.
+   Binds/RT/clears of building textures dummy-resolve / skip until then.
+3. **Breadcrumb before the Metal call** (worker): first 64 creates + any
+   large one log `wire/fmt/WxHxD/mips/layers/usage/cube (~cum MB)` — the
+   next hang prints the poisoned values AND the memory watermark.
+
+Gate: a poisoned create (2^30 extent, 99 mips) is rejected+counted with
+the consumer provably alive; a 2992x1934 RT + a full-chain 1024^2 texture
+build on the worker, and a mip-4 upload rides the stash-drain path
+(uploads_executed >= 2 asserted); the F4 checkerboard now REBINDS after
+convergence before the pixel read (async creation means the converge wave
+can draw before the stash drains — real games rebind per draw, the gate
+now mirrors that). Everything else (sessions, stale probe, storm, flood,
+watchdog) unchanged and PASSING; build-bridge PASS; full-clean
+build-driver PASS.
+
+V7 honest flags:
+- The GTA hang mechanism is still not reproduced; V7 removes the
+  consumer's exposure to it entirely and instruments the worker. If the
+  next run wedges the WORKER, the log shows the last create_texture
+  breadcrumb (its values + cumulative MB) while the wire keeps running
+  with draws skipping — degraded but ALIVE, and self-naming.
+- A texture bound before its stash drained samples the dummy until the
+  game rebinds it (games rebind per draw; the gate had to as well).
+- Memory-pressure theory unproven: if breadcrumbs show multi-GB cumulative
+  estimates before a wedge, the fix direction is server-side texture
+  memory budgeting (or the cutover making textures single-copy).
+- The 640 format-ceiling clamp is deliberately loose (real MTLPixelFormat
+  max ~600); marker-masked formats pass through as before.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

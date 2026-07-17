@@ -2579,6 +2579,7 @@ struct WMTWireStats {
   uint64_t server_exec_opcode;  /* v6: wire opcode+1 the executor is INSIDE
                                  * right now (0 = between records) — with a
                                  * frozen heartbeat this names a hung handler */
+  uint64_t server_creates_rejected; /* v7: sanity-clamped create_* records */
 };
 
 enum WMTWireAttachMode {

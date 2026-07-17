@@ -210,6 +210,17 @@ struct Resource {
   /* S3: format/subresource views minted for bind_texture_by_id (small; a
    * texture rarely has more than a couple of live view keys). */
   std::vector<std::pair<TexViewKey, id<MTLTexture>>> views;
+  /* S3 v7 (texture creation moved to the worker): consumer-only fields.
+   * Uploads arriving while the texture is still building stash their bytes
+   * here (heap region acked immediately) and drain when the consumer first
+   * observes ready==1; residency is added at the same observation point
+   * (MTLResidencySet mutation stays on the consumer thread). */
+  struct StashedUpload {
+    d9mt_wire_rec_upload_texture rec;
+    std::vector<uint8_t> bytes;
+  };
+  std::vector<StashedUpload> stash;
+  bool residencyAdded = false;
 };
 
 struct PendingShader {
@@ -369,13 +380,21 @@ struct Exec {
   std::mutex creatMutex;
   std::condition_variable creatCv;
   struct CreateJob {
+    enum Kind { KindShaderLib, KindTexture, KindSampler } kind = KindShaderLib;
     std::shared_ptr<Resource> res;
-    std::vector<uint8_t> bytes;
-    d9mt_wire_rec_create_shader meta;
+    std::vector<uint8_t> bytes;                    /* shader metallib */
+    d9mt_wire_rec_create_shader meta;              /* shader */
     std::vector<std::pair<uint8_t, uint8_t>> abWords;
+    d9mt_wire_rec_create_texture tex = {};         /* texture (v7) */
+    d9mt_wire_rec_create_sampler smp = {};         /* sampler (v7) */
   };
   std::deque<CreateJob> creatQueue;
   bool creatStop = false;
+
+  /* S3 v7: worker-built resources awaiting consumer-side observation
+   * (residency add + stash drain). Consumer-only; swept at present and at
+   * every reference point. */
+  std::vector<std::shared_ptr<Resource>> asyncCreates;
 
   /* folded state */
   std::shared_ptr<Shader> vs, fs;
@@ -1233,7 +1252,23 @@ static void registerResource(std::shared_ptr<Resource> res) {
     g->byWire[res->wireId] = res;
 }
 
+/* S3 v7 sanity clamps: a rejected create must NEVER hang the consumer. The
+ * wire_id/handle stays unregistered — every later reference dummy-resolves
+ * (defined), and the reject is counted + named. */
+static bool rejectCreate(const char* what, uint64_t wireId, const char* why) {
+  const uint64_t n = atomic_fetch_add_explicit(&g->status->creates_rejected, 1,
+                                               memory_order_relaxed);
+  if (n < 8)
+    fprintf(stderr, "[serverd] REJECT %s wire=%llu: %s\n", what,
+            (unsigned long long)wireId, why);
+  return true;
+}
+
 static void handleCreateBuffer(const d9mt_wire_rec_create_buffer* r) {
+  if (r->size > (1ull << 30)) { /* > 1 GiB: no D3D9 buffer is this big */
+    rejectCreate("create_buffer", r->wire_id, "size > 1 GiB");
+    return;
+  }
   /* shared + CPU-zeroed: index/vertex fetch from a wire-created buffer must
    * be garbage-free (a private buffer's undefined indices could drive vertex
    * fetch out of bounds — GPU fault class). Content itself is S3. */
@@ -1253,7 +1288,8 @@ static void handleCreateBuffer(const d9mt_wire_rec_create_buffer* r) {
   registerResource(std::move(res));
 }
 
-static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
+/* Descriptor construction from the wire record — pure, worker-callable. */
+static MTLTextureDescriptor* textureDescriptorFor(const d9mt_wire_rec_create_texture* r) {
   MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
   uint32_t layers = r->array_layers ? r->array_layers : 1;
   bool cube = r->cube != 0;
@@ -1285,19 +1321,44 @@ static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
   if (r->usage & (0x20u | 0x40u)) /* MtlUsage::RenderTarget | DepthStencil */
     usage |= MTLTextureUsageRenderTarget;
   td.usage = usage;
+  return td;
+}
 
-  id<MTLTexture> tex = [g->device newTextureWithDescriptor:td];
-  if (!tex) {
-    execError("create_texture failed");
-    return;
-  }
-  residencyAdd(tex);
+/* S3 v7: creation runs on the CREATE WORKER (a poisoned or memory-pressured
+ * newTextureWithDescriptor must never freeze the consumer — GTA boot proved
+ * the 'cheap' assumption wrong, execOp=27). The consumer only clamps,
+ * registers the building Resource (stream-order lookups resolve instantly)
+ * and dispatches. */
+static void handleCreateTexture(const d9mt_wire_rec_create_texture* r) {
+  const uint32_t fmt = r->format & 0xFFFFu;
+  if (r->width > 16384u || r->height > 16384u || r->depth > 2048u)
+    { rejectCreate("create_texture", r->wire_id, "extent > 16384/2048"); return; }
+  if (r->mip_levels > 15u)
+    { rejectCreate("create_texture", r->wire_id, "mips > 15"); return; }
+  if (r->array_layers > 2048u)
+    { rejectCreate("create_texture", r->wire_id, "layers > 2048"); return; }
+  if (fmt == 0u || fmt > 640u) /* MTLPixelFormat range (macOS SDK tops out ~600) */
+    { rejectCreate("create_texture", r->wire_id, "format outside known enum"); return; }
+  if (r->sample_count > 8u)
+    { rejectCreate("create_texture", r->wire_id, "sampleCount > 8"); return; }
+
   auto res = std::make_shared<Resource>();
   res->kind = Resource::KindTexture;
   res->wireId = r->wire_id;
   res->clientHandle = r->client_handle;
-  res->texture = tex;
-  registerResource(std::move(res));
+  res->ready.store(0, std::memory_order_relaxed);
+  registerResource(res);
+  g->asyncCreates.push_back(res);
+
+  Exec::CreateJob job;
+  job.kind = Exec::CreateJob::KindTexture;
+  job.res = std::move(res);
+  job.tex = *r;
+  {
+    std::lock_guard<std::mutex> lock(g->creatMutex);
+    g->creatQueue.push_back(std::move(job));
+  }
+  g->creatCv.notify_one();
 }
 
 /* S3 v2: the create worker. newLibraryWithData takes milliseconds per
@@ -1319,32 +1380,97 @@ static void createWorkerMain() {
       g->creatQueue.pop_front();
     }
     @autoreleasepool {
-      dispatch_data_t data = dispatch_data_create(
-          job.bytes.data(), job.bytes.size(), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-      NSError* err = nil;
-      id<MTLLibrary> lib = [g->device newLibraryWithData:data error:&err];
-      if (!lib) {
-        job.res->ready.store(2, std::memory_order_release);
-        atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
-        static std::atomic<bool> warned = { false };
-        bool expected = false;
-        if (warned.compare_exchange_strong(expected, true))
-          fprintf(stderr, "[serverd] first newLibraryWithData failure: %s\n",
-                  err ? err.localizedDescription.UTF8String : "(no error)");
-        continue;
+      switch (job.kind) {
+      case Exec::CreateJob::KindShaderLib: {
+        dispatch_data_t data = dispatch_data_create(
+            job.bytes.data(), job.bytes.size(), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        NSError* err = nil;
+        id<MTLLibrary> lib = [g->device newLibraryWithData:data error:&err];
+        if (!lib) {
+          job.res->ready.store(2, std::memory_order_release);
+          atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
+          static std::atomic<bool> warned = { false };
+          bool expected = false;
+          if (warned.compare_exchange_strong(expected, true))
+            fprintf(stderr, "[serverd] first newLibraryWithData failure: %s\n",
+                    err ? err.localizedDescription.UTF8String : "(no error)");
+          break;
+        }
+        auto sh = std::make_shared<Shader>();
+        sh->library = lib;
+        char entry[33] = {};
+        std::memcpy(entry, job.meta.entry, 32);
+        sh->entry = entry[0] ? entry : "main";
+        sh->stage = job.meta.stage;
+        sh->ab = job.meta.ab != 0;
+        std::memcpy(sh->cbvMap, job.meta.cbv_slot_map, 8);
+        sh->abTableIndex = job.meta.ab_table_index ? job.meta.ab_table_index : 21u;
+        sh->abWords = std::move(job.abWords);
+        job.res->shader = std::move(sh);
+        job.res->ready.store(1, std::memory_order_release);
+        break;
       }
-      auto sh = std::make_shared<Shader>();
-      sh->library = lib;
-      char entry[33] = {};
-      std::memcpy(entry, job.meta.entry, 32);
-      sh->entry = entry[0] ? entry : "main";
-      sh->stage = job.meta.stage;
-      sh->ab = job.meta.ab != 0;
-      std::memcpy(sh->cbvMap, job.meta.cbv_slot_map, 8);
-      sh->abTableIndex = job.meta.ab_table_index ? job.meta.ab_table_index : 21u;
-      sh->abWords = std::move(job.abWords);
-      job.res->shader = std::move(sh);
-      job.res->ready.store(1, std::memory_order_release);
+      case Exec::CreateJob::KindTexture: {
+        /* v7 breadcrumb BEFORE the Metal call: the values a hang leaves in
+         * the log ARE the poisoned values. First 64 creates + anything big,
+         * plus a running memory estimate (dual-execution doubles texture
+         * memory — pressure is a hang candidate of its own). */
+        static std::atomic<uint64_t> count = { 0 };
+        static std::atomic<uint64_t> bytesEst = { 0 };
+        const d9mt_wire_rec_create_texture& t = job.tex;
+        const uint64_t n = count.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t est = (uint64_t)(t.width ? t.width : 1) *
+                             (t.height ? t.height : 1) * (t.depth ? t.depth : 1) *
+                             (t.array_layers ? t.array_layers : 1) * 4u;
+        const uint64_t cum = bytesEst.fetch_add(est, std::memory_order_relaxed) + est;
+        if (n < 64 || t.width >= 4096 || t.height >= 4096 || t.array_layers > 6)
+          fprintf(stderr, "[serverd] create_texture #%llu wire=%llu fmt=%u "
+                          "%ux%ux%u mips=%u layers=%u smp=%u usage=0x%x cube=%u "
+                          "(~%llu MB cum)\n",
+                  (unsigned long long)n, (unsigned long long)t.wire_id,
+                  t.format & 0xFFFFu, t.width, t.height, t.depth, t.mip_levels,
+                  t.array_layers, t.sample_count, t.usage, t.cube,
+                  (unsigned long long)(cum >> 20));
+        id<MTLTexture> tex = [g->device newTextureWithDescriptor:textureDescriptorFor(&t)];
+        if (!tex) {
+          job.res->ready.store(2, std::memory_order_release);
+          atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
+          fprintf(stderr, "[serverd] create_texture wire=%llu FAILED (nil)\n",
+                  (unsigned long long)t.wire_id);
+          break;
+        }
+        job.res->texture = tex;
+        job.res->ready.store(1, std::memory_order_release);
+        break;
+      }
+      case Exec::CreateJob::KindSampler: {
+        const d9mt_wire_rec_create_sampler& r = job.smp;
+        MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+        sd.minFilter = (MTLSamplerMinMagFilter)r.min_filter;
+        sd.magFilter = (MTLSamplerMinMagFilter)r.mag_filter;
+        sd.mipFilter = (MTLSamplerMipFilter)r.mip_mode;
+        sd.sAddressMode = (MTLSamplerAddressMode)r.address_u;
+        sd.tAddressMode = (MTLSamplerAddressMode)r.address_v;
+        sd.rAddressMode = (MTLSamplerAddressMode)r.address_w;
+        sd.borderColor = (MTLSamplerBorderColor)r.border_color;
+        sd.compareFunction = r.compare_enable ? (MTLCompareFunction)r.compare_op
+                                              : MTLCompareFunctionNever;
+        sd.lodMinClamp = r.min_lod;
+        sd.lodMaxClamp = r.max_lod;
+        sd.maxAnisotropy = r.max_anisotropy ? r.max_anisotropy : 1;
+        sd.normalizedCoordinates = YES;
+        sd.supportArgumentBuffers = YES;
+        id<MTLSamplerState> smp = [g->device newSamplerStateWithDescriptor:sd];
+        if (!smp) {
+          job.res->ready.store(2, std::memory_order_release);
+          atomic_fetch_add_explicit(&g->status->exec_errors, 1, memory_order_relaxed);
+          break;
+        }
+        job.res->sampler = smp;
+        job.res->ready.store(1, std::memory_order_release);
+        break;
+      }
+      }
     }
   }
 }
@@ -1395,32 +1521,25 @@ static void handleCreateShader(const d9mt_wire_rec_create_shader* r) {
 }
 
 static void handleCreateSampler(const d9mt_wire_rec_create_sampler* r) {
-  MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
-  sd.minFilter = (MTLSamplerMinMagFilter)r->min_filter;
-  sd.magFilter = (MTLSamplerMinMagFilter)r->mag_filter;
-  sd.mipFilter = (MTLSamplerMipFilter)r->mip_mode;
-  sd.sAddressMode = (MTLSamplerAddressMode)r->address_u;
-  sd.tAddressMode = (MTLSamplerAddressMode)r->address_v;
-  sd.rAddressMode = (MTLSamplerAddressMode)r->address_w;
-  sd.borderColor = (MTLSamplerBorderColor)r->border_color;
-  sd.compareFunction = r->compare_enable ? (MTLCompareFunction)r->compare_op
-                                         : MTLCompareFunctionNever;
-  sd.lodMinClamp = r->min_lod;
-  sd.lodMaxClamp = r->max_lod;
-  sd.maxAnisotropy = r->max_anisotropy ? r->max_anisotropy : 1;
-  sd.normalizedCoordinates = YES;
-  sd.supportArgumentBuffers = YES;
-  id<MTLSamplerState> smp = [g->device newSamplerStateWithDescriptor:sd];
-  if (!smp) {
-    execError("create_sampler failed");
-    return;
-  }
+  /* S3 v7: sampler creation also runs on the worker (consumer stays
+   * Metal-free: decode, dispatch, memcpy only). A building sampler binds
+   * as nil -> dummy until ready; D3D9 games rebind per draw. */
   auto res = std::make_shared<Resource>();
   res->kind = Resource::KindSampler;
   res->wireId = r->wire_id;
   res->clientHandle = r->client_handle;
-  res->sampler = smp;
-  registerResource(std::move(res));
+  res->ready.store(0, std::memory_order_relaxed);
+  registerResource(res);
+
+  Exec::CreateJob job;
+  job.kind = Exec::CreateJob::KindSampler;
+  job.res = std::move(res);
+  job.smp = *r;
+  {
+    std::lock_guard<std::mutex> lock(g->creatMutex);
+    g->creatQueue.push_back(std::move(job));
+  }
+  g->creatCv.notify_one();
 }
 
 static void handleDestroy(const d9mt_wire_rec_destroy_resource* r) {
@@ -1438,10 +1557,55 @@ static void handleDestroy(const d9mt_wire_rec_destroy_resource* r) {
   for (auto& v : res->views)
     if (v.second)
       g->retireNoRes.emplace_back(retireAfter, v.second);
+  res->stash.clear();
   if (res->clientHandle)
     g->byHandle.erase(res->clientHandle);
   if (res->wireId)
     g->byWire.erase(res->wireId);
+}
+
+/* --- S3 v7: async-create observation (consumer thread only) -------------------
+ * The worker publishes {texture/sampler, ready}; the consumer applies its own
+ * bookkeeping — residency (MTLResidencySet mutation stays single-threaded)
+ * and stashed uploads — the first time it OBSERVES ready==1. Returns true
+ * only when the resource is ready and observed. */
+
+static void drainStash(const std::shared_ptr<Resource>& res);
+
+static bool observeReady(const std::shared_ptr<Resource>& res) {
+  const uint32_t state = res->ready.load(std::memory_order_acquire);
+  if (state != 1)
+    return false;
+  if (res->kind == Resource::KindTexture && res->texture && !res->residencyAdded) {
+    residencyAdd(res->texture);
+    res->residencyAdded = true;
+  }
+  if (!res->stash.empty())
+    drainStash(res);
+  return true;
+}
+
+/* Sweep point (once per present): resources built since the last sweep get
+ * residency + stash drains even if nothing referenced them yet. */
+static void sweepAsyncCreates() {
+  size_t w = 0;
+  for (size_t i = 0; i < g->asyncCreates.size(); i++) {
+    std::shared_ptr<Resource>& res = g->asyncCreates[i];
+    const uint32_t state = res->ready.load(std::memory_order_acquire);
+    if (state == 0) {
+      g->asyncCreates[w++] = std::move(res); /* still building — keep */
+      continue;
+    }
+    /* destroyed before it finished building? drop without bookkeeping */
+    const bool live =
+        (res->clientHandle && lookupHandle(res->clientHandle) == res) ||
+        (res->wireId && lookupWire(res->wireId) == res);
+    if (live && state == 1)
+      observeReady(res);
+    else
+      res->stash.clear();
+  }
+  g->asyncCreates.resize(w);
 }
 
 /* --- S3: shared-heap content uploads + real texture binds --------------------- */
@@ -1489,15 +1653,10 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
   atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
 }
 
-static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
-  auto res = r->client_handle ? lookupHandle(r->client_handle) : lookupWire(r->wire_id);
-  if (!res || !res->texture)
-    return;
-  const uint8_t* src = heapRegion(r->heap_offset, r->data_size);
-  if (!src) {
-    execError("upload_texture: bad heap region");
-    return;
-  }
+/* Encode one texture-content blit from CPU bytes (heap region or stash). */
+static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
+                                const d9mt_wire_rec_upload_texture* r,
+                                const uint8_t* src) {
   id<MTLTexture> tex = res->texture;
   if (r->mip >= tex.mipmapLevelCount || r->layer >= tex.arrayLength * (tex.textureType == MTLTextureTypeCube || tex.textureType == MTLTextureTypeCubeArray ? 6 : 1)) {
     execError("upload_texture: subresource out of range");
@@ -1512,7 +1671,6 @@ static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
     return;
   }
   std::memcpy(rs.cpu, src, (size_t)r->data_size);
-  heapAck(r->heap_generation);
   MTLSize sz = MTLSizeMake(r->width ? r->width : 1, r->height ? r->height : 1,
                            r->depth ? r->depth : 1);
   MTLOrigin origin = MTLOriginMake(r->x, r->y, r->z);
@@ -1527,6 +1685,43 @@ static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
     destinationOrigin:origin];
   res->hasContent = true;
   atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
+}
+
+static void drainStash(const std::shared_ptr<Resource>& res) {
+  for (auto& s : res->stash)
+    encodeTextureUpload(res, &s.rec, s.bytes.data());
+  res->stash.clear();
+  res->stash.shrink_to_fit();
+}
+
+static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
+  auto res = r->client_handle ? lookupHandle(r->client_handle) : lookupWire(r->wire_id);
+  if (!res)
+    return;
+  const uint8_t* src = heapRegion(r->heap_offset, r->data_size);
+  if (!src) {
+    execError("upload_texture: bad heap region");
+    return;
+  }
+  const uint32_t state = res->ready.load(std::memory_order_acquire);
+  if (state == 0) {
+    /* v7: texture still building on the worker — STASH the bytes (the heap
+     * region is acked immediately; the blit encodes when the consumer first
+     * observes readiness). Order within the stash is stream order. */
+    Resource::StashedUpload s;
+    s.rec = *r;
+    s.bytes.assign(src, src + r->data_size);
+    res->stash.push_back(std::move(s));
+    heapAck(r->heap_generation);
+    return;
+  }
+  if (state != 1 || !res->texture) {
+    heapAck(r->heap_generation);
+    return; /* failed create: content dropped, resource dummy-resolves */
+  }
+  observeReady(res); /* residency + any earlier stash first (stream order) */
+  encodeTextureUpload(res, r, src); /* memcpys the region into the slab... */
+  heapAck(r->heap_generation);      /* ...ack only after the bytes are taken */
 }
 
 /* Resolve the bound view: the base texture when the key is trivial, else a
@@ -1582,8 +1777,9 @@ static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
   if (r->image_wire_id) {
     auto res = lookupWire(r->image_wire_id);
     /* content gate: a wire texture with no uploads and no server-side render
-     * has UNDEFINED private storage — the dummy stays (defined sampling). */
-    if (res && res->texture && res->hasContent)
+     * has UNDEFINED private storage — the dummy stays (defined sampling).
+     * v7: a still-building texture also stays dummy (rebound next draw). */
+    if (res && observeReady(res) && res->texture && res->hasContent)
       tex = resolveTexView(res, r);
   }
   for (uint32_t st = 0; st < 2; st++) {
@@ -1636,7 +1832,7 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
       return;
     }
     auto res = lookupWire(ref.image_wire_id);
-    if (res && res->texture) {
+    if (res && observeReady(res) && res->texture) {
       out.tex = res->texture;
       res->hasContent = true; /* server-side render defines the storage */
     }
@@ -1694,8 +1890,8 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
     target.backbuffer = true;
   } else {
     auto res = lookupWire(r->image_wire_id);
-    if (!res || !res->texture)
-      return; /* unresolvable clear target — drop silently (S2 subset) */
+    if (!res || !observeReady(res) || !res->texture)
+      return; /* unresolvable/building clear target — drop silently */
     target.tex = res->texture;
     target.format = res->texture.pixelFormat;
     target.named = true;
@@ -1828,6 +2024,9 @@ static void handleSession(const d9mt_wire_rec_session* r) {
   g->byHandle.clear();
   g->byWire.clear();
   g->pendingShaders.clear(); /* in-flight create jobs finish into orphans */
+  for (auto& res : g->asyncCreates)
+    res->stash.clear();
+  g->asyncCreates.clear();
   fprintf(stderr, "[serverd] session %s: psocache-drop...\n", what);
 
   for (auto& kv : g->psoCache)
@@ -1854,6 +2053,9 @@ static void handleSession(const d9mt_wire_rec_session* r) {
 }
 
 static void handlePresent(const d9mt_wire_rec_present_frame* r) {
+  /* v7: drain worker-built resources (residency + stashed content) into
+   * THIS frame before it closes */
+  sweepAsyncCreates();
   const uint32_t slot = g->presentSlot;
   submitFrame();
   g->backbufferWireId = r->backbuffer_wire_id;
@@ -2349,7 +2551,9 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       for (uint32_t st = 0; st < 2; st++) {
         if (r->stages & (1u << st) && r->slot < kMaxTexSlots) {
           auto res = r->sampler ? lookupHandle(r->sampler) : nullptr;
-          g->stages[st].samplers[r->slot] = res ? res->sampler : nil;
+          g->stages[st].samplers[r->slot] =
+              res && res->ready.load(std::memory_order_acquire) == 1
+                  ? res->sampler : nil;
         }
       }
       g->dirtyBindings = true;

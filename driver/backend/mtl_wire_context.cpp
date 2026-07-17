@@ -1668,7 +1668,8 @@ namespace dxvk::backend::prof {
       " psoSkip=", s.server_skipped_pso - prev.server_skipped_pso,
       " upl=", s.server_uploads - prev.server_uploads,
       " heapDrop=", s.heap_dropped,
-      " execOp=", s.server_exec_opcode);
+      " execOp=", s.server_exec_opcode,
+      " rej=", s.server_creates_rejected);
     prev = s;
   }
 

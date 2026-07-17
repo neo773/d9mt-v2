@@ -6854,6 +6854,8 @@ _WireRing_stats(void *obj) {
           atomic_load_explicit(&wire_status->uploads_executed, memory_order_relaxed);
       out->server_exec_opcode =
           atomic_load_explicit(&wire_status->exec_opcode, memory_order_relaxed);
+      out->server_creates_rejected =
+          atomic_load_explicit(&wire_status->creates_rejected, memory_order_relaxed);
     }
   }
   if (wire_heap) {

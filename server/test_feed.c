@@ -507,6 +507,77 @@ main(int argc, char **argv) {
            (int)pid);
   }
 
+  /* --- S3 v7: poisoned + large-but-legal creates. A poisoned create must
+   * be REJECTED + COUNTED with the consumer alive (the GTA hang was inside
+   * the create_texture handler, execOp=27); big legal creates execute on
+   * the create worker. --- */
+  {
+    struct d9mt_wire_rec_create_texture pt;
+    memset(&pt, 0, sizeof(pt));
+    pt.hdr.opcode = d9mt_wire_op_create_texture;
+    pt.hdr.size = sizeof(pt);
+    pt.wire_id = 999;
+    pt.client_handle = 0xBAD1;
+    pt.type = 1;
+    pt.format = 80;
+    pt.width = 1u << 30; /* absurd extent — the clamp must reject */
+    pt.height = 1u << 30;
+    pt.depth = 1;
+    pt.mip_levels = 99;
+    pt.array_layers = 1;
+    pt.sample_count = 1;
+    emit(&pt, sizeof(pt));
+
+    struct d9mt_wire_rec_create_texture bigrt = pt; /* 2992x1934 RT — legal */
+    bigrt.wire_id = 780;
+    bigrt.client_handle = 0xB780;
+    bigrt.width = 2992;
+    bigrt.height = 1934;
+    bigrt.mip_levels = 1;
+    bigrt.usage = 0x20; /* RenderTarget */
+    emit(&bigrt, sizeof(bigrt));
+
+    struct d9mt_wire_rec_create_texture mipped = pt; /* 1024^2, full chain */
+    mipped.wire_id = 781;
+    mipped.client_handle = 0xB781;
+    mipped.width = 1024;
+    mipped.height = 1024;
+    mipped.mip_levels = 11;
+    mipped.usage = 0;
+    emit(&mipped, sizeof(mipped));
+
+    static uint8_t mip4[64 * 64 * 4];
+    memset(mip4, 0x5A, sizeof(mip4));
+    struct d9mt_wire_rec_upload_texture u4;
+    memset(&u4, 0, sizeof(u4));
+    u4.hdr.opcode = d9mt_wire_op_upload_texture;
+    u4.hdr.size = sizeof(u4);
+    u4.wire_id = 781;
+    u4.client_handle = 0xB781;
+    u4.mip = 4; /* 1024 >> 4 == 64 */
+    u4.width = 64;
+    u4.height = 64;
+    u4.depth = 1;
+    u4.row_pitch = 64 * 4;
+    u4.format = 80;
+    uint64_t g4 = 0;
+    u4.heap_offset = heap_put(mip4, sizeof(mip4), &g4);
+    u4.heap_generation = g4;
+    u4.data_size = sizeof(mip4);
+    emit(&u4, sizeof(u4));
+
+    if (wait_u64(&status->creates_rejected, 1, 5000))
+      FAIL("poisoned create_texture not rejected (creates_rejected=%" PRIu64 ")",
+           (uint64_t)atomic_load_explicit(&status->creates_rejected, memory_order_relaxed));
+    if (wait_u64(&status->progress, g_head, 5000))
+      FAIL("consumer stalled after poisoned create (the execOp=27 hang shape)");
+    if (atomic_load_explicit(&status->creates_rejected, memory_order_relaxed) != 1)
+      FAIL("creates_rejected=%" PRIu64 " want exactly 1 (legal creates rejected?)",
+           (uint64_t)atomic_load_explicit(&status->creates_rejected, memory_order_relaxed));
+    printf("[test_feed] v7: poisoned create rejected+counted, consumer alive; "
+           "2992x1934 RT + 1024^2 mipped queued to the worker\n");
+  }
+
   const char *libpath = argc >= 3 ? argv[2] : NULL;
   uint8_t *lib = NULL;
   size_t lib_size = 0;
@@ -676,8 +747,24 @@ main(int argc, char **argv) {
     /* converge the textured quad (library build wave + PSO wave + draw) */
     if (draw_wave_converge(status, &frame, 0xA003, 1, 30) < 0)
       FAIL("textured draw never landed");
-    if (atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) < 1)
-      FAIL("uploads_executed=0 (heap upload never executed)");
+    /* checker (200) + the v7 mip-4 upload (781) both drained by now */
+    if (wait_u64(&status->uploads_executed, 2, 15000))
+      FAIL("uploads_executed=%" PRIu64 " want >=2 (stash drain broken)",
+           (uint64_t)atomic_load_explicit(&status->uploads_executed, memory_order_relaxed));
+
+    /* v7: creation is async (worker) — the converge wave may have drawn
+     * before the content stash drained, with the bind resolved to the
+     * dummy. Rebind (as real games do per draw) + one more frame, THEN
+     * read pixels. */
+    emit(&bt, sizeof(bt));
+    struct d9mt_wire_rec_bind_texture_by_id bti2 = bti;
+    emit(&bti2, sizeof(bti2));
+    emit_backbuffer_rt();
+    emit_clear(0.f, 0.f, 0.f);
+    emit_draws(1);
+    emit_present(++frame);
+    if (wait_u64(&status->frames, frame, 15000))
+      FAIL("timeout waiting for frames>=%" PRIu64 " (F4 rebind)", frame);
 
     slot = atomic_load_explicit(&status->present_slot, memory_order_acquire);
     surf = IOSurfaceLookup(ids[slot]);
