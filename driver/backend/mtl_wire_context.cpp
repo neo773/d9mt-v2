@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "mtl_context_impl.h" /* MtlBackendQuery — the occlusion stub pokes it */
 #include "mtl_device_impl.h"
 #include "mtl_wire_emit.h"
 
@@ -157,10 +158,26 @@ namespace dxvk::backend {
      * resolves); counted per attempt for the PROF `inel=` field. */
     std::atomic<uint64_t> g_wireIneligible = { 0u };
 
-    /* S3 v9: copy/blit-family records skipped because a side was wire-
-     * ineligible (pseudo-resource — e.g. the present copy's drawable dst).
-     * PROF `copySkip=`. */
+    /* S3 v9, re-scoped by the ALL-IN cutover: content ops that could NOT be
+     * serialized because a side was wire-ineligible (pseudo-resource). Those
+     * ops now execute LOCALLY instead (the present copy's drawable dst is the
+     * steady per-frame source) — for eligible resources a skip here is a
+     * server-side content gap. PROF `copySkip=`. */
     std::atomic<uint64_t> g_copySkips = { 0u };
+
+    /* ALL-IN honest stubs (server/HANDOFF-ALLIN.md):
+     *  - occlusion queries answer "all samples passed" immediately — the
+     *    draws they would count execute on the SERVER and no visibility
+     *    transport exists yet (the next slice; GTA-gate blocker). PROF
+     *    `qStub=` counts stubbed queries; the value below is what GetData
+     *    reports as samplesPassed (nonzero = "visible" for every D3D9
+     *    consumer of the boolean interpretation).
+     *  - copyTextureToBuffer readbacks whose SOURCE is a server-rendered RT
+     *    read client-side pixels that no longer exist; counted in PROF
+     *    `rbStale=` and the first few named. */
+    constexpr uint64_t    kQueryStubSamplesPassed = 1u << 20;
+    std::atomic<uint64_t> g_queryStubs    = { 0u };
+    std::atomic<uint64_t> g_readbackStale = { 0u };
 
     /* Consolidation C1 instrument (docs/RENDER_SERVER_SPEC + HANDOFF-
      * CONSOLIDATION.md): the migration to server-only may only remove the
@@ -1829,6 +1846,22 @@ namespace dxvk::backend {
   void MtlWireContext::copyTextureToBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize off, MtlDeviceSize rowAlign,
                                            MtlDeviceSize sliceAlign, MtlFormat format, const Rc<MtlTexture>& src,
                                            MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) {
+    /* KEPT forward: the readback executor. The dump harness reads the wrapped
+     * server IOSurface through this (ineligible src — real pixels), and
+     * non-rendered textures still carry valid upload-mirrored content.
+     * ALL-IN honesty: a wire-ELIGIBLE render-target source was rendered on
+     * the SERVER — the local pixels no longer exist, so this readback
+     * returns stale/zero content. Counted (PROF rbStale=) + first few named;
+     * readback transport is the next slice (HANDOFF-ALLIN debt). */
+    if (wired() && src != nullptr && src->wireEligible &&
+        (src->info().usage & MtlTextureUsageRenderTarget)) {
+      const uint64_t n = g_readbackStale.fetch_add(1u, std::memory_order_relaxed);
+      if (n < 8u)
+        Logger::warn(str::format("wire readback STALE: copyTextureToBuffer of "
+          "server-rendered RT (", extent.width, "x", extent.height,
+          " fmt=", uint32_t(format != MtlFormat::Invalid ? format : src->format),
+          ") — client pixels are not rendered anymore, content is stale/zero"));
+    }
     m_inner->copyTextureToBuffer(dst, off, rowAlign, sliceAlign, format, src, srcSub, srcOff, extent);
   }
 
@@ -2071,10 +2104,30 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::beginQuery(const Rc<MtlQuery>& query) {
+    /* ALL-IN occlusion stub: the draws this query would count execute on the
+     * SERVER; the local visibility buffer would only ever read 0 (everything
+     * occluded — the worst possible lie). No forward; endQuery below answers
+     * "all samples passed" immediately. Full query transport is the NEXT
+     * slice (HANDOFF-ALLIN debt — the GTA gate blocker). */
+    if (query != nullptr && query->type == MtlQueryType::Occlusion)
+      return;
     m_inner->beginQuery(query);
   }
 
   void MtlWireContext::endQuery(const Rc<MtlQuery>& query) {
+    if (query != nullptr && query->type == MtlQueryType::Occlusion) {
+      /* Complete the query instantly with the documented all-passed stub:
+       * no tracker/serial (getData never reports Pending) and visCpu pointed
+       * at the constant sample count. Counted in PROF as qStub=. */
+      auto* q = static_cast<MtlBackendQuery*>(query.ptr());
+      q->tracker    = nullptr;
+      q->serial     = 0u;
+      q->visBuffer  = 0u;
+      q->visCpu     = const_cast<uint64_t*>(&kQueryStubSamplesPassed);
+      q->slotOffset = 0u;
+      g_queryStubs.fetch_add(1u, std::memory_order_relaxed);
+      return;
+    }
     m_inner->endQuery(query);
   }
 
@@ -2296,7 +2349,8 @@ namespace dxvk::backend::prof {
       " rej=", s.server_creates_rejected,
       " inel=", g_wireIneligible.load(std::memory_order_relaxed),
       " copySkip=", g_copySkips.load(std::memory_order_relaxed),
-      " fbHealthy=", g_fallbackWhileHealthy.load(std::memory_order_relaxed));
+      " qStub=", g_queryStubs.load(std::memory_order_relaxed),
+      " rbStale=", g_readbackStale.load(std::memory_order_relaxed));
     prev = s;
   }
 
