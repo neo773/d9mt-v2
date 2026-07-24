@@ -1,4 +1,5 @@
 #include "mtl_context_impl.h"
+#include "mtl_wire_emit.h" /* wire::queryPoll — wire-backed occlusion results */
 #include "../util/util_bit.h"
 #include "../util/util_string.h"
 
@@ -67,6 +68,19 @@ namespace dxvk::backend {
   // --- query / event result surface (subclasses declared in the header) ------
 
   MtlGpuQueryStatus MtlBackendQuery::getData(MtlQueryData& out) {
+    /* Wire-backed occlusion (HANDOFF-QUERIES.md): the counted draws ran on
+     * the SERVER; poll the shared result ring. Pending until the server's
+     * GPU-completion-gated publication lands (D3D9 GetData -> S_FALSE, the
+     * async-poll contract — NEVER block here). */
+    if (type == MtlQueryType::Occlusion && wireQueryId != 0u) {
+      uint64_t samples = 0u;
+      if (!backend::wire::queryPoll(wireQueryId, wireSession, &samples))
+        return MtlGpuQueryStatus::Pending;
+      out = MtlQueryData{};
+      out.occlusion.samplesPassed = samples;
+      return MtlGpuQueryStatus::Available;
+    }
+
     if (tracker && serial && !tracker->isComplete(serial))
       return MtlGpuQueryStatus::Pending;
 

@@ -214,7 +214,15 @@ enum d9mt_wire_op {
   d9mt_wire_op_generate_mipmaps = 41,
   d9mt_wire_op_clear_image_view = 42,
 
-  d9mt_wire_op_count = 43
+  /* --- Occlusion-query transport (HANDOFF-QUERIES.md). begin/end bracket
+   * the draws they count IN STREAM ORDER (they ride the same ring as the
+   * draws). query_id is a client-assigned monotonic u64 (process-lifetime,
+   * NEVER reset per session — result-slot reuse detection depends on ids
+   * never repeating). Results return via the d9mt_wire_query_ring below. */
+  d9mt_wire_op_begin_query = 43,
+  d9mt_wire_op_end_query = 44,
+
+  d9mt_wire_op_count = 45
 };
 
 /* --- record header -------------------------------------------------------
@@ -872,5 +880,78 @@ struct d9mt_wire_rec_clear_image_view {
   struct d9mt_wire_clear_value value;
 };
 D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_image_view) == 80);
+
+/* --- occlusion-query records (opcodes 43/44) ------------------------------ */
+
+/* begin_query / end_query: one shape for both ops. */
+struct d9mt_wire_rec_query {
+  struct d9mt_wire_rec_hdr hdr;
+  uint64_t query_id;
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_query) == 16);
+
+/* ---------------------------------------------------------------------------
+ * Occlusion-query RESULT ring (server -> client, HANDOFF-QUERIES.md).
+ *
+ * Lives INSIDE the `heap` shared file, in the reserved gap between the
+ * d9mt_wire_heap control block (192 B) and the page-aligned data area
+ * (D9MT_WIRE_HEAP_DATA_OFFSET = 16 KiB), at fixed byte offset
+ * D9MT_WIRE_QUERY_RING_OFFSET. Both sides already map this file
+ * (client: PE-direct pointer; server: executor heap mapping) — the return
+ * path costs ZERO new transport plumbing and the client's GetData poll is
+ * two atomic loads.
+ *
+ * Direct-mapped by id: a query's result lives ONLY in slot
+ * (query_id & (D9MT_WIRE_QUERY_SLOTS - 1)). Ids are monotonic, so a slot's
+ * occupant id strictly increases by whole ring multiples; the client reads:
+ *   got == id  -> result (samples validated by the double-read below)
+ *   got >  id  -> result was EVICTED by a newer query (client resolves
+ *                 all-passed, counted; capacity is the tradeoff knob)
+ *   otherwise  -> still pending (D3D9 GetData answers S_FALSE)
+ *
+ * Slot write protocol (single logical writer — the server, under its query
+ * mutex): store id = 0 (release), store samples/serial (relaxed), store
+ * id = query_id (release). Reader: load id (acquire); on match load
+ * samples/serial (relaxed) then RE-load id (acquire) — any concurrent
+ * overwrite passes through id == 0, so a stable matching id brackets a
+ * consistent payload.
+ *
+ * PUBLICATION IS GPU-COMPLETION-GATED SERVER-SIDE: a result is written only
+ * once the submission serial covering the query's LAST visibility slot has
+ * signaled on the queue timeline — `serial` records it (client sanity:
+ * serial <= status.completed_serial always holds at observation time).
+ *
+ * The server zeroes the whole ring ONCE at executor boot (before the magic
+ * release-store). NEVER on session boundaries: ids stay monotonic across
+ * sessions, and the client resolves old-session queries itself (session
+ * mismatch -> all-passed, counted). */
+
+#define D9MT_WIRE_QUERY_RING_MAGIC 0x30315251544D3944ull /* "D9MTQR10" LE */
+#define D9MT_WIRE_QUERY_RING_OFFSET 512u
+#define D9MT_WIRE_QUERY_SLOTS 512u
+
+struct d9mt_wire_query_slot {
+  d9mt_wire_au64 id;      /* seqlock word: 0 = mid-write / never written */
+  d9mt_wire_au64 samples; /* samples passed (summed across pass splits) */
+  d9mt_wire_au64 serial;  /* server submission serial the result completed under */
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_query_slot) == 24);
+
+struct d9mt_wire_query_ring {
+  d9mt_wire_au64 magic;    /* release-stored LAST at server boot; a client
+                            * finding no magic (pre-query server) resolves
+                            * queries all-passed, counted */
+  uint64_t capacity;       /* D9MT_WIRE_QUERY_SLOTS (written before magic) */
+  d9mt_wire_au64 published; /* results ever published (diagnostics) */
+  d9mt_wire_au64 dropped;   /* overflow/orphan all-passed publications */
+  uint64_t _pad0[4];
+  struct d9mt_wire_query_slot slots[D9MT_WIRE_QUERY_SLOTS];
+};
+D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_query_ring) ==
+                 64 + 24 * D9MT_WIRE_QUERY_SLOTS);
+D9MT_WIRE_ASSERT(D9MT_WIRE_QUERY_RING_OFFSET >= sizeof(struct d9mt_wire_heap));
+D9MT_WIRE_ASSERT(D9MT_WIRE_QUERY_RING_OFFSET +
+                 sizeof(struct d9mt_wire_query_ring) <=
+                 D9MT_WIRE_HEAP_DATA_OFFSET);
 
 #endif /* D9MT_MTL_WIRE_H */

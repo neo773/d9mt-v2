@@ -603,6 +603,35 @@ struct Exec {
   std::vector<d9mt_wire_rec_copy_texture> pendingCopies;
   std::vector<d9mt_wire_rec_clear_image_view> pendingImgClears;
   std::vector<d9mt_wire_rec_generate_mipmaps> pendingMipgens;
+
+  /* --- occlusion-query transport (HANDOFF-QUERIES.md) ----------------------
+   * begin/end records bracket draws in stream order; each encoder segment
+   * inside a bracket gets its own visibility slot (Metal counters are
+   * per-encoder — a pass split mid-query would otherwise lose or clobber
+   * counts), summed on the CPU at publication. Results publish into the
+   * shared d9mt_wire_query_ring (inside the heap file) ONLY once the
+   * covering submission serial has signaled — never an early lie. */
+  id<MTLBuffer> visBuf = nil;      /* kVisSlots x u64, shared storage */
+  uint64_t* visCpu = nullptr;      /* visBuf.contents (stable) */
+  struct d9mt_wire_query_ring* qring = nullptr; /* heap + fixed offset */
+  uint64_t qCursor = 0;            /* consumer-only free-running slot alloc */
+  uint64_t qRetired = 0;           /* under queryMu: slots whose results published */
+  struct QActive {
+    bool on = false;
+    bool overflow = false;         /* slot pool exhausted: end -> all-passed */
+    uint64_t qid = 0;
+    std::vector<uint32_t> slots;
+  } qActive;                       /* consumer-thread only */
+  struct QPending {
+    uint64_t qid = 0;              /* 0 = slot-retire only (session drain) */
+    uint64_t serial = 0;           /* submission covering the LAST slot */
+    std::vector<uint32_t> slots;
+  };
+  std::deque<QPending> qPending;   /* under queryMu (consumer + watchdog) */
+  std::mutex queryMu;
+  /* diagnostics (finish summary) */
+  uint64_t qBegun = 0, qPublished = 0, qNested = 0, qOrphan = 0,
+           qOverflow = 0, qSessionEnd = 0;
 };
 
 Exec* g = nullptr;
@@ -636,6 +665,149 @@ static void residencyCommitIfDirty() {
     [g->residency commit];
     g->residencyDirty = false;
   }
+}
+
+/* --- occlusion queries (HANDOFF-QUERIES.md) --------------------------------
+ * Port of the client's OLD local implementation semantics
+ * (mtl_context_transfer.cpp beginQuery/endQuery: per-context visibility
+ * buffer, one 8-byte counter slot per bracket, CPU-zeroed at allocation,
+ * counting mode armed on the live encoder), upgraded for pass splits: one
+ * slot PER ENCODER SEGMENT, summed at publication (Metal visibility
+ * counters are per-encoder). */
+
+constexpr uint32_t kVisSlots = 8192u;          /* 64 KiB visibility buffer */
+constexpr uint64_t kQueryAllPassed = 1u << 20; /* mirror of the client stub */
+
+/* caller holds g->queryMu */
+static void publishQueryLocked(uint64_t qid, uint64_t samples, uint64_t serial,
+                               bool dropped) {
+  if (!g->qring)
+    return;
+  auto* slot = &g->qring->slots[qid & (D9MT_WIRE_QUERY_SLOTS - 1u)];
+  /* seqlock-lite (mtl_wire.h contract): pass through id = 0 so a reader
+   * can never pair a stale id with a torn payload. */
+  atomic_store_explicit(&slot->id, 0, memory_order_release);
+  atomic_store_explicit(&slot->samples, samples, memory_order_relaxed);
+  atomic_store_explicit(&slot->serial, serial, memory_order_relaxed);
+  atomic_store_explicit(&slot->id, qid, memory_order_release);
+  atomic_fetch_add_explicit(&g->qring->published, 1, memory_order_relaxed);
+  if (dropped)
+    atomic_fetch_add_explicit(&g->qring->dropped, 1, memory_order_relaxed);
+  g->qPublished++;
+}
+
+/* Publish every pending bracket whose covering submission COMPLETED (the
+ * no-early-lies gate: completedSerial is the queue-timeline signal). Runs on
+ * the consumer (begin/end/present) AND on the watchdog tick — a game may
+ * stop emitting records entirely while it polls GetData; the watchdog is
+ * the guaranteed publisher (10 ms worst-case latency). */
+static void sweepQueries() {
+  std::lock_guard<std::mutex> lk(g->queryMu);
+  const uint64_t done = completedSerial();
+  while (!g->qPending.empty() && g->qPending.front().serial <= done) {
+    Exec::QPending& p = g->qPending.front();
+    if (p.qid) {
+      uint64_t sum = 0;
+      if (g->visCpu)
+        for (uint32_t s : p.slots)
+          sum += g->visCpu[s];
+      publishQueryLocked(p.qid, sum, p.serial, false);
+    }
+    g->qRetired += p.slots.size();
+    g->qPending.pop_front();
+  }
+}
+
+/* Allocate + arm a visibility slot on the LIVE encoder. Called at begin
+ * (pass already open) and from materializePass for every later encoder
+ * segment the bracket spans. */
+static void armQuerySlot() {
+  if (!g->qActive.on || g->qActive.overflow || !g->pass.active)
+    return;
+  if (!g->visCpu) {
+    /* no visibility buffer (alloc failed at boot) — a bracket without
+     * counters must resolve all-passed, never a 0-sum "occluded" lie */
+    g->qActive.overflow = true;
+    g->qOverflow++;
+    return;
+  }
+  uint64_t retired;
+  {
+    std::lock_guard<std::mutex> lk(g->queryMu);
+    retired = g->qRetired;
+  }
+  if (g->qCursor - retired >= kVisSlots) {
+    /* pool exhausted (kVisSlots un-published segments in flight) — the
+     * bracket resolves all-passed at end, never a stale counter readback */
+    g->qActive.overflow = true;
+    g->qOverflow++;
+    return;
+  }
+  const uint32_t slot = (uint32_t)(g->qCursor++ % kVisSlots);
+  g->visCpu[slot] = 0u; /* retired => no in-flight GPU writer; a segment
+                         * with zero draws must sum as 0 */
+  [g->pass.encoder setVisibilityResultMode:MTLVisibilityResultModeCounting
+                                    offset:(NSUInteger)slot * 8u];
+  g->qActive.slots.push_back(slot);
+}
+
+/* Close the active bracket into the pending queue; publication happens at
+ * GPU completion (sweepQueries). */
+static void endActiveQuery() {
+  if (!g->qActive.on)
+    return;
+  if (g->pass.active && !g->qActive.overflow && !g->qActive.slots.empty())
+    [g->pass.encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled
+                                      offset:0];
+  {
+    std::lock_guard<std::mutex> lk(g->queryMu);
+    if (g->qActive.overflow) {
+      publishQueryLocked(g->qActive.qid, kQueryAllPassed, completedSerial(),
+                         true);
+      g->qRetired += g->qActive.slots.size();
+    } else {
+      Exec::QPending p;
+      p.qid = g->qActive.qid;
+      /* serial covering the LAST slot: the still-recording cmdbuf if one is
+       * open, else everything already submitted. Earlier segments live in
+       * smaller serials — waiting for the max is sufficient. */
+      p.serial = g->cmdbuf ? g->serial : g->lastSubmitted;
+      p.slots = std::move(g->qActive.slots);
+      g->qPending.push_back(std::move(p));
+    }
+  }
+  g->qActive = {};
+}
+
+static void handleBeginQuery(const d9mt_wire_rec_query* r) {
+  sweepQueries();
+  if (g->qActive.on) {
+    /* D3D9 occlusion queries cannot nest; a second begin force-ends the
+     * previous bracket so the stream stays sane (counted). */
+    g->qNested++;
+    endActiveQuery();
+  }
+  g->qActive.on = true;
+  g->qActive.overflow = false;
+  g->qActive.qid = r->query_id;
+  g->qActive.slots.clear();
+  g->qBegun++;
+  if (g->pass.active)
+    armQuerySlot();
+}
+
+static void handleEndQuery(const d9mt_wire_rec_query* r) {
+  if (!g->qActive.on || g->qActive.qid != r->query_id) {
+    /* orphan end (protocol anomaly, e.g. bracket split across a session
+     * reset): resolve all-passed — never falsely occlude on a transport
+     * artifact. */
+    g->qOrphan++;
+    std::lock_guard<std::mutex> lk(g->queryMu);
+    publishQueryLocked(r->query_id, kQueryAllPassed, completedSerial(), true);
+    return;
+  }
+  endActiveQuery();
+  sweepQueries(); /* zero-work brackets (serial already complete) publish now */
 }
 
 /* --- frame / submission spine (decision 5 port) ----------------------------- */
@@ -969,6 +1141,10 @@ static void materializePass() {
     }
   }
 
+  /* occlusion transport: every pass can carry visibility counters (port of
+   * the client's pass-creation binding, mtl_context_record.cpp). */
+  desc.visibilityResultBuffer = g->visBuf;
+
   g->pass.encoder = [g->cmdbuf renderCommandEncoderWithDescriptor:desc];
   if (!g->pass.encoder) {
     execError("renderCommandEncoder failed");
@@ -982,6 +1158,11 @@ static void materializePass() {
   g->argTablesBound = false;
   g->lastPso = nil;
   g->dynValid = false;
+
+  /* a bracket spanning this pass split continues counting into a FRESH
+   * slot on the new encoder (segments summed at publication) */
+  if (g->qActive.on)
+    armQuerySlot();
 }
 
 static void closePass() {
@@ -1751,6 +1932,12 @@ static void watchdogMain() {
   while (!g->watchdogStop.load(std::memory_order_acquire)) {
     usleep(10000); /* 10 ms — the ~100 Hz heartbeat cadence */
     atomic_fetch_add_explicit(&g->status->heartbeat, 1, memory_order_relaxed);
+    /* occlusion results: the guaranteed publisher. A game may stop sending
+     * records entirely while it spins on GetData — completion-gated
+     * publication must not depend on the consumer loop cycling. Touches
+     * only the queryMu-guarded state + the shared-event value (both
+     * thread-safe); worst-case poll-to-publish latency is one tick. */
+    sweepQueries();
     if (++tick < 100)
       continue; /* diagnostics below stay on their 1 s cadence */
     tick = 0;
@@ -3248,6 +3435,16 @@ static void handleSession(const d9mt_wire_rec_session* r) {
   fprintf(stderr, "[serverd] session %s: retire (serial=%llu)...\n", what,
           (unsigned long long)after);
 
+  /* occlusion state: an in-flight bracket can never be answered for the new
+   * session (the client resolves it all-passed by session mismatch), but
+   * its slots must still retire on GPU completion — convert it to a normal
+   * pending (publication is harmless: ids are process-monotonic, never
+   * reused). qPending entries publish/retire normally. */
+  if (g->qActive.on) {
+    g->qSessionEnd++;
+    endActiveQuery(); /* pass closed above -> serial = `after` */
+  }
+
   auto retireRes = [&](const std::shared_ptr<Resource>& res) {
     if (res->buffer)
       g->retire.emplace_back(after, res->buffer);
@@ -3362,6 +3559,7 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
    * THIS frame before it closes; v9: retry blits whose PSO just landed */
   sweepAsyncCreates();
   drainPendingBlits();
+  sweepQueries(); /* publish brackets whose submissions completed by now */
   const uint32_t slot = g->presentSlot;
 
   /* Persistent-backbuffer publish copy: the frame's rendering lives in the
@@ -3871,6 +4069,38 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
   for (int i = 0; i < D9MT_SERVER_SURFACES; i++)
     residencyAdd(d9mt_pool_texture(i));
 
+  /* occlusion-query transport: visibility buffer (GPU-written counters,
+   * CPU-read at publication) + the shared result ring inside the heap file
+   * (mtl_wire.h d9mt_wire_query_ring). The ring is zeroed ONCE here, before
+   * the magic release-store — never on session boundaries (ids are
+   * client-process-monotonic; a fresh server process means a fresh client
+   * process, so stale file content can never alias a live id). */
+  g->visBuf = [g->device newBufferWithLength:(kVisSlots * 8u)
+      options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
+  if (g->visBuf) {
+    g->visCpu = (uint64_t*)g->visBuf.contents;
+    std::memset(g->visCpu, 0, kVisSlots * 8u);
+    residencyAdd(g->visBuf);
+  } else {
+    fprintf(stderr, "[serverd] visibility buffer alloc failed — occlusion "
+                    "queries resolve all-passed\n");
+  }
+  if (g->heap) {
+    auto* qr = (struct d9mt_wire_query_ring*)((uint8_t*)g->heap +
+                                              D9MT_WIRE_QUERY_RING_OFFSET);
+    for (uint32_t i = 0; i < D9MT_WIRE_QUERY_SLOTS; i++) {
+      atomic_store_explicit(&qr->slots[i].id, 0, memory_order_relaxed);
+      atomic_store_explicit(&qr->slots[i].samples, 0, memory_order_relaxed);
+      atomic_store_explicit(&qr->slots[i].serial, 0, memory_order_relaxed);
+    }
+    atomic_store_explicit(&qr->published, 0, memory_order_relaxed);
+    atomic_store_explicit(&qr->dropped, 0, memory_order_relaxed);
+    qr->capacity = D9MT_WIRE_QUERY_SLOTS;
+    atomic_store_explicit(&qr->magic, D9MT_WIRE_QUERY_RING_MAGIC,
+                          memory_order_release);
+    g->qring = qr;
+  }
+
   g->argTables.push_back(makeArgTablePair());
 
   /* S3 v2: the create worker (QoS declared inside — main.m discipline) */
@@ -3958,6 +4188,14 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       break;
     case d9mt_wire_op_clear_image_view:
       handleClearImageView((const d9mt_wire_rec_clear_image_view*)hdr);
+      break;
+
+    /* --- occlusion-query transport (HANDOFF-QUERIES.md) --- */
+    case d9mt_wire_op_begin_query:
+      handleBeginQuery((const d9mt_wire_rec_query*)hdr);
+      break;
+    case d9mt_wire_op_end_query:
+      handleEndQuery((const d9mt_wire_rec_query*)hdr);
       break;
 
     /* --- hot-loop state (folded) --- */
@@ -4202,8 +4440,19 @@ d9mt_executor_finish(void) {
   submitFrame();
   if (g->lastSubmitted && !waitSerial(g->lastSubmitted, 2000))
     fprintf(stderr, "[serverd] finish: GPU drain timed out\n");
+  if (g->qActive.on)
+    endActiveQuery();
+  sweepQueries(); /* final publication after the drain */
   atomic_store_explicit(&g->status->completed_serial, completedSerial(),
                         memory_order_relaxed);
+  if (g->qBegun)
+    fprintf(stderr,
+            "[serverd] queries: begun=%llu published=%llu nested=%llu "
+            "orphan=%llu overflow=%llu sessEnd=%llu\n",
+            (unsigned long long)g->qBegun, (unsigned long long)g->qPublished,
+            (unsigned long long)g->qNested, (unsigned long long)g->qOrphan,
+            (unsigned long long)g->qOverflow,
+            (unsigned long long)g->qSessionEnd);
   fprintf(stderr,
           "[serverd] executor: frames=%llu encoders=%llu draws=%llu skipped=%llu "
           "psos=%llu errors=%llu\n",

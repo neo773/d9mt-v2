@@ -83,4 +83,17 @@ namespace dxvk::backend::wire {
   void timelineCommitDone();                       /* t7: synchronizeWsi returned (blit encoded + committed + presented) */
   void timelinePresentEnd();                       /* t8: presenter->present returned; may flush the window */
 
+  /* Any thread (D3D9Query::GetData path — MtlBackendQuery::getData in
+   * mtl_context_transfer.cpp). Polls the shared occlusion result ring
+   * (mtl_wire.h d9mt_wire_query_ring, HANDOFF-QUERIES.md) for the query
+   * emitted under {queryId, session}. NEVER blocks (D3D9 queries are
+   * async-poll BY DESIGN — the game expects S_FALSE while pending):
+   *   false -> pending (result not GPU-complete server-side yet)
+   *   true  -> *samplesOut is the answer. Session bounces, wire death,
+   *            ring eviction and pre-query servers all resolve here as
+   *            all-passed with their own PROF counters (qSess=/qEvict=) —
+   *            a game is NEVER wedged waiting on a result that cannot
+   *            arrive. */
+  bool queryPoll(uint64_t queryId, uint32_t session, uint64_t* samplesOut);
+
 }

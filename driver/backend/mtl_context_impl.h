@@ -174,6 +174,15 @@ namespace dxvk::backend {
     uint64_t     serial      = 0u;    /* submission the query completes under */
     SubmissionTracker* tracker = nullptr;
 
+    /* Wire occlusion transport (mtl_wire_context.cpp / HANDOFF-QUERIES.md):
+     * nonzero wireQueryId = the query's draws execute on the SERVER and
+     * getData polls the shared result ring (backend::wire::queryPoll)
+     * instead of the local fields above. wireSession pins the wire session
+     * the bracket was emitted under — a session bounce resolves the query
+     * all-passed (the server reset; the result will never publish). */
+    uint64_t     wireQueryId = 0u;
+    uint32_t     wireSession = 0u;
+
     MtlGpuQueryStatus getData(MtlQueryData& out) override;
   };
 

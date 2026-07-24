@@ -77,6 +77,7 @@ static uint64_t g_producer_waits; /* ring-full episodes (gate: must stay 0) */
 static struct d9mt_wire_heap *g_heap;
 static uint8_t *g_heap_data;
 static uint64_t g_heap_head;
+static struct d9mt_wire_query_ring *g_qring; /* occlusion results (in heap file) */
 
 /* Producer-side space wait, mirroring the production unix-side wait
  * (unixcall 217 WMTWireWaitSpace): register in ring->space_waiters
@@ -318,6 +319,49 @@ emit_session(uint32_t kind, uint32_t sess) {
   emit(&sr, sizeof(sr));
 }
 
+/* --- occlusion-query transport (HANDOFF-QUERIES.md) ----------------------- */
+
+static void
+emit_query(uint16_t op, uint64_t qid) {
+  struct d9mt_wire_rec_query q = {{op, sizeof(q), 0}, qid};
+  emit(&q, sizeof(q));
+}
+
+/* Client-protocol poll of the shared result ring (mtl_wire.h):
+ * 1 = available (*samples/*serial filled), 0 = pending, -1 = evicted. */
+static int
+query_poll(uint64_t qid, uint64_t *samples, uint64_t *serial) {
+  struct d9mt_wire_query_slot *slot =
+      &g_qring->slots[qid & (D9MT_WIRE_QUERY_SLOTS - 1u)];
+  uint64_t got = atomic_load_explicit(&slot->id, memory_order_acquire);
+  if (got == qid) {
+    uint64_t s = atomic_load_explicit(&slot->samples, memory_order_relaxed);
+    uint64_t ser = atomic_load_explicit(&slot->serial, memory_order_relaxed);
+    if (atomic_load_explicit(&slot->id, memory_order_acquire) == qid) {
+      *samples = s;
+      *serial = ser;
+      return 1;
+    }
+    return 0;
+  }
+  return got > qid ? -1 : 0;
+}
+
+/* Bounded availability wait (the D3D9 GetData poll loop, test edition).
+ * Returns 0 on available, nonzero on timeout/eviction. */
+static int
+query_wait(uint64_t qid, uint64_t *samples, uint64_t *serial, int timeout_ms) {
+  for (int i = 0; i < timeout_ms; i++) {
+    int rc = query_poll(qid, samples, serial);
+    if (rc == 1)
+      return 0;
+    if (rc < 0)
+      return 2;
+    usleep(1000);
+  }
+  return 1;
+}
+
 static void
 emit_upload_tex(uint64_t wire_id, uint64_t handle, uint32_t w, uint32_t h,
                 const void *bytes, uint64_t size, uint32_t row_pitch) {
@@ -481,6 +525,8 @@ main(int argc, char **argv) {
   struct d9mt_status *status = status_mem;
   g_heap = heap_mem;
   g_heap_data = (uint8_t *)heap_mem + D9MT_WIRE_HEAP_DATA_OFFSET;
+  g_qring = (struct d9mt_wire_query_ring *)((uint8_t *)heap_mem +
+                                            D9MT_WIRE_QUERY_RING_OFFSET);
 
   g_ring->capacity = RING_CAP;
   g_ring->data_offset = sizeof(struct d9mt_wire_ring);
@@ -1206,6 +1252,137 @@ main(int argc, char **argv) {
       emit(&fvp, sizeof(fvp));
       printf("[test_feed] persistent-backbuffer contract: 3 incremental "
              "quadrants all present in the third published surface\n");
+    }
+
+    /* --- OCCLUSION-QUERY TRANSPORT GATES (HANDOFF-QUERIES.md) -------------
+     * vsMain/fsMain are still bound (fullscreen red triangle), the full
+     * 640x480 viewport was just restored, no depth attachment — a draw's
+     * samplesPassed equals its rasterized pixel count. Results arrive via
+     * the shared d9mt_wire_query_ring inside the heap file; publication is
+     * GPU-completion-gated server-side. */
+    {
+      if (atomic_load_explicit(&g_qring->magic, memory_order_acquire) !=
+          D9MT_WIRE_QUERY_RING_MAGIC)
+        FAIL("query gate: result-ring magic missing (server never "
+             "initialized the heap-file query ring)");
+
+      uint64_t samples = 0, qserial = 0;
+
+      /* (a1) empty bracket -> exactly 0 samples: a query that counted
+       * nothing must answer 0, not the all-passed stub */
+      emit_backbuffer_rt();
+      emit_query(d9mt_wire_op_begin_query, 9001);
+      emit_query(d9mt_wire_op_end_query, 9001);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("query gate: frame (a1) never presented");
+      if (query_wait(9001, &samples, &qserial, 5000))
+        FAIL("query gate: empty-bracket result never published");
+      if (samples != 0)
+        FAIL("query gate: empty bracket counted %llu samples (want 0)",
+             (unsigned long long)samples);
+
+      /* (a2) draw scissored to 1x1 -> exactly 1 sample: the counter follows
+       * raster state (a scissored-out draw contributes nothing) */
+      {
+        struct {
+          struct d9mt_wire_rec_set_viewports rec;
+          struct d9mt_wire_viewport vp;
+        } svp = {{{d9mt_wire_op_set_viewports, sizeof(svp), 0}, 1, 0},
+                 {0.f, 0.f, 640.f, 480.f, 0.f, 1.f, 5, 5, 1, 1}};
+        emit(&svp, sizeof(svp));
+      }
+      emit_query(d9mt_wire_op_begin_query, 9002);
+      emit_draws(1);
+      emit_query(d9mt_wire_op_end_query, 9002);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("query gate: frame (a2) never presented");
+      if (query_wait(9002, &samples, &qserial, 5000))
+        FAIL("query gate: 1x1-scissor result never published");
+      if (samples != 1)
+        FAIL("query gate: 1x1-scissor draw counted %llu samples (want 1)",
+             (unsigned long long)samples);
+      { /* restore full scissor */
+        struct {
+          struct d9mt_wire_rec_set_viewports rec;
+          struct d9mt_wire_viewport vp;
+        } rvp = {{{d9mt_wire_op_set_viewports, sizeof(rvp), 0}, 1, 0},
+                 {0.f, 0.f, 640.f, 480.f, 0.f, 1.f, 0, 0, 0, 0}};
+        emit(&rvp, sizeof(rvp));
+      }
+
+      /* (a3) fullscreen draw -> samples == the exact pixel area */
+      emit_query(d9mt_wire_op_begin_query, 9003);
+      emit_draws(1);
+      emit_query(d9mt_wire_op_end_query, 9003);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("query gate: frame (a3) never presented");
+      if (query_wait(9003, &samples, &qserial, 5000))
+        FAIL("query gate: fullscreen result never published");
+      if (samples != 640ull * 480ull)
+        FAIL("query gate: fullscreen draw counted %llu samples (want %llu)",
+             (unsigned long long)samples, 640ull * 480ull);
+
+      /* (b) bracket spanning a PASS SPLIT: draw, rebind the same target
+       * (closes the pass; the second draw materializes a fresh encoder),
+       * draw again — the two per-encoder segments must SUM: 2x the area */
+      emit_query(d9mt_wire_op_begin_query, 9004);
+      emit_draws(1);
+      emit_backbuffer_rt(); /* pass split mid-bracket */
+      emit_draws(1);
+      emit_query(d9mt_wire_op_end_query, 9004);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("query gate: frame (b) never presented");
+      if (query_wait(9004, &samples, &qserial, 5000))
+        FAIL("query gate: pass-split result never published");
+      if (samples != 2ull * 640ull * 480ull)
+        FAIL("query gate: pass-split bracket counted %llu samples (want %llu "
+             "= 2 fullscreen segments summed)",
+             (unsigned long long)samples, 2ull * 640ull * 480ull);
+
+      /* (c) NO EARLY LIES: a bracket recorded into a NEVER-SUBMITTED frame
+       * must stay pending (the result requires the covering submission's
+       * completion signal); it publishes only after the present submits,
+       * with a serial the completion counter has actually reached */
+      emit_query(d9mt_wire_op_begin_query, 9005);
+      emit_draws(1);
+      emit_query(d9mt_wire_op_end_query, 9005);
+      usleep(300000); /* watchdog sweeps every 10 ms — plenty of chances to lie */
+      if (query_poll(9005, &samples, &qserial) != 0)
+        FAIL("query gate: result published BEFORE its submission was even "
+             "committed (early lie)");
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("query gate: frame (c) never presented");
+      if (query_wait(9005, &samples, &qserial, 5000))
+        FAIL("query gate: post-submit result never published");
+      if (samples != 640ull * 480ull)
+        FAIL("query gate: gated result counted %llu samples (want %llu)",
+             (unsigned long long)samples, 640ull * 480ull);
+      /* the status completed_serial mirror updates on the frame-publication
+       * path — poll briefly (the RESULT was gated on the event itself; this
+       * only validates the published serial names a real submission) */
+      uint64_t completed = 0;
+      for (int i = 0; i < 2000; i++) {
+        completed = atomic_load_explicit(&status->completed_serial,
+                                         memory_order_acquire);
+        if (qserial != 0 && completed >= qserial)
+          break;
+        usleep(1000);
+      }
+      if (qserial == 0 || qserial > completed)
+        FAIL("query gate: published serial %llu never became GPU-complete "
+             "(completed_serial=%llu)",
+             (unsigned long long)qserial, (unsigned long long)completed);
+
+      printf("[test_feed] occlusion-query transport: empty=0, scissor1x1=1, "
+             "fullscreen=307200, pass-split=614400 (segments summed), "
+             "completion-gated (pending pre-submit; serial %llu <= "
+             "completed %llu)\n",
+             (unsigned long long)qserial, (unsigned long long)completed);
     }
 
     /* --- v11 MINIMAL CUBE: the reproducer's failure shape. Wire vertex

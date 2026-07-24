@@ -215,6 +215,32 @@ namespace dxvk::backend {
     std::atomic<uint64_t> g_queryStubs    = { 0u };
     std::atomic<uint64_t> g_readbackStale = { 0u };
 
+    /* Occlusion-query transport (HANDOFF-QUERIES.md). qStub= above now only
+     * counts brackets that could NOT ride the wire (no consumer / emission
+     * failure) — with a live server it must sit at ~0. PROF fields:
+     *  - qWire=  occlusion brackets serialized (begin+end emitted);
+     *  - qEvict= results overwritten in the shared ring before the game
+     *            polled them (> D9MT_WIRE_QUERY_SLOTS newer results landed
+     *            first) — resolved all-passed, never wedged;
+     *  - qSess=  polls resolved all-passed because the result can no longer
+     *            arrive: wire session bounced under the query, the wire
+     *            died/disabled, or the server predates the result ring. */
+    std::atomic<uint64_t> g_queryWire    = { 0u };
+    std::atomic<uint64_t> g_queryEvicted = { 0u };
+    std::atomic<uint64_t> g_querySessLoss = { 0u };
+
+    /* Monotonic occlusion-query ids (process-lifetime, NEVER per-session:
+     * result-slot reuse detection needs ids that never repeat). 0 = "not
+     * wire-backed"; ids start at 1. */
+    std::atomic<uint64_t> g_nextQueryId = { 1u };
+
+    /* App-thread-readable mirrors for queryPoll (getData runs OFF the CS
+     * thread; g_wt fields are CS-owned). Session mirrors g_wt.session at
+     * its single ++ site; wire-down latches true at every
+     * `g_wt.active = false` site (process-permanent, like the original). */
+    std::atomic<uint32_t> g_wireSessionMirror = { 0u };
+    std::atomic<bool>     g_wireDown = { false };
+
     /* V18 texture-content no-drop guarantee (the world-texture black fix).
      * Every client path that makes texture content GPU-visible must ship
      * the same bytes — or COUNT + NAME itself. PROF fields:
@@ -360,6 +386,7 @@ namespace dxvk::backend {
    * acks with an epoch bump; our records stream after it in ring order. */
   bool MtlWireContext::connectWire() {
     g_wt.session++;
+    g_wireSessionMirror.store(g_wt.session, std::memory_order_release);
     if (!g_wt.active) {
       Logger::warn(str::format("MtlWireContext: transport permanently disabled — "
         "session #", g_wt.session, " forwards only"));
@@ -383,6 +410,7 @@ namespace dxvk::backend {
           "(hb=", a.heartbeat, ") — disabling wire transport"));
         g_serverDead.store(true, std::memory_order_release);
         g_wt.active = false;
+        g_wireDown.store(true, std::memory_order_release);
         return false;
       }
     }
@@ -570,6 +598,7 @@ namespace dxvk::backend {
       g_wt.ring->stalls.fetch_add(1u, std::memory_order_relaxed);
       Logger::warn("MtlWireContext: ring full with no consumer, disabling wire transport");
       g_wt.active = false;
+      g_wireDown.store(true, std::memory_order_release);
       return false;
     }
     WireRing_kick();
@@ -612,6 +641,7 @@ namespace dxvk::backend {
             "heartbeat (hb=", hbEnd.heartbeat,
             ") — server dead, disabling wire transport"));
           g_wt.active = false;
+          g_wireDown.store(true, std::memory_order_release);
           return false;
         }
       }
@@ -628,6 +658,7 @@ namespace dxvk::backend {
       WireStallWindows, " consecutive windows (~", WireStallWindows,
       "s), disabling wire transport"));
     g_wt.active = false;
+    g_wireDown.store(true, std::memory_order_release);
     return false;
   }
 
@@ -677,6 +708,7 @@ namespace dxvk::backend {
     if (g_wt.hasConsumer && g_serverDead.load(std::memory_order_acquire)) {
       Logger::err("MtlWireContext: server dead (heartbeat frozen >3s with unconsumed backlog) — disabling wire transport");
       g_wt.active = false;
+      g_wireDown.store(true, std::memory_order_release);
       return nullptr;
     }
 
@@ -2413,28 +2445,60 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::beginQuery(const Rc<MtlQuery>& query) {
-    /* ALL-IN occlusion stub: the draws this query would count execute on the
-     * SERVER; the local visibility buffer would only ever read 0 (everything
-     * occluded — the worst possible lie). No forward; endQuery below answers
-     * "all samples passed" immediately. Full query transport is the NEXT
-     * slice (HANDOFF-ALLIN debt — the GTA gate blocker). */
-    if (query != nullptr && query->type == MtlQueryType::Occlusion)
+    /* Occlusion transport (HANDOFF-QUERIES.md): the counted draws execute
+     * on the SERVER, so the bracket rides the ring IN STREAM ORDER around
+     * them. No local forward — the local visibility buffer would only ever
+     * read 0 (everything occluded, the worst possible lie). A failed
+     * emission (no consumer / dead wire) leaves wireQueryId == 0 and
+     * endQuery falls back to the documented all-passed stub (qStub=). */
+    if (query != nullptr && query->type == MtlQueryType::Occlusion) {
+      auto* q = static_cast<MtlBackendQuery*>(query.ptr());
+      q->tracker     = nullptr;
+      q->serial      = 0u;
+      q->visBuffer   = 0u;
+      q->visCpu      = nullptr;
+      q->slotOffset  = 0u;
+      q->wireQueryId = 0u;
+      if (g_wt.heap != nullptr) {
+        if (auto* r = beginRecord<d9mt_wire_rec_query>(d9mt_wire_op_begin_query)) {
+          const uint64_t id = g_nextQueryId.fetch_add(1u, std::memory_order_relaxed);
+          r->query_id = id;
+          endRecord();
+          q->wireQueryId = id;
+          q->wireSession = g_wt.session;
+        }
+      }
       return;
+    }
     m_inner->beginQuery(query);
   }
 
   void MtlWireContext::endQuery(const Rc<MtlQuery>& query) {
     if (query != nullptr && query->type == MtlQueryType::Occlusion) {
-      /* Complete the query instantly with the documented all-passed stub:
-       * no tracker/serial (getData never reports Pending) and visCpu pointed
-       * at the constant sample count. Counted in PROF as qStub=. */
       auto* q = static_cast<MtlBackendQuery*>(query.ptr());
-      q->tracker    = nullptr;
-      q->serial     = 0u;
-      q->visBuffer  = 0u;
-      q->visCpu     = const_cast<uint64_t*>(&kQueryStubSamplesPassed);
-      q->slotOffset = 0u;
-      g_queryStubs.fetch_add(1u, std::memory_order_relaxed);
+      bool sent = false;
+      /* Only close a bracket whose begin actually crossed in THIS session —
+       * a session bounce mid-bracket makes the server-side begin gone. */
+      if (q->wireQueryId != 0u && q->wireSession == g_wt.session) {
+        if (auto* r = beginRecord<d9mt_wire_rec_query>(d9mt_wire_op_end_query)) {
+          r->query_id = q->wireQueryId;
+          endRecord();
+          sent = true;
+          g_queryWire.fetch_add(1u, std::memory_order_relaxed);
+        }
+      }
+      if (!sent) {
+        /* All-passed stub (the pre-transport behavior): no tracker/serial
+         * (getData never reports Pending) and visCpu pointed at the
+         * constant sample count. Counted in PROF as qStub=. */
+        q->wireQueryId = 0u;
+        q->tracker     = nullptr;
+        q->serial      = 0u;
+        q->visBuffer   = 0u;
+        q->visCpu      = const_cast<uint64_t*>(&kQueryStubSamplesPassed);
+        q->slotOffset  = 0u;
+        g_queryStubs.fetch_add(1u, std::memory_order_relaxed);
+      }
       return;
     }
     m_inner->endQuery(query);
@@ -2481,6 +2545,55 @@ namespace dxvk::backend::wire {
     }
     g_pendingDestroys.emplace_back(wireId, clientHandle);
     g_destroysPending.store(true, std::memory_order_release);
+  }
+
+  bool queryPoll(uint64_t queryId, uint32_t session, uint64_t* samplesOut) {
+    /* App thread (D3D9 GetData). NEVER blocks; every "cannot arrive" path
+     * resolves all-passed with its own counter — a polling game is never
+     * wedged (D3D9 queries are async-poll BY DESIGN: S_FALSE while
+     * pending). */
+    if (g_wireDown.load(std::memory_order_acquire) ||
+        g_serverDead.load(std::memory_order_acquire) ||
+        session != g_wireSessionMirror.load(std::memory_order_acquire)) {
+      *samplesOut = kQueryStubSamplesPassed;
+      g_querySessLoss.fetch_add(1u, std::memory_order_relaxed);
+      return true;
+    }
+    /* heapMem is write-once at attach (before any query emission — begin
+     * checks g_wt.heap) and never freed while active; safe to read here. */
+    const uint8_t* heapMem = g_wt.heapMem;
+    if (heapMem == nullptr) {
+      *samplesOut = kQueryStubSamplesPassed;
+      g_querySessLoss.fetch_add(1u, std::memory_order_relaxed);
+      return true;
+    }
+    const auto* ring = reinterpret_cast<const d9mt_wire_query_ring*>(
+      heapMem + D9MT_WIRE_QUERY_RING_OFFSET);
+    if (ring->magic.load(std::memory_order_acquire) != D9MT_WIRE_QUERY_RING_MAGIC) {
+      /* Server hasn't initialized the result ring (boot window) — the wire
+       * is alive, the result CAN still arrive: report pending, bounded by
+       * the dead-server latch above. */
+      return false;
+    }
+    const auto& slot = ring->slots[queryId & (D9MT_WIRE_QUERY_SLOTS - 1u)];
+    const uint64_t got = slot.id.load(std::memory_order_acquire);
+    if (got == queryId) {
+      const uint64_t samples = slot.samples.load(std::memory_order_relaxed);
+      if (slot.id.load(std::memory_order_acquire) == queryId) {
+        *samplesOut = samples;
+        return true;
+      }
+      /* mid-overwrite — the re-read below classifies it next poll */
+      return false;
+    }
+    if (got > queryId) {
+      /* a NEWER query overwrote this slot before the game polled — evicted.
+       * Ids share the slot only in ring multiples, so > is exact. */
+      *samplesOut = kQueryStubSamplesPassed;
+      g_queryEvicted.fetch_add(1u, std::memory_order_relaxed);
+      return true;
+    }
+    return false; /* pending */
   }
 
   void noteBackbuffer(const Rc<MtlTexture>& image) {
@@ -3000,6 +3113,9 @@ namespace dxvk::backend::prof {
       " texConv=", g_texConvSkips.load(std::memory_order_relaxed),
       " texSess=", g_texSessLoss.load(std::memory_order_relaxed),
       " qStub=", g_queryStubs.load(std::memory_order_relaxed),
+      " qWire=", g_queryWire.load(std::memory_order_relaxed),
+      " qEvict=", g_queryEvicted.load(std::memory_order_relaxed),
+      " qSess=", g_querySessLoss.load(std::memory_order_relaxed),
       " rbStale=", g_readbackStale.load(std::memory_order_relaxed));
     prev = s;
   }
