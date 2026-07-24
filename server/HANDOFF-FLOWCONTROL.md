@@ -178,6 +178,69 @@ open and encoded plainly. P2 kills both closers by construction:
 - Full-clean chain: `rm -rf build` → build-bridge (PASS) → build-driver
   (d3d9.dll linked, 20 exports) → build-server gate (PASS).
 
+## P3 — GPU-written frame feedback (the notification dead-time kill)
+
+Safehouse evidence: frame 30 ms with client work 0.7 ms and real GPU ~1 ms;
+`notice=` 14–19 ms of published-frame-sitting-idle — the
+MTLSharedEventListener publication is a GCD dispatch (documented
+semaphore-hop, ms-class) and the lockstep loop compounds it every frame.
+Venus (`vn_feedback.c`) solves this class by having the GPU ITSELF write
+completion values into shared memory in submission order.
+
+Landed (this slice):
+- **The word** (`mtl_wire.h D9MT_WIRE_HEAP_FEEDBACK_OFFSET` = 8192, inside
+  the heap header pad the whole-heap wrap already covers): packed
+  `(frame_serial << 2 | present_slot)`. `encodeFrameFeedback`
+  (executor.mm, called by submitFrame after the final closeXfer) encodes a
+  fresh compute encoder: `barrierAfterQueueStages:kStageAll` then an
+  8-byte `copyFromBuffer` into the heapBuf — the LAST work of every
+  present's cmdbuf, so an observer of the word knows the frame's pixels
+  (publish copy included) are done. Empty/completed frames CPU-store the
+  word inline; session boundaries zero it (same staleness semantics as
+  `frame_serial` across sessions); legacy heap layout (no wrap) leaves it
+  0 = clients degrade to the listener path.
+- **The readers** (winemetal_unix.c — NO PE-side driver change needed):
+  `wire_feedback_word()` double-loads (blit copies have no formal
+  atomicity; torn read = absent this poll, monotonicity recovers).
+  `WMTWireWaitFrameSerial` (credit gate + publish notice) takes
+  `max(status->frame_serial, word>>2)` with a ~400 µs / 20 µs poll phase
+  then 1 ms-sliced futex parks (the GPU write has no waker; the listener
+  wake still short-circuits). `WireServerFrame_acquire` acquires the
+  fb-led `{serial, slot}` — without this the early wake would still
+  present the listener's stale slot. tl_* segments for fb-led frames read
+  0 (tl_serial mismatch) and are skipped — client `notice=` may go
+  negative-ish/small; trust the fps and `srvGpu`.
+- **Blocking waits**: server-side GPU blocks already use
+  `MTLSharedEvent waitUntilSignaledValue:timeoutMS:` (waitSerial) — direct
+  kernel wait, no listener. The listener now serves ONLY bookkeeping
+  (status mirrors, tl instrumentation, futex wake backstop): nothing on
+  the frame path blocks on it.
+- **Gate** (test_feed "P3 feedback"): 64 present frames — the word arrives
+  for every frame, never lags the listener beyond scheduler jitter
+  (>100 µs lag on >3/64 fails), and its packed slot matches the
+  listener-published slot per serial.
+- Cross-process `MTLSharedEventHandle` (client-side kernel wait on the
+  server's event) is NOT needed for the frame loop anymore; if a future
+  slice wants it for the long credit parks, it requires a mach-port
+  channel (XPC/spawn-inherited) — the shm files cannot carry it.
+
+DEFERRED (designed, not landed — next slice):
+- **Publish-copy elision**: frames whose first backbuffer pass begins with
+  a folded full clear (every 3D frame) could render DIRECTLY into the
+  pool's IOSurface slot, keeping persistentBB+copy only for carry-over
+  composition (menus/CRT-scan). Touches set_rt resolution + the
+  IOSurface-as-RT usage flags + the quadrant gate contract; the copy is
+  GPU-cheap (~0.5 ms class), so this is second-order vs the listener win.
+- **Present zero-copy** (client): CALayer.contents = IOSurface directly
+  instead of the CAMetalLayer drawable blit (kills drawable acquire +
+  fullscreen blit). Needs CATransaction/scale handling against the
+  winemac layer hierarchy; keep the blit path behind a build-time
+  constant as fallback. Verify with the coordinator-run demos.
+
+Expected live signature: safehouse frame 30 ms -> single-digit
+(0.7 ms client + real GPU + µs-class notice); `wait`/`notice` collapse;
+street unlocked in proportion.
+
 ## Tuning
 
 - `D9MT_FRAME_CREDITS` (client env): N, default 2. 1 = strict lockstep

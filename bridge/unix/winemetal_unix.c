@@ -6874,6 +6874,26 @@ wire_mach_ns(void) {
   return mach_absolute_time() * tb.numer / tb.denom;
 }
 
+/* P3 (vn_feedback port): the GPU-written frame-feedback word — packed
+ * (frame_serial << 2 | present_slot), written by the SERVER'S GPU as the
+ * last work of every present's cmdbuf (mtl_wire.h feedback comment).
+ * Observed here with zero listener involvement: the credit gate and the
+ * publish notice see GPU completion µs after it happens instead of paying
+ * the MTLSharedEventListener's ms-class dispatch. Double-load (an 8-byte
+ * blit copy has no formal atomicity) — a torn read returns 0 = absent this
+ * poll; the word is monotonic so the next poll recovers. */
+static uint64_t
+wire_feedback_word(void) {
+  if (!wire_heap)
+    return 0;
+  const d9mt_wire_au64 *fb =
+      (const d9mt_wire_au64 *)((const uint8_t *)wire_heap +
+                               D9MT_WIRE_HEAP_FEEDBACK_OFFSET);
+  uint64_t a = atomic_load_explicit(fb, memory_order_acquire);
+  uint64_t b = atomic_load_explicit(fb, memory_order_acquire);
+  return a == b ? a : 0;
+}
+
 static NTSTATUS
 _WireRing_wait(void *obj) {
   struct unixcall_wire_wait *p = obj;
@@ -6912,9 +6932,20 @@ _WireRing_wait(void *obj) {
     if (!wire_status)
       return STATUS_SUCCESS;
     const uint64_t target = p->a;
+    /* P3: sub-ms observation of the GPU-written feedback word, which has no
+     * futex waker. Phase 1: ~400 µs of 20 µs polls (the frame-loop common
+     * case — GPU finishes while we watch). Phase 2: kernel parks on the
+     * listener's futex, sliced at 1 ms so GPU-written progress is observed
+     * within a slice even if the listener (bookkeeping path) is still ms
+     * away; its wake still short-circuits the slice. */
+    int spin = 20;
     for (;;) {
-      uint64_t fs =
+      uint64_t pub =
           atomic_load_explicit(&wire_status->frame_serial, memory_order_acquire);
+      uint64_t fs = pub;
+      uint64_t fbs = wire_feedback_word() >> 2;
+      if (fbs > fs)
+        fs = fbs; /* GPU-completed — strictly fresher than the listener */
       p->out_value = fs;
       /* fs == 0: nothing EVER published (boot) — never park a present on
        * the first publish; the caller falls through to today's skip. */
@@ -6923,10 +6954,15 @@ _WireRing_wait(void *obj) {
       uint64_t now = wire_now_us();
       if (now >= deadline)
         break;
+      if (spin > 0) {
+        spin--;
+        usleep(20);
+        continue;
+      }
       uint64_t slice_us = deadline - now;
-      if (slice_us > 100000u)
-        slice_us = 100000u;
-      d9mt_futex_wait(&wire_status->frame_serial, fs, slice_us * 1000u);
+      if (slice_us > 1000u)
+        slice_us = 1000u;
+      d9mt_futex_wait(&wire_status->frame_serial, pub, slice_us * 1000u);
     }
     return STATUS_SUCCESS;
   }
@@ -7200,11 +7236,20 @@ _WireServerFrame_acquire(void *obj) {
     return STATUS_SUCCESS;                     /* pre-S2 server: no frames */
 
   uint64_t frames = atomic_load_explicit(&wire_status->frames, memory_order_relaxed);
-  if (frames == 0u)
-    return STATUS_SUCCESS;                      /* nothing presented yet */
 
   uint64_t fs   = atomic_load_explicit(&wire_status->frame_serial, memory_order_relaxed);
   uint32_t slot = atomic_load_explicit(&wire_status->present_slot, memory_order_relaxed);
+  /* P3: the GPU-written feedback word can LEAD the listener publication by
+   * ms — acquire the true freshest completed frame {serial, slot}. The
+   * word is the LAST GPU work of its frame's cmdbuf, so the slot's
+   * IOSurface pixels (publish copy included) are done by GPU order. */
+  uint64_t fbw = wire_feedback_word();
+  if ((fbw >> 2) > fs) {
+    fs   = fbw >> 2;
+    slot = (uint32_t)(fbw & 3u);
+  }
+  if (frames == 0u && fs == 0u)
+    return STATUS_SUCCESS;                      /* nothing presented yet */
 
   /* Pace gate: the server's completed serial must be within `lag_frames` of
    * the present the client is about to do. `local - fs > lag` = too stale ->

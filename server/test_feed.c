@@ -4256,6 +4256,74 @@ main(int argc, char **argv) {
              dumCD);
     }
 
+    /* --- P3 GATE: GPU-WRITTEN FRAME FEEDBACK (vn_feedback port) ----------
+     * The server's GPU writes (frame_serial<<2 | present_slot) into the
+     * heap feedback word as the LAST work of every present's cmdbuf. The
+     * word must (a) become observable for EVERY frame, (b) never lag the
+     * listener publication beyond scheduler jitter (it is ordered before
+     * the listener block can run), (c) carry the same slot the listener
+     * later publishes. This is the publication the client's credit gate /
+     * publish notice now reads — the ms-class listener leaves the frame
+     * loop. --- */
+    {
+      const d9mt_wire_au64 *fbp =
+          (const d9mt_wire_au64 *)((const uint8_t *)g_heap +
+                                   D9MT_WIRE_HEAP_FEEDBACK_OFFSET);
+      mach_timebase_info_data_t tbF;
+      mach_timebase_info(&tbF);
+      int led = 0, lag = 0;
+      int64_t maxLeadNs = 0;
+      for (int i = 0; i < 64; i++) {
+        emit_backbuffer_rt();
+        emit_clear(0.f, 0.f, 1.f);
+        emit_draws(1);
+        emit_present(++frame);
+        uint64_t tFb = 0, tPub = 0;
+        const uint64_t t0 = mach_absolute_time();
+        for (;;) {
+          if (!tFb) {
+            uint64_t a = atomic_load_explicit(fbp, memory_order_acquire);
+            uint64_t b = atomic_load_explicit(fbp, memory_order_acquire);
+            if (a == b && (a >> 2) >= frame)
+              tFb = mach_absolute_time();
+          }
+          if (!tPub && atomic_load_explicit(&status->frame_serial,
+                                            memory_order_acquire) >= frame)
+            tPub = mach_absolute_time();
+          if (tFb && tPub)
+            break;
+          if ((mach_absolute_time() - t0) * tbF.numer / tbF.denom >
+              5000000000ull)
+            FAIL("P3 feedback (frame %d): fb=%d pub=%d after 5s — the "
+                 "GPU-written word never arrived", i, tFb != 0, tPub != 0);
+        }
+        int64_t leadNs =
+            (int64_t)(tPub * tbF.numer / tbF.denom) -
+            (int64_t)(tFb * tbF.numer / tbF.denom);
+        if (leadNs > 0)
+          led++;
+        if (leadNs < -100000)
+          lag++; /* fb observed >100 us AFTER the listener — must not happen */
+        if (leadNs > maxLeadNs)
+          maxLeadNs = leadNs;
+        uint64_t w = atomic_load_explicit(fbp, memory_order_acquire);
+        if ((w >> 2) == frame &&
+            (uint32_t)(w & 3u) != atomic_load_explicit(&status->present_slot,
+                                                       memory_order_acquire))
+          FAIL("P3 feedback (frame %d): slot mismatch fb=%u status=%u", i,
+               (uint32_t)(w & 3u),
+               (uint32_t)atomic_load_explicit(&status->present_slot,
+                                              memory_order_acquire));
+      }
+      if (lag > 3)
+        FAIL("P3 feedback: word lagged the listener on %d/64 frames "
+             "(want ~0 — the GPU write is ordered before the listener)", lag);
+      printf("[test_feed] P3 feedback: 64 frames all GPU-published; word led "
+             "the listener on %d/64 (max lead %lld us, lag>100us on %d) — "
+             "frame completion observable without the listener\n",
+             led, (long long)(maxLeadNs / 1000), lag);
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the

@@ -660,6 +660,13 @@ struct Exec {
   uint64_t uplTexParked = 0, uplTexLate = 0, uplTexDummy = 0;
   std::vector<DeferredTexXfer> deferredTexXfers;
   std::vector<DeferredBufXfer> deferredBufXfers;
+  /* P3 (vn_feedback port): armed by handlePresent; submitFrame encodes an
+   * 8-byte GPU copy of (fbSerial<<2 | fbSlot) into the heap feedback word
+   * as the LAST work of the frame's cmdbuf — completion publication ordered
+   * by the GPU, no listener latency (mtl_wire.h feedback comment). */
+  uint64_t fbSerial = 0;
+  uint32_t fbSlot = 0;
+  bool fbPending = false;
   /* TEST HOOK (D9MT_TEST_FRAME_DELAY_US): sleep this long in handlePresent —
    * a throttled consumer for the sustained-overload flow-control gate. */
   uint32_t frameDelayUs = 0;
@@ -929,6 +936,7 @@ static void closePass();
 static void closeXfer();
 static void flushPendingClears();
 static void drainDeferredXfersAtBoundary();
+static void encodeFrameFeedback();
 
 static void submitFrame() {
   /* v11: a clear-only frame (no draw ever materialized the pass) must not
@@ -941,6 +949,8 @@ static void submitFrame() {
                                    * cross a submit (their slab slices carry
                                    * this frame's serial) */
   closeXfer();
+  encodeFrameFeedback(); /* P3: GPU-written completion word — the LAST work
+                          * of a present's cmdbuf (defined after ringAlloc) */
   if (!g->cmdbuf)
     return;
   [g->cmdbuf endCommandBuffer];
@@ -1120,6 +1130,37 @@ static void drainDeferredXfersAtBoundary() {
   if (g->deferredTexXfers.empty() && g->deferredBufXfers.empty())
     return;
   ensureXfer(); /* opening the encoder drains the parked blits */
+}
+
+/* P3: GPU-written frame feedback — the LAST work of a present's cmdbuf
+ * (called by submitFrame after the final closeXfer, whose producer barrier
+ * ordered every prior blit). The queue-stage barrier orders every prior
+ * encoder (passes + the pool-slot publish copy included) ahead of the
+ * 8-byte word, so a reader observing the word knows the frame's pixels are
+ * done. Requires the whole-heap wrap (legacy layout: word stays 0, clients
+ * degrade to the listener path). */
+static void encodeFrameFeedback() {
+  if (!g->fbPending)
+    return;
+  g->fbPending = false;
+  if (!g->cmdbuf || !g->heapBuf)
+    return;
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer(); /* queues empty here */
+  if (!enc)
+    return;
+  RingSlice rs = ringAlloc(8, 8);
+  if (rs.cpu) {
+    *(uint64_t*)rs.cpu = (g->fbSerial << 2) | (uint64_t)(g->fbSlot & 3u);
+    [enc barrierAfterQueueStages:(MTLStages)kStageAll
+                    beforeStages:(MTLStages)kStageBlit
+               visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+    [enc copyFromBuffer:rs.buf
+           sourceOffset:(NSUInteger)rs.off
+               toBuffer:g->heapBuf
+      destinationOffset:(NSUInteger)D9MT_WIRE_HEAP_FEEDBACK_OFFSET
+                   size:8];
+  }
+  closeXfer();
 }
 
 /* --- argument tables (decision 3 port; rotate once per pass) ----------------- */
@@ -3856,6 +3897,16 @@ static void handleSession(const d9mt_wire_rec_session* r) {
 
   /* 2. close + commit the in-flight frame; NO completion wait */
   submitFrame(); /* closes pass + xfer inside */
+  /* P3: drop the GPU feedback word with the session (same staleness
+   * semantics as status->frame_serial across a session boundary — the
+   * serial domain is process-monotonic client-side, so a racing in-flight
+   * GPU write resurrecting an old value is indistinguishable from the
+   * pre-existing stale frame_serial window and equally harmless). */
+  if (g->heap) {
+    d9mt_wire_au64* fb = (d9mt_wire_au64*)((uint8_t*)g->heap +
+                                           D9MT_WIRE_HEAP_FEEDBACK_OFFSET);
+    atomic_store_explicit(fb, 0, memory_order_release);
+  }
   const uint64_t after = g->lastSubmitted;
   fprintf(stderr, "[serverd] session %s: retire (serial=%llu)...\n", what,
           (unsigned long long)after);
@@ -3993,6 +4044,10 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   drainPendingBlits();
   sweepQueries(); /* publish brackets whose submissions completed by now */
   const uint32_t slot = g->presentSlot;
+  /* P3: arm the GPU-written feedback word for THIS frame's submit */
+  g->fbSerial = r->frame_serial;
+  g->fbSlot = slot;
+  g->fbPending = true;
 
   /* Persistent-backbuffer publish copy: the frame's rendering lives in the
    * ONE persistent texture (content survives presents — the client's
@@ -4150,7 +4205,16 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       d9mt_futex_wake_all(&status->frame_serial);
     }];
   } else {
-    /* nothing in flight (empty frame or already completed): publish inline */
+    /* nothing in flight (empty frame or already completed): publish inline.
+     * P3: CPU-write the feedback word too — no GPU writer can race here
+     * (everything submitted has completed), and a cmdbuf-carried write for
+     * this frame (if any) already landed with the same value. */
+    if (g->heap) {
+      d9mt_wire_au64* fb = (d9mt_wire_au64*)((uint8_t*)g->heap +
+                                             D9MT_WIRE_HEAP_FEEDBACK_OFFSET);
+      atomic_store_explicit(fb, (frameSerial << 2) | (uint64_t)(slot & 3u),
+                            memory_order_release);
+    }
     atomic_store_explicit(&status->present_slot, slot, memory_order_relaxed);
     atomic_store_explicit(&status->completed_serial, completedSerial(),
                           memory_order_relaxed);

@@ -745,6 +745,20 @@ D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_render_target_by_id) == 56);
 #define D9MT_WIRE_HEAP_MAGIC 0x30315048544D3944ull /* "D9MTHP10" LE */
 #define D9MT_WIRE_HEAP_DATA_OFFSET 16384u
 
+/* P3 (Venus vn_feedback port): ONE GPU-written frame-feedback word in the
+ * heap header pad (bytes 192..16384 are otherwise unused; the server wraps
+ * the whole mapping, so the GPU can write here). The server encodes an
+ * 8-byte copy of (frame_serial << 2 | present_slot) as the LAST work of
+ * every present's command buffer — publication is ordered by the GPU
+ * itself, with none of the MTLSharedEventListener's ms-class dispatch
+ * latency. Readers double-load (torn copy -> treat as absent) and take
+ * max(status->frame_serial, word >> 2); 0 = no feedback yet (pre-P3
+ * server, boot, or fresh session — the session-begin handler zeroes it).
+ * The listener publication stays for bookkeeping (status mirrors, tl
+ * instrumentation, futex wake backstop) — nothing on the frame path
+ * blocks on it anymore. */
+#define D9MT_WIRE_HEAP_FEEDBACK_OFFSET 8192u
+
 /* Blob region size the client requests at attach (the unix side recognizes
  * the enlarged file: upload capacity = total - this when the remainder is a
  * power of two and the total is not — legacy pow2 files stay legacy).
