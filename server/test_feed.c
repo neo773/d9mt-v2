@@ -53,6 +53,7 @@
 #include <IOSurface/IOSurface.h>
 #include <mach/mach_time.h>
 
+#include "../driver/mtl/mtl_blob_pool.h"
 #include "../driver/mtl/mtl_futex.h"
 #include "../driver/mtl/mtl_wire.h"
 #include "d9mt_status.h"
@@ -61,6 +62,11 @@ extern char **environ;
 
 #define RING_CAP (8u << 20)
 #define HEAP_CAP (8u << 20)
+/* P1 blob region appended to the heap file (mtl_wire.h layout: both sides
+ * derive it from file size vs header capacity). Holds the blob-backed
+ * VB/CB slices of the P1 gates — content written CLIENT-SIDE, zero
+ * upload records. */
+#define BLOB_CAP (1u << 20)
 #define FAIL(...)                                                              \
   do {                                                                         \
     fprintf(stderr, "FAIL: " __VA_ARGS__);                                     \
@@ -517,7 +523,7 @@ main(int argc, char **argv) {
   if (create_file(dir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP,
                   &ring_mem) ||
       create_file(dir, "status", sizeof(struct d9mt_status), &status_mem) ||
-      create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP,
+      create_file(dir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + HEAP_CAP + BLOB_CAP,
                   &heap_mem))
     return 1;
   g_ring = ring_mem;
@@ -528,11 +534,18 @@ main(int argc, char **argv) {
   g_qring = (struct d9mt_wire_query_ring *)((uint8_t *)heap_mem +
                                             D9MT_WIRE_QUERY_RING_OFFSET);
 
+  /* P1: PRE-FAULT the blob region (non-sparse) BEFORE the server spawns —
+   * its newBufferWithBytesNoCopy wrap wires pages at wrap time; pages
+   * faulted in later are invisible to the GPU (the S1 sparse-file finding;
+   * the PoC's proven precondition). Mirrors winemetal_unix.c wire attach. */
+  memset(g_heap_data + HEAP_CAP, 0, BLOB_CAP);
+  msync(g_heap_data + HEAP_CAP, BLOB_CAP, MS_SYNC);
+
   g_ring->capacity = RING_CAP;
   g_ring->data_offset = sizeof(struct d9mt_wire_ring);
   g_ring->magic = D9MT_WIRE_RING_MAGIC; /* last: header now valid */
 
-  g_heap->capacity = HEAP_CAP;
+  g_heap->capacity = HEAP_CAP; /* upload capacity; blob = file size - this */
   g_heap->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
   g_heap->magic = D9MT_WIRE_HEAP_MAGIC;
 
@@ -3098,6 +3111,346 @@ main(int argc, char **argv) {
       printf("[test_feed] v16 wrap race: 20 iterations x 12 wrapping-offset "
              "draws across 3 unwaited frames — every draw rendered its OWN "
              "constants\n");
+    }
+
+    /* --- P1 BLOB GATE 0: the credit-law freelist (mtl_blob_pool.h — the
+     * EXACT code the driver runs, compiled into this x86_64 binary). The
+     * deliberate PREMATURE-REUSE probe: a slice retired under serial S must
+     * NOT be handed out while completed < S — reusing it early is the PoC's
+     * documented first failure (an offset reused before the consumer
+     * completed the frame that used it reproduced the production
+     * corruption). --- */
+    {
+      static struct d9mt_blob_pool pool; /* ~24 KiB — keep off the stack */
+      d9mt_blob_init(&pool, HEAP_CAP, BLOB_CAP);
+      uint64_t a = d9mt_blob_alloc(&pool, 100, 0);
+      uint64_t b = d9mt_blob_alloc(&pool, 100, 0);
+      if (a != (uint64_t)HEAP_CAP || b != (uint64_t)HEAP_CAP + D9MT_BLOB_ALIGN)
+        FAIL("blob pool: bump layout wrong (a=%llu b=%llu)",
+             (unsigned long long)a, (unsigned long long)b);
+      d9mt_blob_retire(&pool, a, 100, 5); /* last reader = frame 5 */
+      uint64_t c = d9mt_blob_alloc(&pool, 100, 4); /* completed = 4 < 5 */
+      if (c == a)
+        FAIL("blob pool: PREMATURE REUSE — slice retired under serial 5 "
+             "handed out at completed 4 (the credit-law gate is broken)");
+      if (c != (uint64_t)HEAP_CAP + 2 * D9MT_BLOB_ALIGN)
+        FAIL("blob pool: expected fresh bump slice, got %llu",
+             (unsigned long long)c);
+      uint64_t d = d9mt_blob_alloc(&pool, 100, 5); /* completed covers 5 */
+      if (d != a)
+        FAIL("blob pool: covered slice NOT reused (got %llu, want %llu)",
+             (unsigned long long)d, (unsigned long long)a);
+      /* wire-down semantics: retire under serial 0 = provably reader-free */
+      d9mt_blob_retire(&pool, b, 100, 0);
+      if (d9mt_blob_alloc(&pool, 100, 0) != b)
+        FAIL("blob pool: serial-0 retire not immediately reusable");
+      printf("[test_feed] blob pool: premature reuse BLOCKED at "
+             "completed<retire, granted at completed>=retire\n");
+    }
+
+    /* --- P1 BLOB GATE A: the PoC scenario through the REAL server
+     * (poc_blobmodel ported onto the wire): blob-backed VB + CB created
+     * with {heap_offset,size}, per-frame slices written CLIENT-SIDE into
+     * the shared blob region, draws at rotating offsets, offsets REUSED
+     * across completion (12 frames, rotation depth 4 => every slice reused
+     * 3x), pixel-asserted per frame. ZERO upload_buffer records — the
+     * pages are the buffer (VENUS_CONTRACT_DIFF P1).
+     * Staleness is detectable per carrier: the vertex slice bakes the cell
+     * COLUMN, the constant slice carries the cell ROW — a stale slice at a
+     * reused offset paints the wrong cell and leaves the frame's own cell
+     * on the clear color. --- */
+    {
+      uint8_t magentaB[4] = {255, 0, 255, 255}, dkblueB[4] = {40, 16, 16, 255};
+      const uint64_t upl0 =
+          atomic_load_explicit(&status->uploads_executed, memory_order_relaxed);
+      /* blob CB: 4 x 256 B rotating matrix slices at blob offset 0 */
+      const uint64_t cbBlobOff = (uint64_t)HEAP_CAP;
+      /* blob VB: 4 x 256 B rotating vertex slices, next 16 KiB page */
+      const uint64_t vbBlobOff = (uint64_t)HEAP_CAP + D9MT_BLOB_ALIGN;
+      struct d9mt_wire_rec_create_buffer cBb;
+      memset(&cBb, 0, sizeof(cBb));
+      cBb.hdr.opcode = d9mt_wire_op_create_buffer;
+      cBb.hdr.size = sizeof(cBb);
+      cBb.wire_id = 990;
+      cBb.client_handle = 0xC990;
+      cBb.size = 1024;
+      cBb.heap_offset = cbBlobOff; /* THE blob create */
+      emit(&cBb, sizeof(cBb));
+      struct d9mt_wire_rec_create_buffer cBv = cBb;
+      cBv.wire_id = 991;
+      cBv.client_handle = 0xC991;
+      cBv.size = 1024;
+      cBv.heap_offset = vbBlobOff;
+      emit(&cBv, sizeof(cBv));
+
+      /* cbv-cube pipeline (same PSO the v15/v16 gates warmed) */
+      emit_bind_shader(0, 0xA00B);
+      emit_bind_shader(1, 0xA006);
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vlB = {{{d9mt_wire_op_set_vertex_layout, sizeof(vlB), 0}, 1, 1},
+               {0, 0, 900 /* RGB32Float */, 0},
+               {0, 12, 0, 0}};
+      emit(&vlB, sizeof(vlB));
+      struct d9mt_wire_rec_bind_index_buffer bibB;
+      memset(&bibB, 0, sizeof(bibB));
+      bibB.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bibB.hdr.size = sizeof(bibB);
+      bibB.buf.buffer = 0xC951; /* legacy IB (u16 0,1,2) — IBs are P1-eligible
+                                 * too; the gate pins VB+CB, the PoC pair */
+      bibB.buf.length = 8;
+      bibB.index_type = 0;
+      emit(&bibB, sizeof(bibB));
+      struct d9mt_wire_rec_bind_uniform_buffer bubB;
+      memset(&bubB, 0, sizeof(bubB));
+      bubB.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+      bubB.hdr.size = sizeof(bubB);
+      bubB.stages = 0x1;
+      bubB.slot = 4;
+      bubB.buf.buffer = 0xC990;
+      bubB.buf.length = 1024;
+      emit(&bubB, sizeof(bubB));
+
+      const float sB = 0.3f;
+      for (int n = 0; n < 12; n++) {
+        const int slot = n % 4;         /* rotation: offsets reused at n-4 */
+        const int col = n % 4, row = n / 4;
+        const float tx = -0.75f + 0.5f * (float)col;
+        const float ty = 0.6f - 0.6f * (float)row;
+        /* THE LAW (poc_blobmodel_writer.c): an offset may not be reused
+         * until completion covers its last reader. The per-frame waits
+         * below run this gate in lockstep (0 frames ahead — well inside
+         * the N=2 credit bound); assert it before every REUSING write so a
+         * pacing regression shows up loudly instead of as corruption. */
+        if (n >= 4) {
+          uint64_t fr =
+              atomic_load_explicit(&status->frames, memory_order_acquire);
+          if (fr < (uint64_t)frame)
+            FAIL("blob rotation: slice reuse ahead of completion "
+                 "(frames=%llu, last present=%llu)",
+                 (unsigned long long)fr, (unsigned long long)frame);
+        }
+        /* client-side slice writes — NO records, NO heap_put: */
+        /* vertex slice: base triangle scaled by sB, COLUMN translate baked */
+        float vbv[9] = {
+          (-0.5f) * sB + tx, (-0.5f) * sB, 0.f,
+          ( 0.5f) * sB + tx, (-0.5f) * sB, 0.f,
+          (-0.5f) * sB + tx, ( 0.5f) * sB, 0.f};
+        memcpy(g_heap_data + vbBlobOff + (uint64_t)slot * 256u, vbv, sizeof(vbv));
+        /* constant slice: identity with the ROW translate */
+        float mB[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, ty, 0, 1};
+        memcpy(g_heap_data + cbBlobOff + (uint64_t)slot * 256u, mB, sizeof(mB));
+
+        struct d9mt_wire_rec_set_render_targets_by_id rtB;
+        memset(&rtB, 0, sizeof(rtB));
+        rtB.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rtB.hdr.size = sizeof(rtB);
+        rtB.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rtB.color[0].format = 80;
+        rtB.color[0].width = 640;
+        rtB.color[0].height = 480;
+        rtB.color[0].sample_count = 1;
+        emit(&rtB, sizeof(rtB));
+        if (n == 0)
+          emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct d9mt_wire_rec_bind_vertex_buffer bvbB;
+        memset(&bvbB, 0, sizeof(bvbB));
+        bvbB.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+        bvbB.hdr.size = sizeof(bvbB);
+        bvbB.binding = 0;
+        bvbB.stride = 12;
+        bvbB.buf.buffer = 0xC991;
+        bvbB.buf.offset = (uint64_t)slot * 256u; /* draw at the slice offset */
+        bvbB.buf.length = 36;
+        emit(&bvbB, sizeof(bvbB));
+        struct d9mt_wire_rec_bind_uniform_buffer_range burB;
+        memset(&burB, 0, sizeof(burB));
+        burB.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+        burB.hdr.size = sizeof(burB);
+        burB.stages = 0x1;
+        burB.slot = 4;
+        burB.offset = (uint64_t)slot * 256u;
+        burB.length = 64;
+        emit(&burB, sizeof(burB));
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } dB = {{{d9mt_wire_op_draw_indexed, sizeof(dB), 0}, 1, 0},
+                {{3, 1, 0, 0, 0, 0}}};
+        emit(&dB, sizeof(dB));
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("blob rotation: frame %d never presented", n);
+        /* per-frame pixel assert: THIS frame's cell carries this frame's
+         * client-written slices (centroid of the baked-column triangle
+         * under the row matrix — same formula as v16) */
+        uint32_t sBl =
+            atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sfB = IOSurfaceLookup(ids[sBl]);
+        if (!sfB)
+          FAIL("blob rotation: IOSurfaceLookup failed (frame %d)", n);
+        IOSurfaceLock(sfB, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *bB = IOSurfaceGetBaseAddress(sfB);
+        size_t rB = IOSurfaceGetBytesPerRow(sfB);
+        const int pxB = (int)((tx - sB / 6.f + 1.f) * 320.f);
+        const int pyB = (int)((1.f - (ty - sB / 6.f)) * 240.f);
+        uint8_t cell[4], bgB[4];
+        memcpy(cell, bB + pyB * rB + pxB * 4, 4);
+        memcpy(bgB, bB + 5 * rB + 5 * 4, 4);
+        IOSurfaceUnlock(sfB, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sfB);
+        if (memcmp(cell, magentaB, 4))
+          FAIL("blob rotation: frame %d (slot %d, reuse #%d) cell "
+               "%02x%02x%02x%02x not magenta — the draw did not read this "
+               "frame's client-written blob slice",
+               n, slot, n / 4, cell[0], cell[1], cell[2], cell[3]);
+        if (memcmp(bgB, dkblueB, 4))
+          FAIL("blob rotation: frame %d background wrong — stale slice "
+               "painted outside its cell", n);
+      }
+      const uint64_t uplD =
+          atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) - upl0;
+      if (uplD != 0)
+        FAIL("blob rotation: %llu upload records executed (want 0 — blob "
+             "content must never ride the wire)", (unsigned long long)uplD);
+      printf("[test_feed] blob rotation: 12 frames, 4-slice rotation (every "
+             "offset reused 3x across completion), per-frame pixel-asserted, "
+             "0 upload records\n");
+    }
+
+    /* --- P1 BLOB GATE B: the V15 flood, blob edition. 500 draws, each
+     * binding a FRESH 256 B blob CB slice written client-side. Old law
+     * (v15): passes O(scene) AND uploads executed. New law: passes stay
+     * O(scene) AND upl records ~0 — the upload class is GONE for blob
+     * buffers, not merely absorbed. --- */
+    {
+      uint8_t magentaF[4] = {255, 0, 255, 255}, dkblueF[4] = {40, 16, 16, 255};
+      const uint64_t fcbBlobOff = (uint64_t)HEAP_CAP + 2 * D9MT_BLOB_ALIGN;
+      struct d9mt_wire_rec_create_buffer cFb;
+      memset(&cFb, 0, sizeof(cFb));
+      cFb.hdr.opcode = d9mt_wire_op_create_buffer;
+      cFb.hdr.size = sizeof(cFb);
+      cFb.wire_id = 992;
+      cFb.client_handle = 0xC992;
+      cFb.size = 131072; /* 500 x 256 B slices, one generation */
+      cFb.heap_offset = fcbBlobOff;
+      emit(&cFb, sizeof(cFb));
+      emit_bind_shader(0, 0xA00B);
+      emit_bind_shader(1, 0xA006);
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vlBF = {{{d9mt_wire_op_set_vertex_layout, sizeof(vlBF), 0}, 1, 1},
+                {0, 0, 900, 0},
+                {0, 12, 0, 0}};
+      emit(&vlBF, sizeof(vlBF));
+      struct d9mt_wire_rec_bind_vertex_buffer bvbF2;
+      memset(&bvbF2, 0, sizeof(bvbF2));
+      bvbF2.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+      bvbF2.hdr.size = sizeof(bvbF2);
+      bvbF2.binding = 0;
+      bvbF2.stride = 12;
+      bvbF2.buf.buffer = 0xC950; /* legacy static VB (identity-space tri) */
+      bvbF2.buf.length = 36;
+      emit(&bvbF2, sizeof(bvbF2));
+      struct d9mt_wire_rec_bind_index_buffer bibF2;
+      memset(&bibF2, 0, sizeof(bibF2));
+      bibF2.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bibF2.hdr.size = sizeof(bibF2);
+      bibF2.buf.buffer = 0xC951;
+      bibF2.buf.length = 8;
+      bibF2.index_type = 0;
+      emit(&bibF2, sizeof(bibF2));
+      struct d9mt_wire_rec_bind_uniform_buffer bubF2;
+      memset(&bubF2, 0, sizeof(bubF2));
+      bubF2.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+      bubF2.hdr.size = sizeof(bubF2);
+      bubF2.stages = 0x1;
+      bubF2.slot = 4;
+      bubF2.buf.buffer = 0xC992;
+      bubF2.buf.length = 131072;
+      emit(&bubF2, sizeof(bubF2));
+
+      float mOffB[16] = {0.1f, 0, 0, 0, 0, 0.1f, 0, 0, 0, 0, 1, 0, 5.f, 0, 0, 1};
+      float mVisB[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+      const uint64_t enc0 =
+          atomic_load_explicit(&status->encoders, memory_order_relaxed);
+      const uint64_t drw0 =
+          atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+      const uint64_t upl0F =
+          atomic_load_explicit(&status->uploads_executed, memory_order_relaxed);
+      struct d9mt_wire_rec_set_render_targets_by_id rtBF;
+      memset(&rtBF, 0, sizeof(rtBF));
+      rtBF.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+      rtBF.hdr.size = sizeof(rtBF);
+      rtBF.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+      rtBF.color[0].format = 80;
+      rtBF.color[0].width = 640;
+      rtBF.color[0].height = 480;
+      rtBF.color[0].sample_count = 1;
+      emit(&rtBF, sizeof(rtBF));
+      emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+      for (uint32_t i = 0; i < 500; i++) {
+        /* fresh slice, written client-side; NOTHING emitted for content */
+        memcpy(g_heap_data + fcbBlobOff + 256ull * i,
+               (i == 499) ? mVisB : mOffB, 64);
+        struct d9mt_wire_rec_bind_uniform_buffer_range burF2;
+        memset(&burF2, 0, sizeof(burF2));
+        burF2.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+        burF2.hdr.size = sizeof(burF2);
+        burF2.stages = 0x1;
+        burF2.slot = 4;
+        burF2.offset = 256ull * i;
+        burF2.length = 64;
+        emit(&burF2, sizeof(burF2));
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } dF2 = {{{d9mt_wire_op_draw_indexed, sizeof(dF2), 0}, 1, 0},
+                 {{3, 1, 0, 0, 0, 0}}};
+        emit(&dF2, sizeof(dF2));
+      }
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 20000))
+        FAIL("blob flood: frame never presented");
+      const uint64_t encD =
+          atomic_load_explicit(&status->encoders, memory_order_relaxed) - enc0;
+      const uint64_t drwD =
+          atomic_load_explicit(&status->draws_executed, memory_order_relaxed) - drw0;
+      const uint64_t uplDF =
+          atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) - upl0F;
+      if (drwD != 500)
+        FAIL("blob flood: %llu/500 draws executed", (unsigned long long)drwD);
+      if (uplDF != 0)
+        FAIL("blob flood: %llu upload records executed (want 0 — no records "
+             "at all for blob buffers)", (unsigned long long)uplDF);
+      if (encD > 4)
+        FAIL("blob flood: %llu render passes for 500 blob-slice draws "
+             "(want O(scene) ~1)", (unsigned long long)encD);
+      uint32_t sF2 =
+          atomic_load_explicit(&status->present_slot, memory_order_acquire);
+      IOSurfaceRef sfF2 = IOSurfaceLookup(ids[sF2]);
+      if (!sfF2)
+        FAIL("blob flood: IOSurfaceLookup failed");
+      IOSurfaceLock(sfF2, kIOSurfaceLockReadOnly, NULL);
+      const uint8_t *bF2 = IOSurfaceGetBaseAddress(sfF2);
+      size_t rF2 = IOSurfaceGetBytesPerRow(sfF2);
+      uint8_t lastP[4], offP[4];
+      memcpy(lastP, bF2 + 140 * rF2 + 453 * 4, 4); /* final matrix centroid */
+      memcpy(offP, bF2 + 280 * rF2 + 266 * 4, 4);  /* offscreen matrices' spot */
+      IOSurfaceUnlock(sfF2, kIOSurfaceLockReadOnly, NULL);
+      CFRelease(sfF2);
+      if (memcmp(lastP, magentaF, 4) || memcmp(offP, dkblueF, 4))
+        FAIL("blob flood: last=%02x%02x%02x%02x (want magenta) "
+             "off=%02x%02x%02x%02x (want clear)",
+             lastP[0], lastP[1], lastP[2], lastP[3],
+             offP[0], offP[1], offP[2], offP[3]);
+      printf("[test_feed] blob flood: 500 fresh blob slices -> %llu render "
+             "pass(es), 500/500 draws, 0 upload records, final slice on "
+             "screen\n", (unsigned long long)encD);
     }
 
     /* --- FLOW-CONTROL GATE (b): UPLOAD STORM IN A PASS (pass preservation)
