@@ -2159,6 +2159,411 @@ main(int argc, char **argv) {
       }
     }
 
+    /* --- V15 UPLOAD-FLOOD + MID-PASS-STAGING GATES -----------------------
+     * Real D3D9 games bind a FRESH constant-ring slice per draw; the v13
+     * re-ship emits one upload_buffer per draw. The server used to execute
+     * each via ensureXfer, CLOSING the open render pass (~292 passes/frame
+     * on GTA, ~60 expected). V15 memcpys non-referenced ranges straight
+     * into the shared backing — these gates pin the pass count AND the
+     * bytes. */
+    {
+      uint8_t magenta[4] = {255, 0, 255, 255}, dkblue[4] = {40, 16, 16, 255};
+
+      /* the flood constant ring: 500 slices x 256 B */
+      struct d9mt_wire_rec_create_buffer cfb;
+      memset(&cfb, 0, sizeof(cfb));
+      cfb.hdr.opcode = d9mt_wire_op_create_buffer;
+      cfb.hdr.size = sizeof(cfb);
+      cfb.wire_id = 973;
+      cfb.client_handle = 0xC973;
+      cfb.size = 131072;
+      emit(&cfb, sizeof(cfb));
+
+      /* rebind the cbv-cube pipeline state (belt: independent of what the
+       * v14 sub-scenarios left bound) */
+      emit_bind_shader(0, 0xA00B);
+      emit_bind_shader(1, 0xA006);
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vlF = {{{d9mt_wire_op_set_vertex_layout, sizeof(vlF), 0}, 1, 1},
+               {0, 0, 900 /* RGB32Float */, 0},
+               {0, 12, 0, 0}};
+      emit(&vlF, sizeof(vlF));
+      struct d9mt_wire_rec_bind_vertex_buffer bvbF;
+      memset(&bvbF, 0, sizeof(bvbF));
+      bvbF.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+      bvbF.hdr.size = sizeof(bvbF);
+      bvbF.binding = 0;
+      bvbF.stride = 12;
+      bvbF.buf.buffer = 0xC950;
+      bvbF.buf.length = 36;
+      emit(&bvbF, sizeof(bvbF));
+      struct d9mt_wire_rec_bind_index_buffer bibF;
+      memset(&bibF, 0, sizeof(bibF));
+      bibF.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bibF.hdr.size = sizeof(bibF);
+      bibF.buf.buffer = 0xC951;
+      bibF.buf.length = 8;
+      bibF.index_type = 0;
+      emit(&bibF, sizeof(bibF));
+      struct d9mt_wire_rec_bind_uniform_buffer bubF;
+      memset(&bubF, 0, sizeof(bubF));
+      bubF.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+      bubF.hdr.size = sizeof(bubF);
+      bubF.stages = 0x1;
+      bubF.slot = 4;
+      bubF.buf.buffer = 0xC973;
+      bubF.buf.length = 131072;
+      emit(&bubF, sizeof(bubF));
+
+      /* offscreen matrix (w=1, x translated out of clip) and the visible
+       * final matrix (v13.1 shape: centroid 453,140; 266,280 stays clear) */
+      float mOff[16] = {0.1f, 0, 0, 0, 0, 0.1f, 0, 0, 0, 0, 1, 0, 5.f, 0, 0, 1};
+      float mVis[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+
+      /* warm-up frame: PSO + fill state settled before measuring */
+      {
+        uint64_t wg = 0;
+        uint64_t woff = heap_put(mOff, sizeof(mOff), &wg);
+        struct d9mt_wire_rec_upload_buffer ubw;
+        memset(&ubw, 0, sizeof(ubw));
+        ubw.hdr.opcode = d9mt_wire_op_upload_buffer;
+        ubw.hdr.size = sizeof(ubw);
+        ubw.wire_id = 973;
+        ubw.client_handle = 0xC973;
+        ubw.dst_offset = 0;
+        ubw.size = sizeof(mOff);
+        ubw.heap_offset = woff;
+        ubw.heap_generation = wg;
+        emit(&ubw, sizeof(ubw));
+        struct d9mt_wire_rec_bind_uniform_buffer_range burW;
+        memset(&burW, 0, sizeof(burW));
+        burW.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+        burW.hdr.size = sizeof(burW);
+        burW.stages = 0x1;
+        burW.slot = 4;
+        burW.offset = 0;
+        burW.length = sizeof(mOff);
+        emit(&burW, sizeof(burW));
+        struct d9mt_wire_rec_set_render_targets_by_id rtW;
+        memset(&rtW, 0, sizeof(rtW));
+        rtW.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rtW.hdr.size = sizeof(rtW);
+        rtW.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rtW.color[0].format = 80;
+        rtW.color[0].width = 640;
+        rtW.color[0].height = 480;
+        rtW.color[0].sample_count = 1;
+        emit(&rtW, sizeof(rtW));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } dW = {{{d9mt_wire_op_draw_indexed, sizeof(dW), 0}, 1, 0},
+                {{3, 1, 0, 0, 0, 0}}};
+        emit(&dW, sizeof(dW));
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v15 flood warm-up: frame never presented");
+      }
+
+      /* --- GATE (a) FLOOD: 500 draws, each with a FRESH 256 B constant
+       * slice (bind_range + upload_buffer + draw — the exact client
+       * emission order). Passes must stay O(scene): ONE materialized pass,
+       * not one per upload. Every upload must EXECUTE (bytes land), and the
+       * FINAL draw's constants must be the ones on screen. --- */
+      {
+        uint64_t enc0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+        uint64_t drw0 = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+        uint64_t upl0 = atomic_load_explicit(&status->uploads_executed, memory_order_relaxed);
+        struct d9mt_wire_rec_set_render_targets_by_id rtF;
+        memset(&rtF, 0, sizeof(rtF));
+        rtF.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rtF.hdr.size = sizeof(rtF);
+        rtF.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rtF.color[0].format = 80;
+        rtF.color[0].width = 640;
+        rtF.color[0].height = 480;
+        rtF.color[0].sample_count = 1;
+        emit(&rtF, sizeof(rtF));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        for (uint32_t i = 1; i <= 500; i++) {
+          const float *m = (i == 500) ? mVis : mOff;
+          uint64_t mg = 0;
+          uint64_t moff = heap_put(m, 64, &mg);
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 256ull * i;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct d9mt_wire_rec_upload_buffer ub;
+          memset(&ub, 0, sizeof(ub));
+          ub.hdr.opcode = d9mt_wire_op_upload_buffer;
+          ub.hdr.size = sizeof(ub);
+          ub.wire_id = 973;
+          ub.client_handle = 0xC973;
+          ub.dst_offset = 256ull * i;
+          ub.size = 64;
+          ub.heap_offset = moff;
+          ub.heap_generation = mg;
+          emit(&ub, sizeof(ub));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dF = {{{d9mt_wire_op_draw_indexed, sizeof(dF), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dF, sizeof(dF));
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 20000))
+          FAIL("v15 flood: frame never presented");
+        uint64_t encD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - enc0;
+        uint64_t drwD = atomic_load_explicit(&status->draws_executed, memory_order_relaxed) - drw0;
+        uint64_t uplD = atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) - upl0;
+        if (drwD != 500)
+          FAIL("v15 flood: %" PRIu64 "/500 draws executed", drwD);
+        if (uplD != 500)
+          FAIL("v15 flood: %" PRIu64 "/500 uploads executed", uplD);
+        if (encD > 4)
+          FAIL("v15 flood: %" PRIu64 " render passes for 500 uploading draws "
+               "(want O(scene) ~1 — per-upload pass shatter is back)", encD);
+        uint32_t sF = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sfF = IOSurfaceLookup(ids[sF]);
+        if (!sfF)
+          FAIL("v15 flood: IOSurfaceLookup failed");
+        IOSurfaceLock(sfF, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *bF = IOSurfaceGetBaseAddress(sfF);
+        size_t rF = IOSurfaceGetBytesPerRow(sfF);
+        uint8_t last[4], off[4];
+        memcpy(last, bF + 140 * rF + 453 * 4, 4); /* final matrix centroid */
+        memcpy(off, bF + 280 * rF + 266 * 4, 4);  /* offscreen matrices' spot */
+        IOSurfaceUnlock(sfF, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sfF);
+        if (memcmp(last, magenta, 4) || memcmp(off, dkblue, 4))
+          FAIL("v15 flood: last=%02x%02x%02x%02x (want magenta) "
+               "off=%02x%02x%02x%02x (want clear) — the 500th slice's bytes "
+               "did not land where its draw reads",
+               last[0], last[1], last[2], last[3], off[0], off[1], off[2], off[3]);
+        printf("[test_feed] v15 flood: 500 fresh-slice uploading draws -> "
+               "%" PRIu64 " render pass(es), 500/500 draws + uploads, final "
+               "slice on screen\n", encD);
+      }
+
+      /* --- GATE (b) MID-PASS UPLOAD: two draws in ONE pass, the second's
+       * constants uploaded BETWEEN them. The first draw's already-encoded
+       * state must be unaffected (triangle A at its centroid), the second
+       * must see the new bytes (triangle B at its centroid), and the pass
+       * must NOT split. --- */
+      {
+        uint64_t enc0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+        float mA[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        struct d9mt_wire_rec_set_render_targets_by_id rtM;
+        memset(&rtM, 0, sizeof(rtM));
+        rtM.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rtM.hdr.size = sizeof(rtM);
+        rtM.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rtM.color[0].format = 80;
+        rtM.color[0].width = 640;
+        rtM.color[0].height = 480;
+        rtM.color[0].sample_count = 1;
+        emit(&rtM, sizeof(rtM));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        for (int d = 0; d < 2; d++) {
+          const float *m = d == 0 ? mA : mVis;
+          uint64_t mg = 0;
+          uint64_t moff = heap_put(m, 64, &mg);
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 129024ull + 256ull * d; /* fresh, past the flood */
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct d9mt_wire_rec_upload_buffer ub;
+          memset(&ub, 0, sizeof(ub));
+          ub.hdr.opcode = d9mt_wire_op_upload_buffer;
+          ub.hdr.size = sizeof(ub);
+          ub.wire_id = 973;
+          ub.client_handle = 0xC973;
+          ub.dst_offset = 129024ull + 256ull * d;
+          ub.size = 64;
+          ub.heap_offset = moff;
+          ub.heap_generation = mg;
+          emit(&ub, sizeof(ub));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dM = {{{d9mt_wire_op_draw_indexed, sizeof(dM), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dM, sizeof(dM));
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v15 mid-pass upload: frame never presented");
+        uint64_t encD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - enc0;
+        uint32_t sM = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sfM = IOSurfaceLookup(ids[sM]);
+        if (!sfM)
+          FAIL("v15 mid-pass upload: IOSurfaceLookup failed");
+        IOSurfaceLock(sfM, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *bM = IOSurfaceGetBaseAddress(sfM);
+        size_t rM = IOSurfaceGetBytesPerRow(sfM);
+        uint8_t cA[4], cB[4];
+        memcpy(cA, bM + 280 * rM + 266 * 4, 4); /* triangle A centroid */
+        memcpy(cB, bM + 140 * rM + 453 * 4, 4); /* triangle B centroid */
+        IOSurfaceUnlock(sfM, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sfM);
+        if (memcmp(cA, magenta, 4) || memcmp(cB, magenta, 4))
+          FAIL("v15 mid-pass upload: A=%02x%02x%02x%02x B=%02x%02x%02x%02x "
+               "(both want magenta) — mid-pass staged bytes broke a draw",
+               cA[0], cA[1], cA[2], cA[3], cB[0], cB[1], cB[2], cB[3]);
+        if (encD > 2)
+          FAIL("v15 mid-pass upload: %" PRIu64 " render passes for one "
+               "two-draw pass (mid-pass upload split it)", encD);
+        printf("[test_feed] v15 mid-pass upload: both draws correct across a "
+               "mid-pass constant upload, %" PRIu64 " pass(es)\n", encD);
+      }
+
+      /* --- GATE (c) PARTIAL DS CLEAR: full depth clear to 1.0, then a
+       * SCISSORED partial clear (left half) to 0.0, then a fullscreen
+       * triangle at z=0.5 with LESS: rejected inside the rect (clear color
+       * shows), accepted outside (magenta). A dropped partial clear leaves
+       * depth=1.0 everywhere -> magenta on both probes. Fill PSO builds
+       * async -> wave retries (stash+drain covers wave 1). --- */
+      {
+        float mZ[16] = {8, 0, 0, 0, 0, 8, 0, 0, 0, 0, 1, 0, 2.f, 2.f, 0.5f, 1};
+        int pcOk = 0;
+        for (int w = 1; w <= 30 && !pcOk; w++) {
+          struct d9mt_wire_rec_set_render_targets_by_id rtD;
+          memset(&rtD, 0, sizeof(rtD));
+          rtD.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+          rtD.hdr.size = sizeof(rtD);
+          rtD.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+          rtD.color[0].format = 80;
+          rtD.color[0].width = 640;
+          rtD.color[0].height = 480;
+          rtD.color[0].sample_count = 1;
+          rtD.depth_stencil.image_wire_id = 960; /* v12 depth texture */
+          rtD.depth_stencil.format = 260;
+          rtD.depth_stencil.width = 640;
+          rtD.depth_stencil.height = 480;
+          rtD.depth_stencil.sample_count = 1;
+          emit(&rtD, sizeof(rtD));
+          emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+          struct d9mt_wire_rec_clear_image_view civ;
+          memset(&civ, 0, sizeof(civ));
+          civ.hdr.opcode = d9mt_wire_op_clear_image_view;
+          civ.hdr.size = sizeof(civ);
+          civ.wire_id = 960;
+          civ.format = 260;
+          civ.width = 640;
+          civ.height = 480;
+          civ.aspects = 0x2; /* depth */
+          civ.value.depth = 1.0f;
+          emit(&civ, sizeof(civ)); /* full: load-action mini-pass (V12) */
+          civ.width = 320;         /* PARTIAL: left half to 0.0 */
+          civ.value.depth = 0.0f;
+          emit(&civ, sizeof(civ));
+          struct d9mt_wire_rec_set_depth_stencil_state dss;
+          memset(&dss, 0, sizeof(dss));
+          dss.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+          dss.hdr.size = sizeof(dss);
+          dss.depth_compare_op = 1; /* Less */
+          dss.depth_test = 1;
+          dss.front.compare_op = dss.back.compare_op = 7;
+          dss.front.read_mask = dss.back.read_mask = 0xFF;
+          dss.front.write_mask = dss.back.write_mask = 0xFF;
+          emit(&dss, sizeof(dss));
+          uint64_t mg = 0;
+          uint64_t moff = heap_put(mZ, 64, &mg);
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 130048;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct d9mt_wire_rec_upload_buffer ub;
+          memset(&ub, 0, sizeof(ub));
+          ub.hdr.opcode = d9mt_wire_op_upload_buffer;
+          ub.hdr.size = sizeof(ub);
+          ub.wire_id = 973;
+          ub.client_handle = 0xC973;
+          ub.dst_offset = 130048;
+          ub.size = 64;
+          ub.heap_offset = moff;
+          ub.heap_generation = mg;
+          emit(&ub, sizeof(ub));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dD = {{{d9mt_wire_op_draw_indexed, sizeof(dD), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dD, sizeof(dD));
+          emit_present(++frame);
+          if (wait_u64(&status->frames, frame, 15000))
+            FAIL("v15 partial DS clear: frame never presented");
+          uint32_t sD = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+          IOSurfaceRef sfD = IOSurfaceLookup(ids[sD]);
+          if (!sfD)
+            FAIL("v15 partial DS clear: IOSurfaceLookup failed");
+          IOSurfaceLock(sfD, kIOSurfaceLockReadOnly, NULL);
+          const uint8_t *bD = IOSurfaceGetBaseAddress(sfD);
+          size_t rD = IOSurfaceGetBytesPerRow(sfD);
+          uint8_t in[4], out[4];
+          memcpy(in, bD + 240 * rD + 160 * 4, 4);  /* inside cleared rect */
+          memcpy(out, bD + 240 * rD + 480 * 4, 4); /* outside the rect */
+          IOSurfaceUnlock(sfD, kIOSurfaceLockReadOnly, NULL);
+          CFRelease(sfD);
+          if (!memcmp(in, dkblue, 4) && !memcmp(out, magenta, 4)) {
+            pcOk = 1;
+            printf("[test_feed] v15 partial DS clear: scissored depth clear "
+                   "rejected the draw inside the rect, accepted outside "
+                   "(wave %d)\n", w);
+          } else if (w == 30) {
+            FAIL("v15 partial DS clear: in=%02x%02x%02x%02x (want clear: "
+                 "depth 0.0 rejects z=0.5) out=%02x%02x%02x%02x (want "
+                 "magenta: depth 1.0 accepts) — partial DS clear still "
+                 "dropped/misplaced",
+                 in[0], in[1], in[2], in[3], out[0], out[1], out[2], out[3]);
+          } else {
+            usleep(30000);
+          }
+        }
+        /* restore demo-neutral depth state + color-only RT for later
+         * scenarios */
+        struct d9mt_wire_rec_set_depth_stencil_state dssOff2;
+        memset(&dssOff2, 0, sizeof(dssOff2));
+        dssOff2.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+        dssOff2.hdr.size = sizeof(dssOff2);
+        dssOff2.depth_compare_op = 7;
+        dssOff2.front.compare_op = dssOff2.back.compare_op = 7;
+        dssOff2.front.read_mask = dssOff2.back.read_mask = 0xFF;
+        dssOff2.front.write_mask = dssOff2.back.write_mask = 0xFF;
+        emit(&dssOff2, sizeof(dssOff2));
+        struct d9mt_wire_rec_set_render_targets_by_id rtR;
+        memset(&rtR, 0, sizeof(rtR));
+        rtR.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rtR.hdr.size = sizeof(rtR);
+        rtR.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rtR.color[0].format = 80;
+        rtR.color[0].width = 640;
+        rtR.color[0].height = 480;
+        rtR.color[0].sample_count = 1;
+        emit(&rtR, sizeof(rtR));
+      }
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the

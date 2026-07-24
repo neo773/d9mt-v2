@@ -194,6 +194,14 @@ namespace dxvk::backend {
       uint32_t      type   = 0u; /* index buffer: MtlIndexType */
       bool          dirty  = false; /* UBO: (re)bound since the last draw-time
                                      * content snapshot (S3 v13) */
+      /* V15 re-ship dedup: the exact range+content last shipped from this
+       * shadow. A rebind of the same slice with unchanged bytes (fnv64) is
+       * heap traffic the server already holds — skip it. Only updated when
+       * the emit actually landed (heapAlloc can drop on a full heap). */
+      uint64_t      lastShipWire = 0u;
+      uint64_t      lastShipOff  = 0u;
+      uint64_t      lastShipLen  = 0u;
+      uint64_t      lastShipSum  = 0u;
     };
     BufShadow m_streamShadow[16];
     BufShadow m_uboShadow[2][8];
@@ -285,7 +293,9 @@ namespace dxvk::backend {
      * the server keeps its previous content for that resource. */
     uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut,
                        bool quiet = false);
-    void     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
+    /* Returns true when the record actually shipped (false = full-heap drop
+     * or unclaimed wire) — V15 re-ship dedup keys off this. */
+    bool     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
                               uint64_t dstOff, const void* src, uint64_t size);
     void     emitUploadTextureRecord(const d9mt_wire_rec_upload_texture& fields,
                                      uint64_t heapOff, uint64_t gen);

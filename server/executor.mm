@@ -243,6 +243,23 @@ struct Resource {
    * reads these shipped bytes when the bound offset matches. */
   uint64_t lastUploadWindow = 0;
   uint64_t lastUploadOffset = ~0ull;
+  /* V15 upload-flood fix: CPU-staging discipline for shared-storage buffers
+   * (mirror of the client's UploadRing rule: memory is never rewritten under
+   * an encoded-but-incomplete draw). refMin/refMax summarize the byte ranges
+   * of this buffer referenced by GPU work encoded in command buffers that
+   * have NOT yet completed; refSerial is the latest such serial (watermark is
+   * dead once completedSerial() >= refSerial). D3D9 constant rings advance
+   * offsets monotonically per draw and rename on wrap, so a fresh upload
+   * almost never overlaps the live watermark — those uploads memcpy straight
+   * into the shared MTLBuffer contents: NO encoder, NO render-pass close. */
+  uint64_t refMin = ~0ull, refMax = 0;
+  uint64_t refSerial = 0;
+  /* Overlapping/non-shared uploads stage into the slab immediately (heap ack
+   * flows) and their slab->buffer blit is DEFERRED to the next natural pass
+   * boundary; a draw that binds a buffer with pending blits forces the flush
+   * (counted — the old always-close behavior, now the rare path). */
+  uint32_t pendingXfers = 0;
+  uint64_t xferMin = ~0ull, xferMax = 0;
 };
 
 /* S3 v13 checksum basis for the per-draw input parity logs — identical
@@ -327,6 +344,7 @@ struct Stream {
 struct CbvBinding {
   id<MTLBuffer> buf = nil;
   uint64_t offset = 0;
+  uint64_t length = 0; /* V15: bound range length (draw-time ref marking) */
   bool bound = false;
   std::shared_ptr<Resource> res; /* S3 v13: parity logging (wireId/uploadSum) */
 };
@@ -372,6 +390,15 @@ struct UploadSlab {
   id<MTLBuffer> buf = nil;
   uint64_t used = 0;
   uint64_t serial = 0;
+};
+
+/* V15: one slab->buffer blit parked for the next natural pass boundary
+ * (materializePass / submitFrame / on-demand at a consuming draw). The slab
+ * bytes are already copied (heap region acked); only the encode is deferred. */
+struct DeferredXfer {
+  std::shared_ptr<Resource> res;
+  id<MTLBuffer> srcBuf = nil;
+  uint64_t srcOff = 0, dstOff = 0, size = 0;
 };
 
 struct Exec {
@@ -524,6 +551,12 @@ struct Exec {
    * count and name itself (first-8 logs at the drop sites). */
   uint64_t clearDropUnresolved = 0; /* clear_by_id target never resolved */
   uint64_t clearDsPartialDrop = 0;  /* clear_image_view partial-rect DS drop */
+  /* V15 upload-flood buckets: direct = memcpy into shared contents (no
+   * encoder); staged = slab copy + deferred blit; flushUse = a draw consumed
+   * a buffer with pending blits and forced the flush (the old pass-shatter
+   * shape, now counted because it should be rare). */
+  uint64_t uplDirect = 0, uplStaged = 0, uplFlushUse = 0;
+  std::vector<DeferredXfer> deferredXfers;
   uint64_t dsUnresolvedBinds = 0;   /* set_rt ds named but texture nil */
   uint64_t dssoDefaulted = 0;       /* draw w/ ds attachment before any
                                        set_depth_stencil_state record */
@@ -531,7 +564,8 @@ struct Exec {
   struct StatsSnap {
     uint64_t draws = 0, skipped = 0, pend = 0, noRt = 0, psoFail = 0,
              noShader = 0, noIndex = 0, encoders = 0, uploads = 0,
-             clrDrop = 0, clrDsPart = 0, dsUnres = 0, dssoDef = 0;
+             clrDrop = 0, clrDsPart = 0, dsUnres = 0, dssoDef = 0,
+             uplDirect = 0, uplStaged = 0, uplFlushUse = 0;
   } statsSnap;
 
   /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
@@ -541,6 +575,11 @@ struct Exec {
   id<MTLLibrary> blitLib = nil;
   id<MTLSamplerState> blitSamplers[2] = {nil, nil}; /* nearest, linear */
   std::unordered_map<uint64_t, std::shared_ptr<PsoEntry>> blitPsoCache;
+  /* V15: partial-clear fill pipelines (scissored fullscreen-triangle draw
+   * writing the clear color and/or clear depth) — the partial-rect
+   * clear_image_view path that used to DROP. Keyed {colorFmt|0, samples,
+   * hasColor}; async like blitPsoCache, stash+retry via pendingImgClears. */
+  std::unordered_map<uint64_t, std::shared_ptr<PsoEntry>> fillPsoCache;
   std::vector<d9mt_wire_rec_blit_texture_view> pendingBlits;
   /* one-shot records whose texture is still BUILDING on the create worker
    * (the UpdateTexture-right-after-create shape): stashed + drained at
@@ -609,6 +648,7 @@ static void ensureCmdbuf() {
 static void closePass();
 static void closeXfer();
 static void flushPendingClears();
+static void flushDeferredXfers();
 
 static void submitFrame() {
   /* v11: a clear-only frame (no draw ever materialized the pass) must not
@@ -616,6 +656,7 @@ static void submitFrame() {
    * execution flushes them at present too. */
   flushPendingClears();
   closePass();
+  flushDeferredXfers(); /* V15: parked slab blits ride the frame's xfer close */
   closeXfer();
   if (!g->cmdbuf)
     return;
@@ -733,6 +774,69 @@ static RingSlice ringAlloc(uint64_t size, uint64_t align) {
   return { buf.contents, buf.gpuAddress, buf, 0 };
 }
 
+/* --- V15 upload staging (the pass-shatter fix) --------------------------------
+ * Every wire buffer is SHARED storage (create_buffer), so an upload whose
+ * destination range is not referenced by any encoded-but-incomplete GPU work
+ * may write the bytes with a plain memcpy — visible to every LATER-encoded
+ * draw, invisible to nothing (no encoded work reads the range). The D3D9
+ * constant ring guarantees exactly this shape (fresh offset per draw, rename
+ * on wrap), which is what turned per-draw constant re-ships into per-draw
+ * render-pass closes (ensureXfer) — ~292 passes/frame on a ~60-pass scene. */
+
+/* Record that encoded GPU work (a draw's binding, a copy) reads or writes
+ * res->buffer bytes [off, off+len). Live until the current serial completes. */
+static void markBufRef(const std::shared_ptr<Resource>& res, uint64_t off,
+                       uint64_t len) {
+  if (!res || !len)
+    return;
+  if (res->refSerial && completedSerial() >= res->refSerial) {
+    res->refMin = ~0ull; /* watermark retired with the GPU work */
+    res->refMax = 0;
+  }
+  if (off < res->refMin)
+    res->refMin = off;
+  if (off + len > res->refMax)
+    res->refMax = off + len;
+  res->refSerial = g->serial;
+}
+
+/* True when [off, off+len) may be observed by encoded-but-incomplete GPU
+ * work (draw refs) or would reorder against a parked slab blit. */
+static bool rangeLive(const std::shared_ptr<Resource>& res, uint64_t off,
+                      uint64_t len) {
+  if (res->refSerial && completedSerial() < res->refSerial &&
+      off < res->refMax && off + len > res->refMin)
+    return true;
+  if (res->pendingXfers && off < res->xferMax && off + len > res->xferMin)
+    return true;
+  return false;
+}
+
+/* Encode every parked slab->buffer blit into the shared xfer encoder. Only
+ * called at natural boundaries (materializePass, submitFrame) or on demand
+ * when a draw consumes a buffer with parked blits — never per record. */
+static void flushDeferredXfers() {
+  if (g->deferredXfers.empty())
+    return;
+  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+  for (DeferredXfer& d : g->deferredXfers) {
+    if (enc)
+      [enc copyFromBuffer:d.srcBuf
+             sourceOffset:(NSUInteger)d.srcOff
+                 toBuffer:d.res->buffer
+        destinationOffset:(NSUInteger)d.dstOff
+                     size:(NSUInteger)d.size];
+    /* the blit is now encoded GPU work WRITING the range — a later direct
+     * memcpy into it would be overwritten when the GPU runs; keep it live */
+    markBufRef(d.res, d.dstOff, d.size);
+    if (d.res->pendingXfers && --d.res->pendingXfers == 0) {
+      d.res->xferMin = ~0ull;
+      d.res->xferMax = 0;
+    }
+  }
+  g->deferredXfers.clear();
+}
+
 /* --- argument tables (decision 3 port; rotate once per pass) ----------------- */
 
 static ArgTablePair makeArgTablePair() {
@@ -782,6 +886,7 @@ static void materializePass() {
   if (g->pass.active)
     return;
   ensureCmdbuf();
+  flushDeferredXfers(); /* V15: parked slab blits ride this natural boundary */
   closeXfer(); /* pending heap blits must order ahead of this pass */
 
   MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
@@ -1272,6 +1377,51 @@ static bool promotePendingShaders() {
   return pending;
 }
 
+/* V15: stamp the ranges this draw's bindings make the GPU read — the
+ * upload direct-memcpy path must never rewrite bytes an encoded draw
+ * observes (Resource watermark; see markBufRef). O(streams+cbvs+index). */
+static void markDrawRefs() {
+  for (uint32_t i = 0; i < kMaxStreams; i++) {
+    Stream& s = g->streams[i];
+    if (s.bound && s.res && s.buf)
+      markBufRef(s.res, s.offset,
+                 s.length ? s.length : (uint64_t)s.buf.length - s.offset);
+  }
+  if (g->index.bound && g->index.res && g->index.buf)
+    markBufRef(g->index.res, g->index.offset,
+               g->index.length ? g->index.length
+                               : (uint64_t)g->index.buf.length - g->index.offset);
+  for (uint32_t st = 0; st < 2; st++) {
+    for (uint32_t slot = 0; slot < 8; slot++) {
+      CbvBinding& cbv = g->stages[st].cbvs[slot];
+      if (!cbv.bound || !cbv.res || !cbv.buf)
+        continue;
+      /* range length when the bind carried one, else the D3D9 constant-block
+       * ceiling (256 float4 registers) clamped to the buffer end */
+      uint64_t len = cbv.length ? cbv.length : 4096ull;
+      if (cbv.offset < cbv.buf.length &&
+          len > (uint64_t)cbv.buf.length - cbv.offset)
+        len = (uint64_t)cbv.buf.length - cbv.offset;
+      markBufRef(cbv.res, cbv.offset, len);
+    }
+  }
+}
+
+/* V15: does any buffer this draw binds still have a PARKED slab blit? */
+static bool boundResHasPendingXfer() {
+  for (uint32_t i = 0; i < kMaxStreams; i++)
+    if (g->streams[i].bound && g->streams[i].res && g->streams[i].res->pendingXfers)
+      return true;
+  if (g->index.bound && g->index.res && g->index.res->pendingXfers)
+    return true;
+  for (uint32_t st = 0; st < 2; st++)
+    for (uint32_t slot = 0; slot < 8; slot++)
+      if (g->stages[st].cbvs[slot].bound && g->stages[st].cbvs[slot].res &&
+          g->stages[st].cbvs[slot].res->pendingXfers)
+        return true;
+  return false;
+}
+
 static bool prepareDraw() {
   if (promotePendingShaders()) {
     /* library build in flight on the create worker — same accounting as an
@@ -1280,6 +1430,14 @@ static bool prepareDraw() {
     atomic_fetch_add_explicit(&g->status->draws_skipped_pending_pso, 1,
                               memory_order_relaxed);
     return false;
+  }
+  if (!g->deferredXfers.empty() && boundResHasPendingXfer()) {
+    /* a parked upload feeds THIS draw: flush it ahead of the pass (the old
+     * always-close behavior, now only on actual consumption — counted) */
+    if (g->pass.active)
+      closePass();
+    flushDeferredXfers();
+    g->uplFlushUse++;
   }
   if (!g->pass.pending && !g->pass.active) {
     atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
@@ -1341,6 +1499,7 @@ static bool prepareDraw() {
     flushDynamicState();
     g->dirtyState = false;
   }
+  markDrawRefs(); /* V15: the draw is now encoded work reading these ranges */
   return true;
 }
 
@@ -1842,15 +2001,6 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
     execError("upload_buffer: out of range");
     return;
   }
-  id<MTL4ComputeCommandEncoder> enc = ensureXfer();
-  if (!enc)
-    return;
-  RingSlice rs = ringAlloc(r->size, 256);
-  if (!rs.cpu) {
-    execError("upload_buffer: slab alloc failed");
-    return;
-  }
-  std::memcpy(rs.cpu, src, (size_t)r->size);
   res->uploadSum = fnv64(src, (size_t)r->size); /* S3 v13 parity (client twin
     * sums the same bytes at emission — mtl_wire_context emitUploadBuffer) */
   /* S3 v14: capture the shipped-bytes window so logServerDraw reports the
@@ -1858,13 +2008,48 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
    * buffer.contents that freezes at the fresh rotating offset. */
   res->lastUploadWindow = fnv64(src, r->size < 64u ? (size_t)r->size : 64u);
   res->lastUploadOffset = r->dst_offset;
+
+  /* V15 THE PASS-SHATTER FIX: wire buffers are shared storage; a range no
+   * encoded-but-incomplete GPU work references takes a plain memcpy — no
+   * encoder, no ensureXfer, no render-pass close. The D3D9 constant-ring
+   * shape (fresh offset per draw, rename on wrap) hits this path ~always. */
+  if (res->buffer.storageMode == MTLStorageModeShared &&
+      !rangeLive(res, r->dst_offset, r->size)) {
+    std::memcpy((uint8_t*)res->buffer.contents + r->dst_offset, src,
+                (size_t)r->size);
+    heapAck(r->heap_generation);
+    res->hasContent = true;
+    g->uplDirect++;
+    atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
+    return;
+  }
+
+  /* Overlapping (or non-shared) destination: stage into the slab NOW so the
+   * heap ack flows, and PARK the blit for the next natural pass boundary —
+   * earlier-encoded draws of the open pass execute before the blit (stream
+   * semantics preserved), later consumers force the flush at prepareDraw. */
+  ensureCmdbuf(); /* ringAlloc stamps the current recording serial */
+  RingSlice rs = ringAlloc(r->size, 256);
+  if (!rs.cpu) {
+    execError("upload_buffer: slab alloc failed");
+    return;
+  }
+  std::memcpy(rs.cpu, src, (size_t)r->size);
   heapAck(r->heap_generation); /* region free the moment the copy is taken */
-  [enc copyFromBuffer:rs.buf
-         sourceOffset:(NSUInteger)rs.off
-             toBuffer:res->buffer
-    destinationOffset:(NSUInteger)r->dst_offset
-                 size:(NSUInteger)r->size];
+  DeferredXfer d;
+  d.res = res;
+  d.srcBuf = rs.buf;
+  d.srcOff = rs.off;
+  d.dstOff = r->dst_offset;
+  d.size = r->size;
+  g->deferredXfers.push_back(std::move(d));
+  res->pendingXfers++;
+  if (r->dst_offset < res->xferMin)
+    res->xferMin = r->dst_offset;
+  if (r->dst_offset + r->size > res->xferMax)
+    res->xferMax = r->dst_offset + r->size;
   res->hasContent = true;
+  g->uplStaged++;
   atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
 }
 
@@ -2034,6 +2219,21 @@ fragment float4 d9mtBlitFs(V in [[stage_in]],
                            sampler smp [[sampler(0)]]) {
   return src.sample(smp, in.uv);
 }
+/* V15 partial clears: fullscreen triangle at z = clear depth, scissored to
+ * the clear rect. Depth/stencil aspects run WITHOUT a fragment function
+ * (vertex-only pipeline: depth from rasterization, stencil from the Replace
+ * DSSO + reference); the color aspect adds the constant-color fragment. */
+struct FillP { float4 color; float depth; };
+struct FillV { float4 pos [[position]]; };
+vertex FillV d9mtFillVs(uint vid [[vertex_id]], constant FillP& p [[buffer(0)]]) {
+  float2 t = float2(vid == 1 ? 2.0 : 0.0, vid == 2 ? 2.0 : 0.0);
+  FillV o;
+  o.pos = float4(t.x * 2.0 - 1.0, 1.0 - t.y * 2.0, p.depth, 1.0);
+  return o;
+}
+fragment float4 d9mtFillFs(constant FillP& p [[buffer(0)]]) {
+  return p.color;
+}
 )MSL";
 
 static std::shared_ptr<Resource> resolveCopyRes(uint64_t handle, uint64_t wireId) {
@@ -2093,6 +2293,11 @@ static void handleCopyBuffer(const d9mt_wire_rec_copy_buffer* r) {
     execError("copy_buffer: out of range");
     return;
   }
+  /* V15: parked slab blits into either side must encode BEFORE this copy
+   * (stream order); the copy itself is encoded GPU work on both ranges. */
+  if (!g->deferredXfers.empty() &&
+      (sres->pendingXfers || dres->pendingXfers))
+    flushDeferredXfers();
   id<MTL4ComputeCommandEncoder> enc = ensureXfer();
   if (!enc)
     return;
@@ -2101,6 +2306,8 @@ static void handleCopyBuffer(const d9mt_wire_rec_copy_buffer* r) {
              toBuffer:dres->buffer
     destinationOffset:(NSUInteger)r->dst_offset
                  size:(NSUInteger)r->bytes];
+  markBufRef(sres, r->src_offset, r->bytes);
+  markBufRef(dres, r->dst_offset, r->bytes);
   dres->hasContent = true;
   /* v13.1 parity: propagate the shipped-content sum through the GPU copy
    * (client twin propagates the same mix at emission). */
@@ -2161,6 +2368,194 @@ static void handleGenerateMipmaps(const d9mt_wire_rec_generate_mipmaps* r) {
     g->pendingMipgens.push_back(*r);
 }
 
+/* V15: partial-rect clears execute as a scissored fullscreen-triangle
+ * mini-pass (the client's depthClearVsMain semantics ported): Load the
+ * attachment, draw at z = clear depth with an Always/write DSSO (stencil
+ * Replace + reference for the stencil aspect; constant-color fragment for
+ * the color aspect), scissor = the clear rect. At GTA's 369 drops/window
+ * this is no longer a rare residue — a dropped partial DEPTH clear leaves
+ * garbage that can reject every later fragment.
+ * Returns 0 while the fill PSO is still compiling (stash + retry at present,
+ * same discipline as blits); 1 = executed; -1 = dropped for real. */
+static int tryExecutePartialClear(const d9mt_wire_rec_clear_image_view* r,
+                                  const std::shared_ptr<Resource>& res,
+                                  uint32_t mipW, uint32_t mipH) {
+  id<MTLTexture> tex = res->texture;
+  if (!g->blitLib)
+    return -1; /* no fill shaders — drop (counted by the caller) */
+  const bool colorAspect = (r->aspects & 0x1u) != 0;
+  const bool depthAspect = (r->aspects & 0x2u) != 0;
+  const bool stencilAspect = (r->aspects & 0x4u) != 0;
+  const MTLPixelFormat fmt = tex.pixelFormat;
+  const bool fmtHasStencil =
+      (NSUInteger)fmt == 255 || fmt == MTLPixelFormatDepth32Float_Stencil8 ||
+      fmt == MTLPixelFormatStencil8;
+  const uint64_t samples = tex.sampleCount ? tex.sampleCount : 1;
+
+  /* fill PSO (async, cached): color variant keys the attachment format */
+  const uint64_t key = (colorAspect ? (1ull << 63) | (uint64_t)fmt : 0ull) |
+                       (samples << 40);
+  auto it = g->fillPsoCache.find(key);
+  std::shared_ptr<PsoEntry> entry;
+  if (it == g->fillPsoCache.end()) {
+    entry = std::make_shared<PsoEntry>();
+    g->fillPsoCache.emplace(key, entry);
+    MTL4RenderPipelineDescriptor* desc = [[MTL4RenderPipelineDescriptor alloc] init];
+    MTL4LibraryFunctionDescriptor* vfd = [[MTL4LibraryFunctionDescriptor alloc] init];
+    vfd.library = g->blitLib;
+    vfd.name = @"d9mtFillVs";
+    desc.vertexFunctionDescriptor = vfd;
+    if (colorAspect) {
+      MTL4LibraryFunctionDescriptor* ffd = [[MTL4LibraryFunctionDescriptor alloc] init];
+      ffd.library = g->blitLib;
+      ffd.name = @"d9mtFillFs";
+      desc.fragmentFunctionDescriptor = ffd;
+      desc.colorAttachments[0].pixelFormat = fmt;
+    } /* depth/stencil aspects: vertex-only pipeline, no color attachments */
+    desc.rasterSampleCount = (NSUInteger)samples;
+    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    struct d9mt_status* status = g->status;
+    atomic_fetch_add_explicit(&status->psos_pending, 1, memory_order_relaxed);
+    [g->compiler newRenderPipelineStateWithDescriptor:desc
+                                  compilerTaskOptions:nil
+                                    completionHandler:^(id<MTLRenderPipelineState> pso,
+                                                        NSError* err) {
+      if (pso) {
+        entry->pso = pso;
+        entry->state.store(1, std::memory_order_release);
+        atomic_fetch_add_explicit(&status->psos_built, 1, memory_order_relaxed);
+      } else {
+        entry->state.store(2, std::memory_order_release);
+        atomic_fetch_add_explicit(&status->exec_errors, 1, memory_order_relaxed);
+        fprintf(stderr, "[serverd] fill PSO build failed: %s\n",
+                err ? err.localizedDescription.UTF8String : "(no error)");
+      }
+      atomic_fetch_sub_explicit(&status->psos_pending, 1, memory_order_relaxed);
+    }];
+    return 0; /* just kicked — stash */
+  }
+  entry = it->second;
+  const uint32_t state = entry->state.load(std::memory_order_acquire);
+  if (state == 0)
+    return 0; /* compiling — stash */
+  if (state != 1 || !entry->pso)
+    return -1; /* failed — drop (counted by the caller) */
+
+  /* DSSO: Always + write for the cleared aspects only (cached) */
+  id<MTLDepthStencilState> dsso = nil;
+  if (depthAspect || stencilAspect) {
+    std::string dkey = std::string("V15pclr:") + (depthAspect ? "D" : "d") +
+                       (stencilAspect ? "S" : "s");
+    auto dit = g->dssoCache.find(dkey);
+    if (dit != g->dssoCache.end()) {
+      dsso = dit->second;
+    } else {
+      MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
+      dd.depthCompareFunction = MTLCompareFunctionAlways;
+      dd.depthWriteEnabled = depthAspect;
+      if (stencilAspect) {
+        MTLStencilDescriptor* sd = [[MTLStencilDescriptor alloc] init];
+        sd.stencilCompareFunction = MTLCompareFunctionAlways;
+        sd.stencilFailureOperation = MTLStencilOperationReplace;
+        sd.depthFailureOperation = MTLStencilOperationReplace;
+        sd.depthStencilPassOperation = MTLStencilOperationReplace;
+        sd.readMask = 0xFFu;
+        sd.writeMask = 0xFFu;
+        dd.frontFaceStencil = sd;
+        dd.backFaceStencil = sd;
+      }
+      dsso = [g->device newDepthStencilStateWithDescriptor:dd];
+      g->dssoCache.emplace(std::move(dkey), dsso);
+    }
+    if (!dsso)
+      return -1;
+  }
+
+  closePass();
+  closeXfer();
+  ensureCmdbuf();
+  MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
+  if (colorAspect) {
+    desc.colorAttachments[0].texture = tex;
+    desc.colorAttachments[0].level = r->mip;
+    desc.colorAttachments[0].slice = r->layer;
+    desc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+  } else {
+    if (fmt != MTLPixelFormatStencil8) {
+      desc.depthAttachment.texture = tex;
+      desc.depthAttachment.level = r->mip;
+      desc.depthAttachment.slice = r->layer;
+      desc.depthAttachment.loadAction = MTLLoadActionLoad;
+      desc.depthAttachment.storeAction = MTLStoreActionStore;
+    }
+    if (fmtHasStencil) {
+      desc.stencilAttachment.texture = tex;
+      desc.stencilAttachment.level = r->mip;
+      desc.stencilAttachment.slice = r->layer;
+      desc.stencilAttachment.loadAction = MTLLoadActionLoad;
+      desc.stencilAttachment.storeAction = MTLStoreActionStore;
+    }
+  }
+  desc.renderTargetWidth = mipW;
+  desc.renderTargetHeight = mipH;
+  id<MTL4RenderCommandEncoder> enc = [g->cmdbuf renderCommandEncoderWithDescriptor:desc];
+  if (!enc) {
+    execError("partial clear: encoder failed");
+    return -1;
+  }
+  atomic_fetch_add_explicit(&g->status->encoders, 1, memory_order_relaxed);
+  [enc setRenderPipelineState:entry->pso];
+  MTLViewport vp = {0.0, 0.0, (double)mipW, (double)mipH, 0.0, 1.0};
+  [enc setViewport:vp];
+  MTLScissorRect sc;
+  sc.x = r->x < mipW ? r->x : 0;
+  sc.y = r->y < mipH ? r->y : 0;
+  sc.width = r->width;
+  sc.height = r->height;
+  if (sc.x + sc.width > mipW)
+    sc.width = mipW - sc.x;
+  if (sc.y + sc.height > mipH)
+    sc.height = mipH - sc.y;
+  [enc setScissorRect:sc];
+  if (dsso) {
+    [enc setDepthStencilState:dsso];
+    [enc setStencilReferenceValue:r->value.stencil];
+  }
+  struct { float color[4]; float depth; float pad[3]; } fill = {};
+  std::memcpy(fill.color, r->value.color, sizeof(fill.color));
+  fill.depth = r->value.depth;
+  RingSlice rs = ringAlloc(sizeof(fill), 256);
+  if (!rs.cpu) {
+    [enc endEncoding];
+    execError("partial clear: slab alloc failed");
+    return -1;
+  }
+  std::memcpy(rs.cpu, &fill, sizeof(fill));
+  selectArgumentTablesForPass();
+  ArgTablePair& pair = g->argTables[g->currentArgTable];
+  [pair.table[0] setAddress:rs.gpu atIndex:0];
+  [pair.table[1] setAddress:rs.gpu atIndex:0];
+  [enc setArgumentTable:pair.table[0] atStages:MTLRenderStageVertex];
+  [enc setArgumentTable:pair.table[1] atStages:MTLRenderStageFragment];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc barrierAfterStages:(MTLStages)kStageFragment
+        beforeQueueStages:(MTLStages)kStageAll
+        visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+  [enc endEncoding];
+  res->hasContent = true;
+  g->dirtyPso = g->dirtyState = g->dirtyBindings = true;
+  g->argTablesBound = false;
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] partial clear #%d: wire=%llu aspects=0x%x "
+                      "rect=%u,%u %ux%u of %ux%u\n", n,
+              (unsigned long long)r->wire_id, r->aspects,
+              (unsigned)sc.x, (unsigned)sc.y, (unsigned)sc.width,
+              (unsigned)sc.height, mipW, mipH); }
+  return 1;
+}
+
 static bool tryExecuteClearImage(const d9mt_wire_rec_clear_image_view* r) {
   auto res = resolveCopyRes(r->client_handle, r->wire_id);
   if (!res)
@@ -2174,16 +2569,23 @@ static bool tryExecuteClearImage(const d9mt_wire_rec_clear_image_view* r) {
   const uint32_t mipH = (uint32_t)tex.height >> r->mip ? (uint32_t)tex.height >> r->mip : 1u;
   const bool fullRect = r->x == 0 && r->y == 0 && r->width >= mipW && r->height >= mipH;
   if (!fullRect) {
-    /* partial rects need the fill / depth-clear draw pipelines — a later
-     * slice. V12: counted per occurrence, named first-8 (a dropped partial
-     * DEPTH clear leaves garbage that can reject every later fragment). */
-    g->clearDsPartialDrop++;
-    static int warned = 0;
-    if (warned++ < 8) {
-      fprintf(stderr, "[serverd] clear_image_view #%d: partial clear dropped "
-                      "(wire=%llu aspects=0x%x rect=%u,%u %ux%u of %ux%u)\n",
-              warned, (unsigned long long)r->wire_id,
-              r->aspects, r->x, r->y, r->width, r->height, mipW, mipH);
+    /* V15: partial rects now execute as the scissored fill mini-pass. Only a
+     * genuinely unbuildable fill PSO still drops — counted + named, because
+     * a dropped partial DEPTH clear leaves garbage that can reject every
+     * later fragment. */
+    const int rc = tryExecutePartialClear(r, res, mipW, mipH);
+    if (rc == 0)
+      return false; /* fill PSO compiling — stash + retry at present */
+    if (rc < 0) {
+      g->clearDsPartialDrop++;
+      static int warned = 0;
+      if (warned++ < 8) {
+        fprintf(stderr, "[serverd] clear_image_view #%d: partial clear DROPPED "
+                        "(fill PSO unavailable; wire=%llu aspects=0x%x "
+                        "rect=%u,%u %ux%u of %ux%u)\n",
+                warned, (unsigned long long)r->wire_id,
+                r->aspects, r->x, r->y, r->width, r->height, mipW, mipH);
+      }
     }
     return true;
   }
@@ -2895,10 +3297,14 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       now.clrDsPart = g->clearDsPartialDrop;
       now.dsUnres = g->dsUnresolvedBinds;
       now.dssoDef = g->dssoDefaulted;
+      now.uplDirect = g->uplDirect;
+      now.uplStaged = g->uplStaged;
+      now.uplFlushUse = g->uplFlushUse;
       const Exec::StatsSnap& p = g->statsSnap;
       fprintf(stderr, "[serverd] srv-stats: draws=%llu skip=%llu{psoPend=%llu "
                       "psoFail=%llu noSh=%llu noRt=%llu noIdx=%llu} passes=%llu "
-                      "upl=%llu depth{clrDrop=%llu clrPart=%llu dsUnres=%llu "
+                      "upl=%llu{dir=%llu stg=%llu useFlush=%llu} "
+                      "depth{clrDrop=%llu clrPart=%llu dsUnres=%llu "
                       "dssoDef=%llu} /window\n",
               (unsigned long long)(now.draws - p.draws),
               (unsigned long long)(now.skipped - p.skipped),
@@ -2909,6 +3315,9 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
               (unsigned long long)(now.noIndex - p.noIndex),
               (unsigned long long)(now.encoders - p.encoders),
               (unsigned long long)(now.uploads - p.uploads),
+              (unsigned long long)(now.uplDirect - p.uplDirect),
+              (unsigned long long)(now.uplStaged - p.uplStaged),
+              (unsigned long long)(now.uplFlushUse - p.uplFlushUse),
               (unsigned long long)(now.clrDrop - p.clrDrop),
               (unsigned long long)(now.clrDsPart - p.clrDsPart),
               (unsigned long long)(now.dsUnres - p.dsUnres),
@@ -3557,6 +3966,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
           cbv.buf = res ? res->buffer : nil;
           cbv.res = res;
           cbv.offset = r->buf.offset;
+          cbv.length = r->buf.length;
           cbv.bound = cbv.buf != nil;
         }
       }
@@ -3566,8 +3976,10 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
     case d9mt_wire_op_bind_uniform_buffer_range: {
       const auto* r = (const d9mt_wire_rec_bind_uniform_buffer_range*)hdr;
       for (uint32_t st = 0; st < 2; st++) {
-        if (r->stages & (1u << st) && r->slot < 8)
+        if (r->stages & (1u << st) && r->slot < 8) {
           g->stages[st].cbvs[r->slot].offset = r->offset;
+          g->stages[st].cbvs[r->slot].length = r->length;
+        }
       }
       g->dirtyBindings = true;
       break;

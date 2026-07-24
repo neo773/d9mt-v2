@@ -808,12 +808,12 @@ namespace dxvk::backend {
     return start;
   }
 
-  void MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
+  bool MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
                                         uint64_t dstOff, const void* src, uint64_t size) {
     uint64_t gen = 0u;
     const uint64_t off = heapAlloc(src, size, &gen);
     if (off == UINT64_MAX)
-      return;
+      return false;
     if (auto* r = beginRecord<d9mt_wire_rec_upload_buffer>(d9mt_wire_op_upload_buffer)) {
       r->wire_id = wireId;
       r->client_handle = clientHandle;
@@ -826,7 +826,9 @@ namespace dxvk::backend {
        * the same sum over the heap region it consumes (Resource::uploadSum). */
       g_uploadSums[wireId] = fnv64(src, size_t(size));
       g_uploadsEmitted++;
+      return true;
     }
+    return false;
   }
 
   void MtlWireContext::emitUploadTextureRecord(const d9mt_wire_rec_upload_texture& fields,
@@ -1568,9 +1570,23 @@ namespace dxvk::backend {
       return;
     /* Per-draw cost by design: O(16) flag checks; heap work ONLY for slots
      * (re)bound since the last draw (the cube: one small range per frame).
-     * Never blocks: heapAlloc drops on a full heap. */
-    const void* uploaded[16] = {};
-    uint32_t nUploaded = 0u;
+     * Never blocks: heapAlloc drops on a full heap.
+     *
+     * V15 (the GTA upload flood, ~836 upload records/frame): two cuts —
+     * 1. SKIP a range whose exact [wire,offset,len,fnv64] already shipped
+     *    from this shadow (titles rebind ranges without changing bytes);
+     * 2. MERGE contiguous/overlapping dirty ranges on the SAME storage into
+     *    ONE upload_buffer record per draw. */
+    struct Cand {
+      const MtlAllocation* key;   /* storage identity */
+      uint64_t wireId, handle;
+      const uint8_t* base;        /* mapPtr */
+      uint64_t off, len;
+      BufShadow* shadows[16];
+      uint32_t nShadows;
+    };
+    Cand cands[16];
+    uint32_t nCand = 0u;
     for (uint32_t st = 0u; st < 2u; st++) {
       for (uint32_t slot = 0u; slot < 8u; slot++) {
         BufShadow& sh = m_uboShadow[st][slot];
@@ -1590,14 +1606,6 @@ namespace dxvk::backend {
         const Rc<MtlAllocation>& storage = slice.storage();
         if (storage == nullptr || storage->mapPtr == nullptr || !storage->wireId)
           continue;
-        /* both-stage binds (SpecData) mark two shadows — ship once */
-        bool dup = false;
-        for (uint32_t i = 0u; i < nUploaded; i++)
-          dup |= uploaded[i] == storage.ptr();
-        if (dup)
-          continue;
-        if (nUploaded < 16u)
-          uploaded[nUploaded++] = storage.ptr();
         const uint64_t off = slice.offset();
         if (off >= storage->size)
           continue;
@@ -1615,8 +1623,55 @@ namespace dxvk::backend {
               len, " B re-ship (cap 256 KiB) slot=", slot));
           continue;
         }
-        emitUploadBuffer(storage->wireId, storage->handle.buf, off,
-                         static_cast<const uint8_t*>(storage->mapPtr) + off, len);
+        /* V15 cut 1: this exact range+content already crossed the heap */
+        const uint64_t sum =
+            fnv64(static_cast<const uint8_t*>(storage->mapPtr) + off, size_t(len));
+        if (sh.lastShipWire == storage->wireId && sh.lastShipOff == off &&
+            sh.lastShipLen == len && sh.lastShipSum == sum)
+          continue;
+        /* V15 cut 2: coalesce into an existing candidate on the same storage
+         * when the ranges touch (covers both-stage binds — identical ranges —
+         * and split float/int/bool blocks in one constant set) */
+        Cand* c = nullptr;
+        for (uint32_t i = 0u; i < nCand; i++) {
+          Cand& e = cands[i];
+          if (e.key == storage.ptr() && off <= e.off + e.len && off + len >= e.off) {
+            c = &e;
+            break;
+          }
+        }
+        if (c != nullptr) {
+          const uint64_t lo = std::min(c->off, off);
+          const uint64_t hi = std::max(c->off + c->len, off + len);
+          c->off = lo;
+          c->len = hi - lo;
+        } else if (nCand < 16u) {
+          c = &cands[nCand++];
+          c->key = storage.ptr();
+          c->wireId = storage->wireId;
+          c->handle = storage->handle.buf;
+          c->base = static_cast<const uint8_t*>(storage->mapPtr);
+          c->off = off;
+          c->len = len;
+          c->nShadows = 0u;
+        } else {
+          continue; /* table full (cannot happen: 16 shadows max) */
+        }
+        if (c->nShadows < 16u)
+          c->shadows[c->nShadows++] = &sh;
+        /* stash the per-shadow slice identity for the post-emit dedup mark */
+        sh.lastShipWire = storage->wireId;
+        sh.lastShipOff = off;
+        sh.lastShipLen = len;
+        sh.lastShipSum = sum;
+      }
+    }
+    for (uint32_t i = 0u; i < nCand; i++) {
+      Cand& c = cands[i];
+      if (!emitUploadBuffer(c.wireId, c.handle, c.off, c.base + c.off, c.len)) {
+        /* full-heap drop: un-mark so the next draw retries the re-ship */
+        for (uint32_t s = 0u; s < c.nShadows; s++)
+          c.shadows[s]->lastShipWire = 0u;
       }
     }
   }

@@ -1184,3 +1184,86 @@ decodeErr=1 (one malformed record, tolerated), srvErr=4 (exec errors counted+con
 These are steady-state RENDER QUALITY items, not survival — the good side of the milestone.
 Next: soak (srvExecErr/decodeErr trend over minutes) → visual cutover (IOSurface present +
 autonomous pixel-compare vs client backbuffer dump) → thin recorder (fps) → consolidation.
+
+## V15 — THE UPLOAD FLOOD / PASS-SHATTER FIX (GTA IV all-in feedback)
+
+Evidence (GTA IV live @1c2e7e5): client upl=213,991/window (~836/frame; the
+cube is 1/frame), server passes=74,743/window (~292/frame vs ~60 expected),
+srvGpu=76-104 MS/frame, consume p95=2.08 s, ring stalls=69,170/window, and
+depth clrPart=369/window. The V13 honest flags called both halves: per-bind
+constant re-ships + "a mid-pass constant update closes the pass server-side
+(ensureXfer)". The amplification chain, verified by reading: D3D9 games bind
+a FRESH constant-ring slice per draw -> snapshotDirtyUniforms emits one
+upload_buffer PER DRAW -> handleUploadBuffer ran ensureXfer -> ensureXfer
+CLOSES the open render pass -> O(draws) passes/frame -> on TBDR every close
+is a full tile store+load round trip -> server GPU cost explodes -> consumer
+falls seconds behind -> ring backpressure -> stalls + stale presents ("10fps
+garbage" that was really lag, not corruption).
+
+FIX 1 — SERVER staging discipline (executor.mm), the client's own UploadRing
+rule mirrored ("memory is never rewritten under a queued draw"):
+- Every wire buffer is SHARED storage (handleCreateBuffer), so an upload
+  whose destination range is NOT referenced by any encoded-but-incomplete
+  GPU work is a plain memcpy into buffer.contents — NO encoder, NO xfer, NO
+  pass close. The constant ring hits this path ~always (fresh offset per
+  draw, rename on wrap — the invariant the fix exploits).
+- Reference tracking: Resource{refMin,refMax,refSerial} watermark, stamped
+  at prepareDraw (markDrawRefs: streams + index + cbvs — CbvBinding grew a
+  length) and at copy_buffer (both sides); dead once completedSerial() >=
+  refSerial. O(1) overlap test (rangeLive).
+- Overlapping (or non-shared) destinations: bytes stage into the slab NOW
+  (heap ack flows immediately), the slab->buffer blit PARKS in
+  g->deferredXfers and encodes at the next natural boundary
+  (materializePass / submitFrame) — or on demand when a draw actually binds
+  a buffer with parked blits (prepareDraw closes the pass then; counted
+  uplFlushUse — the old always-close behavior, now the rare path).
+- srv-stats grew upl={dir,stg,useFlush} buckets.
+
+FIX 2 — CLIENT re-ship diet (mtl_wire_context.{h,cpp} snapshotDirtyUniforms):
+- SKIP: BufShadow tracks lastShip{Wire,Off,Len,Sum(fnv64)}; a rebind of the
+  exact range with unchanged bytes does not re-ship (only marked when the
+  emit LANDED — emitUploadBuffer now returns bool; full-heap drops un-mark).
+- MERGE: contiguous/overlapping dirty ranges on the SAME storage coalesce
+  into ONE upload_buffer record per draw (subsumes the old both-stage dup
+  check).
+
+FIX 3 — partial depth/stencil clears now EXECUTE (was: dropped, 369/window):
+tryExecutePartialClear — scissored fullscreen-triangle mini-pass (fill MSL
+d9mtFillVs/@z=clearDepth + d9mtFillFs for the color aspect; vertex-only
+pipeline for DS aspects), Always+write DSSO with stencil Replace+reference,
+Load/Store attachments, async fillPsoCache with the blit stash+retry
+discipline. clearDsPartialDrop now counts only genuine drops (PSO failed).
+
+GATES (test_feed v15, all PASSING on the full clean chain rm -rf build ->
+build-bridge -> build-driver -> build-server):
+- flood: 500 draws, each with a fresh 256 B slice (bind_range + upload +
+  draw, exact client order) -> ONE render pass (assert <=4; measured 1),
+  500/500 draws + uploads executed, final slice's triangle on screen.
+- mid-pass upload: two draws in one pass with the second's constants
+  uploaded between them -> both draws correct, ONE pass (assert <=2;
+  measured 1) — the first draw's encoded state untouched, the second saw
+  the new bytes.
+- partial DS clear: full depth clear 1.0 + scissored left-half clear 0.0 +
+  fullscreen draw at z=0.5/LESS -> rejected inside the rect, accepted
+  outside (wave 2 — one wave for the async fill PSO).
+- All prior gates green (v13/v13.1/v14 waves now exercise BOTH upload paths:
+  their whole-buffer re-uploads overlap the live watermark and take the
+  staged+parked path; their fresh slices take the direct path).
+
+Expected GTA signature after this build: upl/frame still ~500-800 RECORDS
+but passes/frame back to the ~60-80 scene shape (srv-stats upl dir >> stg,
+useFlush ~0), srvGpu back to ~10 ms class, consume p95 collapses, hb
+healthy, ring stalls ~0, clrPart -> 0. Client-side ups growth shrinks where
+titles rebind unchanged ranges (dedup) — per-draw records >=1 per dirty
+constant set is EXPECTED (distinct storages cannot merge).
+
+Honest flags:
+- upload_texture still executes via ensureXfer per record (mid-frame
+  texture streaming closes the pass); same deferral shape applies if a
+  title shows it — StageState would need per-slot Resource backrefs.
+- markDrawRefs marks the bound cbv length (or a 4 KiB ceiling when the bind
+  carried none) — a shader indexing past its bound range could in theory
+  read a direct-memcpy'd byte early; D3D9 constant semantics don't allow it.
+- The deferred-xfer queue is unbounded in records (bounded by slab memory);
+  a pathological overlap flood degenerates to the old per-draw close via
+  uplFlushUse, never to unbounded memory.
