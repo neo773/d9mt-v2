@@ -266,9 +266,31 @@ struct Resource {
   uint64_t blobLen = 0;
   /* FLOW-CONTROL: texture-content blits parked for the next natural pass
    * boundary (upload_texture arriving inside an open render pass no longer
-   * closes it); a draw that samples this texture before the boundary forces
-   * the flush (counted, uplFlushUse). */
+   * closes it). P2: a draw sampling this texture before the boundary no
+   * longer forces a flush either — it samples the texture's PREVIOUS
+   * content (texStaleOk, counted upl_tex_late; the D3D9 app sees its new
+   * texels one pass late, benign for streaming), or the dummy when the
+   * texture has NO previous content (first upload still parked — its
+   * private storage is undefined until the blit runs; counted
+   * upl_tex_dummy). A texture delivery NEVER closes a render pass. */
   uint32_t pendingTexXfers = 0;
+  /* True when content existed BEFORE the OLDEST currently-parked blit —
+   * set at the first park of a run, meaningless while pendingTexXfers==0. */
+  bool texStaleOk = false;
+  /* P2 (buffer half, resurrecting the P1-deleted V15 parking for the
+   * RESIDUAL non-blob upload class — live GTA streaming showed blobFb
+   * fallbacks re-shipping ~270 staged uploads/frame, each closing the
+   * pass): count + byte watermark of slab->buffer blits parked for the
+   * next natural boundary. The watermark is a SEPARATE liveness clause in
+   * rangeLive (a direct memcpy must not slip under a parked blit) — it
+   * deliberately does NOT ride markBufRef/refSerial, because refSerial is
+   * the promote test's blockSerial and a park-stamp there would poison
+   * every LATER parked upload on the same resource into the flush backstop
+   * (the gate caught exactly that). Parked entries never outlive their
+   * frame (submitFrame drains), so the watermark resets whenever the count
+   * returns to zero. */
+  uint32_t pendingBufXfers = 0;
+  uint64_t bufXferMin = ~0ull, bufXferMax = 0;
 };
 
 /* Logical byte length of a buffer resource (blob resources address a slice
@@ -444,6 +466,24 @@ struct DeferredTexXfer {
   uint64_t srcOff = 0;
 };
 
+/* P2: one slab->buffer blit parked for the next natural boundary (the V15
+ * parking, restored for the residual non-blob upload class). blockSerial is
+ * the resource's ref watermark AT STAGING TIME — the encoded-but-incomplete
+ * readers that forced the staged path. A consuming draw re-tests it against
+ * completedSerial(): retired (the credit-bounded common case — D3D9 apps
+ * Lock/upload BEFORE the frame's draws touch the buffer, so the blockers are
+ * a PRIOR frame's refs) -> the blit promotes to a direct memcpy; unretired
+ * (genuine same-frame old-bytes/new-bytes overwrite) -> the counted flush
+ * backstop, which is correctness, not the disease. */
+struct DeferredBufXfer {
+  std::shared_ptr<Resource> res;
+  id<MTLBuffer> srcBuf = nil;
+  uint64_t srcOff = 0;
+  uint64_t dstOff = 0;
+  uint64_t size = 0;
+  uint64_t blockSerial = 0;
+};
+
 struct Exec {
   struct d9mt_status* status = nullptr;
 
@@ -610,11 +650,16 @@ struct Exec {
    * at a consuming draw because the range retired by then (the credit-
    * bounded common case); texParked = texture blits deferred to a natural
    * boundary instead of closing the pass. */
-  /* P1: uplPromoted + deferredXfers DELETED with the buffer parking queue
-   * (blob buffers have no uploads; residual staged uploads blit at once). */
+  /* P2: uplPromoted + the buffer parking queue RESTORED (P1 deleted them on
+   * the assumption of a zero flood; the residual non-blob class still
+   * floods during streaming). texLate/texDummy: same-pass texture
+   * consumption resolved WITHOUT closing the pass (stale sampling / dummy
+   * for parked-first-content). */
   uint64_t uplDirect = 0, uplStaged = 0, uplFlushUse = 0;
-  uint64_t uplTexParked = 0;
+  uint64_t uplPromoted = 0;
+  uint64_t uplTexParked = 0, uplTexLate = 0, uplTexDummy = 0;
   std::vector<DeferredTexXfer> deferredTexXfers;
+  std::vector<DeferredBufXfer> deferredBufXfers;
   /* TEST HOOK (D9MT_TEST_FRAME_DELAY_US): sleep this long in handlePresent —
    * a throttled consumer for the sustained-overload flow-control gate. */
   uint32_t frameDelayUs = 0;
@@ -627,7 +672,8 @@ struct Exec {
              noShader = 0, noIndex = 0, encoders = 0, uploads = 0,
              clrDrop = 0, clrDsPart = 0, dsUnres = 0, dssoDef = 0,
              dsLate = 0, uplDirect = 0, uplStaged = 0, uplFlushUse = 0,
-             uplTexParked = 0;
+             uplPromoted = 0, uplTexParked = 0, uplTexLate = 0,
+             uplTexDummy = 0;
   } statsSnap;
 
   /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
@@ -882,7 +928,7 @@ static void ensureCmdbuf() {
 static void closePass();
 static void closeXfer();
 static void flushPendingClears();
-static void drainDeferredTexXfersAtBoundary();
+static void drainDeferredXfersAtBoundary();
 
 static void submitFrame() {
   /* v11: a clear-only frame (no draw ever materialized the pass) must not
@@ -890,8 +936,10 @@ static void submitFrame() {
    * execution flushes them at present too. */
   flushPendingClears();
   closePass();
-  drainDeferredTexXfersAtBoundary(); /* parked TEXTURE blits ride the frame's
-                                      * xfer close (buffer parking: P1-deleted) */
+  drainDeferredXfersAtBoundary(); /* parked texture AND buffer blits ride the
+                                   * frame's xfer close — parked entries never
+                                   * cross a submit (their slab slices carry
+                                   * this frame's serial) */
   closeXfer();
   if (!g->cmdbuf)
     return;
@@ -937,8 +985,10 @@ static void heapAck(uint64_t generation) {
   atomic_store_explicit(&g->status->heap_consumed, generation, memory_order_relaxed);
 }
 
-/* FLOW-CONTROL: parked texture blits (defined with encodeTextureUpload). */
+/* FLOW-CONTROL: parked texture blits (defined with encodeTextureUpload);
+ * P2: parked buffer blits (defined with handleUploadBuffer). */
 static void drainDeferredTexXfers();
+static void drainDeferredBufXfers();
 
 /* Open (or reuse) the between-passes MTL4ComputeCommandEncoder heap blits
  * encode into. An active render pass closes first — upload records sit at
@@ -952,13 +1002,14 @@ static id<MTL4ComputeCommandEncoder> ensureXfer() {
   g->xfer = [g->cmdbuf computeCommandEncoder];
   if (!g->xfer)
     execError("computeCommandEncoder failed");
-  /* FLOW-CONTROL: parked texture blits ride EVERY xfer-encoder open (a
-   * natural boundary — the pass is already closed here). Texture blits can
+  /* FLOW-CONTROL: parked texture AND buffer blits ride EVERY xfer-encoder
+   * open (a natural boundary — the pass is already closed here). Blits can
    * only park while a pass is ACTIVE, so any copy-family record that opens
    * the encoder later in the stream drains them first — stream order
    * against the whole copy family is preserved with no per-handler hooks.
-   * (g->xfer is set above, so the drain's own ensureXfer is a no-op.) */
+   * (g->xfer is set above, so the drains' own ensureXfer is a no-op.) */
   drainDeferredTexXfers();
+  drainDeferredBufXfers();
   return g->xfer;
 }
 
@@ -1052,20 +1103,23 @@ static bool rangeLive(const std::shared_ptr<Resource>& res, uint64_t off,
   if (res->refSerial && completedSerial() < res->refSerial &&
       off < res->refMax && off + len > res->refMin)
     return true;
-  /* P1 DELETED: the pendingXfers/xferMin/xferMax clause — parked buffer
-   * blits no longer exist (residual staged uploads encode immediately, and
-   * markBufRef keeps their range live through refMin/refMax above). */
+  /* P2: a parked slab blit is future encoded work WRITING its range — a
+   * direct memcpy under it would be clobbered when the blit encodes at the
+   * boundary; such uploads stage (and park, in order) instead. */
+  if (res->pendingBufXfers && off < res->bufXferMax &&
+      off + len > res->bufXferMin)
+    return true;
   return false;
 }
 
-/* P1: parked texture blits still ride natural boundaries; the BUFFER half of
- * this boundary flush (flushDeferredXfers + promoteParkedXfers, V15/FLOW-
- * CONTROL) is DELETED — blob-backed buffers never emit uploads, so the parked
- * queue those functions serviced is gone. */
-static void drainDeferredTexXfersAtBoundary() {
-  if (g->deferredTexXfers.empty())
+/* P2: parked texture AND buffer blits ride natural boundaries — the frame's
+ * xfer close (submitFrame), every pass materialization, every copy-family
+ * xfer open, and the custom-pass handlers (resolve/meta-blit/partial-clear)
+ * that build their own encoders. */
+static void drainDeferredXfersAtBoundary() {
+  if (g->deferredTexXfers.empty() && g->deferredBufXfers.empty())
     return;
-  ensureXfer(); /* opening the encoder drains the parked texture blits */
+  ensureXfer(); /* opening the encoder drains the parked blits */
 }
 
 /* --- argument tables (decision 3 port; rotate once per pass) ----------------- */
@@ -1140,8 +1194,8 @@ static void materializePass() {
   if (g->pass.active)
     return;
   ensureCmdbuf();
-  drainDeferredTexXfersAtBoundary(); /* parked texture blits ride this
-                                      * natural boundary (P1: buffer parking gone) */
+  drainDeferredXfersAtBoundary(); /* parked texture + buffer blits ride this
+                                   * natural boundary (encode BEFORE the pass) */
   closeXfer(); /* pending heap blits must order ahead of this pass */
 
   for (auto& c : g->pass.color)
@@ -1201,6 +1255,20 @@ static void materializePass() {
   if (g->pass.ds.tex &&
       desc.depthAttachment.loadAction == MTLLoadActionDontCare)
     execError("pass materialization: depth DontCare load action");
+
+  /* TBDR store-action tripwire (P2 split-pass audit): every materialization
+   * — including a mid-frame reopen after any split — must STORE all
+   * attachments. A non-Store store action on a split pass discards live
+   * tile content mid-frame (the same flickering-tile-grid class as the
+   * load-action hazard above). By construction the assignments above only
+   * produce Store; this pins the invariant. */
+  for (uint32_t i = 0; i < 4; i++)
+    if (g->pass.color[i].tex &&
+        desc.colorAttachments[i].storeAction != MTLStoreActionStore)
+      execError("pass materialization: color non-Store store action");
+  if (g->pass.ds.tex &&
+      desc.depthAttachment.storeAction != MTLStoreActionStore)
+    execError("pass materialization: depth non-Store store action");
 
   /* occlusion transport: every pass can carry visibility counters (port of
    * the client's pass-creation binding, mtl_context_record.cpp). */
@@ -1701,19 +1769,147 @@ static void markDrawRefs() {
   }
 }
 
-/* FLOW-CONTROL: does a texture this draw samples still have a PARKED content
- * blit? (P1: the buffer half of this scan is deleted with the buffer parking
- * queue.) Only called while parked texture blits exist. Checked BEFORE
- * promotePendingTexBinds runs, so a dummy-bound slot about to be promoted
- * this draw is covered too — texRes is stamped at bind time regardless of
- * resolution. */
-static bool boundTexHasPendingXfer() {
+/* P2: quick pre-check — does any BUFFER bound to the current draw still have
+ * a parked slab blit? O(bindings); only consulted while parked buffer blits
+ * exist, so the per-entry walk below stays off the common draw path. */
+static bool boundBufHasPendingXfer() {
+  for (uint32_t i = 0; i < kMaxStreams; i++) {
+    Stream& s = g->streams[i];
+    if (s.bound && s.res && s.res->pendingBufXfers)
+      return true;
+  }
+  if (g->index.bound && g->index.res && g->index.res->pendingBufXfers)
+    return true;
   for (uint32_t st = 0; st < 2; st++)
-    for (uint32_t slot = 0; slot < kMaxTexTrack; slot++)
-      if (g->stages[st].texRes[slot] &&
-          g->stages[st].texRes[slot]->pendingTexXfers)
+    for (uint32_t slot = 0; slot < 8; slot++) {
+      CbvBinding& cbv = g->stages[st].cbvs[slot];
+      if (cbv.bound && cbv.res && cbv.res->pendingBufXfers)
         return true;
+    }
   return false;
+}
+
+/* Does the CURRENT draw's binding set read [off, off+len) of res? Same range
+ * rules as markDrawRefs (stream/index length fallback, cbv 4096 ceiling). */
+static bool drawReadsRange(const std::shared_ptr<Resource>& res, uint64_t off,
+                           uint64_t len) {
+  for (uint32_t i = 0; i < kMaxStreams; i++) {
+    Stream& s = g->streams[i];
+    if (s.bound && s.res == res && s.buf) {
+      uint64_t l = s.length ? s.length : (uint64_t)s.buf.length - s.offset;
+      if (s.offset < off + len && off < s.offset + l)
+        return true;
+    }
+  }
+  if (g->index.bound && g->index.res == res && g->index.buf) {
+    uint64_t l = g->index.length ? g->index.length
+                                 : (uint64_t)g->index.buf.length - g->index.offset;
+    if (g->index.offset < off + len && off < g->index.offset + l)
+      return true;
+  }
+  for (uint32_t st = 0; st < 2; st++)
+    for (uint32_t slot = 0; slot < 8; slot++) {
+      CbvBinding& cbv = g->stages[st].cbvs[slot];
+      if (!cbv.bound || cbv.res != res || !cbv.buf)
+        continue;
+      uint64_t l = cbv.length ? cbv.length : 4096ull;
+      if (cbv.offset < cbv.buf.length && l > (uint64_t)cbv.buf.length - cbv.offset)
+        l = (uint64_t)cbv.buf.length - cbv.offset;
+      if (cbv.offset < off + len && off < cbv.offset + l)
+        return true;
+    }
+  return false;
+}
+
+/* P2: a parked buffer blit whose destination this draw reads. In-order walk:
+ * promote to a direct memcpy when the readers that forced staging retired
+ * (blockSerial <= completedSerial — same-frame earlier readers stamp the
+ * CURRENT serial and can never pass this test, so bytes an encoded draw
+ * observes are never rewritten) AND no earlier KEPT entry overlaps the same
+ * range (that blit encodes later and would clobber the newer bytes) AND the
+ * destination is shared-storage. Anything consumed but unpromotable falls to
+ * the counted pass-closing flush — the never-fire backstop (genuine
+ * same-frame overwrite / GPU-private destination), correctness not disease. */
+static void promoteOrFlushParkedBufXfers() {
+  const uint64_t completed = completedSerial();
+  bool mustFlush = false;
+  size_t w = 0;
+  for (size_t i = 0; i < g->deferredBufXfers.size(); i++) {
+    DeferredBufXfer t = std::move(g->deferredBufXfers[i]);
+    const bool consumed = drawReadsRange(t.res, t.dstOff, t.size);
+    if (consumed) {
+      bool earlierOverlap = false;
+      for (size_t j = 0; j < w && !earlierOverlap; j++) {
+        DeferredBufXfer& e = g->deferredBufXfers[j];
+        earlierOverlap = e.res == t.res && e.dstOff < t.dstOff + t.size &&
+                         t.dstOff < e.dstOff + e.size;
+      }
+      if (!earlierOverlap && completed >= t.blockSerial &&
+          t.res->buffer.storageMode == MTLStorageModeShared) {
+        std::memcpy((uint8_t*)t.res->buffer.contents + t.dstOff,
+                    (uint8_t*)t.srcBuf.contents + t.srcOff, (size_t)t.size);
+        if (t.res->pendingBufXfers && !--t.res->pendingBufXfers) {
+          t.res->bufXferMin = ~0ull; /* watermark dies with the last park */
+          t.res->bufXferMax = 0;
+        }
+        /* the promoted bytes are now observable by encoded work — keep the
+         * range live like any consumed range (the consuming draw marks it
+         * at markDrawRefs anyway; this covers non-draw observers). */
+        markBufRef(t.res, t.dstOff, t.size);
+        g->uplPromoted++;
+        continue; /* entry retired — the draw reads the promoted bytes */
+      }
+      mustFlush = true;
+    }
+    g->deferredBufXfers[w++] = std::move(t);
+  }
+  g->deferredBufXfers.resize(w);
+  atomic_store_explicit(&g->status->upl_promoted, g->uplPromoted,
+                        memory_order_relaxed);
+  if (mustFlush) {
+    if (g->pass.active)
+      closePass();
+    drainDeferredXfersAtBoundary();
+    g->uplFlushUse++;
+    atomic_store_explicit(&g->status->upl_flush_use, g->uplFlushUse,
+                          memory_order_relaxed);
+  }
+}
+
+/* P2: same-pass texture consumption WITHOUT closing the pass. A real-resolved
+ * slot whose texture still has parked blits samples the PREVIOUS content
+ * (texStaleOk — the bind gate only real-resolves in that case; counted
+ * upl_tex_late once per draw). Defensively, a real-resolved slot with parked
+ * FIRST content (should be unreachable through the bind gate) is forced back
+ * to the dummy for this pass — its storage is undefined until the blit runs. */
+static void noteParkedTexSampling() {
+  bool late = false;
+  for (uint32_t st = 0; st < 2; st++) {
+    StageState& b = g->stages[st];
+    for (uint32_t slot = 0; slot < kMaxTexTrack; slot++) {
+      const std::shared_ptr<Resource>& res = b.texRes[slot];
+      if (!res || !res->pendingTexXfers || !b.textures[slot])
+        continue;
+      if (res->texStaleOk) {
+        late = true;
+        continue;
+      }
+      b.textures[slot] = nil; /* dummy this pass; texPendRec re-resolves */
+      if (!b.texPendSlot[slot]) {
+        b.texPendSlot[slot] = true;
+        b.texPendCount++;
+      }
+      g->uplTexDummy++;
+      atomic_store_explicit(&g->status->upl_tex_dummy, g->uplTexDummy,
+                            memory_order_relaxed);
+      g->dirtyBindings = true;
+    }
+  }
+  if (late) {
+    g->uplTexLate++;
+    atomic_store_explicit(&g->status->upl_tex_late, g->uplTexLate,
+                          memory_order_relaxed);
+  }
 }
 
 static bool prepareDraw() {
@@ -1725,17 +1921,13 @@ static bool prepareDraw() {
                               memory_order_relaxed);
     return false;
   }
-  if (!g->deferredTexXfers.empty() && boundTexHasPendingXfer()) {
-    /* FLOW-CONTROL: a parked TEXTURE blit feeds THIS draw — flush it ahead
-     * of the pass (counted). P1: the buffer promotion/flush that lived here
-     * (promoteParkedXfers + flushDeferredXfers) is DELETED — blob buffers
-     * have no uploads, residual buffer uploads encode immediately. */
-    if (g->pass.active)
-      closePass();
-    drainDeferredTexXfersAtBoundary();
-    g->uplFlushUse++;
-    atomic_store_explicit(&g->status->upl_flush_use, g->uplFlushUse,
-                          memory_order_relaxed);
+  if (!g->deferredBufXfers.empty() && boundBufHasPendingXfer()) {
+    /* P2: a parked BUFFER blit's destination feeds THIS draw — promote it
+     * to a direct memcpy (the credit-bounded common case) or, for a genuine
+     * same-frame overwrite, fall to the counted flush backstop. Texture
+     * deliveries NEVER reach this path — they resolve via stale/dummy
+     * sampling in noteParkedTexSampling below, by construction. */
+    promoteOrFlushParkedBufXfers();
   }
   if (!g->pass.pending && !g->pass.active) {
     atomic_fetch_add_explicit(&g->status->draws_skipped, 1, memory_order_relaxed);
@@ -1793,6 +1985,12 @@ static bool prepareDraw() {
    * bind record re-resolve here (bind-once apps never rebind). */
   if (promotePendingTexBinds())
     g->dirtyBindings = true;
+
+  /* P2: draws sampling textures with parked content blits proceed WITHOUT
+   * closing the pass — stale-by-one-pass (counted) or dummy-for-this-pass
+   * (parked first content, counted). */
+  if (!g->deferredTexXfers.empty())
+    noteParkedTexSampling();
 
   if (g->dirtyBindings) {
     flushBindings();
@@ -2383,14 +2581,14 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
     return;
   }
 
-  /* Overlapping (or non-shared) destination: stage into the slab and encode
-   * the blit NOW. P1 DELETED: the deferredXfers park + promoteParkedXfers
-   * late promotion (V15/FLOW-CONTROL) — the flood they absorbed came from
-   * the constant-ring re-ships, which are blob-backed and gone; a residual
-   * live-range upload is cold, and an immediate xfer encode (closing an
-   * open pass, counted via uplFlushUse) is the simple correct order:
-   * earlier-encoded draws precede the blit, later draws follow it. */
-  const bool hadPass = g->pass.active;
+  /* Overlapping (or non-shared) destination: stage into the slab. P2 (the
+   * P1 deletion reversed on live evidence — the residual non-blob class
+   * still floods during streaming, ~270 staged uploads/frame each closing
+   * the pass): inside an open render pass the blit PARKS for the next
+   * natural boundary instead of shattering the pass; a consuming draw
+   * promotes it to a direct memcpy (blockSerial retired — the common case)
+   * or falls to the counted flush backstop. Outside a pass the blit encodes
+   * immediately (nothing to preserve). */
   ensureCmdbuf(); /* ringAlloc stamps the current recording serial */
   RingSlice rs = ringAlloc(r->size, 256);
   if (!rs.cpu) {
@@ -2399,21 +2597,35 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
   }
   std::memcpy(rs.cpu, src, (size_t)r->size);
   heapAck(r->heap_generation); /* region free the moment the copy is taken */
-  id<MTL4ComputeCommandEncoder> enc = ensureXfer(); /* closes the pass if open */
-  if (enc) {
-    [enc copyFromBuffer:rs.buf
-           sourceOffset:(NSUInteger)rs.off
-               toBuffer:res->buffer
-      destinationOffset:(NSUInteger)dstAbs
-                   size:(NSUInteger)r->size];
-    /* encoded GPU work WRITING the range — keep it live so a later direct
-     * memcpy cannot be overwritten when the GPU runs */
-    markBufRef(res, dstAbs, r->size);
-  }
-  if (hadPass) {
-    g->uplFlushUse++;
-    atomic_store_explicit(&g->status->upl_flush_use, g->uplFlushUse,
-                          memory_order_relaxed);
+  if (g->pass.active) {
+    DeferredBufXfer t;
+    t.res = res;
+    t.srcBuf = rs.buf;
+    t.srcOff = rs.off;
+    t.dstOff = dstAbs;
+    t.size = r->size;
+    t.blockSerial = res->refSerial; /* GPU readers that forced staging — NOT
+      * re-stamped by the park itself (see Resource::bufXferMin/Max): later
+      * parked uploads on this resource must keep the RETIRABLE blocker so
+      * the promote test can pass */
+    g->deferredBufXfers.push_back(std::move(t));
+    res->pendingBufXfers++;
+    if (dstAbs < res->bufXferMin)
+      res->bufXferMin = dstAbs;
+    if (dstAbs + r->size > res->bufXferMax)
+      res->bufXferMax = dstAbs + r->size;
+  } else {
+    id<MTL4ComputeCommandEncoder> enc = ensureXfer(); /* no pass to close */
+    if (enc) {
+      [enc copyFromBuffer:rs.buf
+             sourceOffset:(NSUInteger)rs.off
+                 toBuffer:res->buffer
+        destinationOffset:(NSUInteger)dstAbs
+                     size:(NSUInteger)r->size];
+      /* encoded GPU work WRITING the range — keep it live so a later direct
+       * memcpy cannot be overwritten when the GPU runs */
+      markBufRef(res, dstAbs, r->size);
+    }
   }
   res->hasContent = true;
   g->uplStaged++;
@@ -2459,15 +2671,42 @@ static void drainDeferredTexXfers() {
   }
 }
 
+/* P2: parked slab->buffer blits (one FIFO — in-order per resource+range;
+ * promotion already removed anything a draw consumed AND could promote).
+ * Same reentrancy-by-swap discipline as the texture drain. */
+static void drainDeferredBufXfers() {
+  while (!g->deferredBufXfers.empty()) {
+    std::vector<DeferredBufXfer> q;
+    q.swap(g->deferredBufXfers);
+    for (DeferredBufXfer& t : q) {
+      id<MTL4ComputeCommandEncoder> enc = ensureXfer();
+      if (enc) {
+        [enc copyFromBuffer:t.srcBuf
+               sourceOffset:(NSUInteger)t.srcOff
+                   toBuffer:t.res->buffer
+          destinationOffset:(NSUInteger)t.dstOff
+                       size:(NSUInteger)t.size];
+        /* now genuinely encoded GPU work writing the range */
+        markBufRef(t.res, t.dstOff, t.size);
+      }
+      if (t.res->pendingBufXfers && !--t.res->pendingBufXfers) {
+        t.res->bufXferMin = ~0ull;
+        t.res->bufXferMax = 0;
+      }
+    }
+  }
+}
+
 /* Take one texture-content upload from CPU bytes (heap region or stash):
  * slab-copy the bytes NOW (the heap region detaches immediately), then
  * encode the blit — or, when a render pass is OPEN, park it for the next
- * natural boundary (FLOW-CONTROL: mid-frame texture streaming must not
- * close render passes; a same-pass consumer forces the flush at
- * prepareDraw, counted uplFlushUse). */
+ * natural boundary (P2: a texture delivery NEVER closes a render pass; a
+ * same-pass consumer samples the previous content — texStaleOk, counted
+ * upl_tex_late — or stays dummy-resolved for the pass when this is the
+ * texture's FIRST content, counted upl_tex_dummy via the bind gate). */
 static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
                                 const d9mt_wire_rec_upload_texture* r,
-                                const uint8_t* src, bool allowPark) {
+                                const uint8_t* src) {
   id<MTLTexture> tex = res->texture;
   if (r->mip >= tex.mipmapLevelCount || r->layer >= tex.arrayLength * (tex.textureType == MTLTextureTypeCube || tex.textureType == MTLTextureTypeCubeArray ? 6 : 1)) {
     execError("upload_texture: subresource out of range");
@@ -2480,20 +2719,25 @@ static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
     return;
   }
   std::memcpy(rs.cpu, src, (size_t)r->data_size);
+  const bool hadContent = res->hasContent;
   res->hasContent = true; /* bytes are owned; the blit is ordered before any
-                           * later pass (boundary drain / consumer flush) */
+                           * later pass (boundary drain) */
   atomic_fetch_add_explicit(&g->status->uploads_executed, 1, memory_order_relaxed);
   { static int n = 0;
     if (n++ < 8)
       fprintf(stderr, "[serverd] upload_texture #%d: wire=%llu fmt=%u mip=%u "
                       "box %u,%u %ux%u\n", n, (unsigned long long)r->wire_id,
               r->format & 0xFFFFu, r->mip, r->x, r->y, r->width, r->height); }
-  /* allowPark=false: the stash-drain path (observeReady) can run INSIDE
-   * draw preparation, after the consumer-flush check already passed — a
-   * parked blit there would let a just-promoted bind sample stale content.
-   * That path keeps the immediate encode (pass close on a create-race boot
-   * transient only — the streaming hot path is the allowPark one). */
-  if (allowPark && g->pass.active) {
+  if (g->pass.active) {
+    /* P2: EVERY mid-pass texture upload parks (the old allowPark=false
+     * stash-drain exception closed passes to protect a just-promoted bind
+     * from stale sampling; the bind/promote gate now blocks that promotion
+     * itself — hasContent with parked FIRST content stays dummy-resolved,
+     * see handleBindTextureById / promotePendingTexBinds). */
+    if (res->pendingTexXfers == 0)
+      res->texStaleOk = hadContent; /* the FIRST park of a run decides the
+        * same-pass semantics: previous content exists -> stale sampling is
+        * defined; none -> dummy until the blit lands */
     DeferredTexXfer t;
     t.res = res;
     t.rec = *r;
@@ -2502,6 +2746,8 @@ static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
     g->deferredTexXfers.push_back(std::move(t));
     res->pendingTexXfers++;
     g->uplTexParked++;
+    atomic_store_explicit(&g->status->upl_tex_parked, g->uplTexParked,
+                          memory_order_relaxed);
     return;
   }
   encodeTextureUploadNow(res, r, rs.buf, rs.off);
@@ -2509,7 +2755,7 @@ static void encodeTextureUpload(const std::shared_ptr<Resource>& res,
 
 static void drainStash(const std::shared_ptr<Resource>& res) {
   for (auto& s : res->stash)
-    encodeTextureUpload(res, &s.rec, s.bytes.data(), false /* see above */);
+    encodeTextureUpload(res, &s.rec, s.bytes.data());
   res->stash.clear();
   res->stash.shrink_to_fit();
 }
@@ -2540,7 +2786,7 @@ static void handleUploadTexture(const d9mt_wire_rec_upload_texture* r) {
     return; /* failed create: content dropped, resource dummy-resolves */
   }
   observeReady(res); /* residency + any earlier stash first (stream order) */
-  encodeTextureUpload(res, r, src, true); /* memcpys the region into the slab... */
+  encodeTextureUpload(res, r, src); /* memcpys the region into the slab... */
   heapAck(r->heap_generation);      /* ...ack only after the bytes are taken */
 }
 
@@ -2602,11 +2848,25 @@ static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
      * has UNDEFINED private storage — the dummy stays (defined sampling).
      * v7: a still-building texture also stays dummy. V18: the slot REMEMBERS
      * the bind (texPend) and draws promote it once ready+content — apps
-     * that bind once must not sample the dummy forever. */
-    if (res && observeReady(res) && res->texture && res->hasContent)
+     * that bind once must not sample the dummy forever.
+     * P2: content whose FIRST delivery is still a parked blit is NOT usable
+     * yet (private storage undefined until the blit runs — a pass sampling
+     * it now would read garbage); the slot stays dummy+pend for this pass
+     * and promotes at the next draw after the boundary drain (counted
+     * upl_tex_dummy). Parked NON-first content real-resolves — sampling the
+     * previous texels is defined (stale-by-one-pass, upl_tex_late). */
+    const bool ready1 = res && observeReady(res);
+    if (ready1 && res->texture && res->hasContent &&
+        (!res->pendingTexXfers || res->texStaleOk))
       tex = resolveTexView(res, r);
-    else if (res && res->ready.load(std::memory_order_acquire) != 2)
-      pend = true; /* building, or created with content still in flight */
+    else if (res && res->ready.load(std::memory_order_acquire) != 2) {
+      pend = true; /* building, or content still in flight / parked */
+      if (ready1 && res->texture && res->hasContent && res->pendingTexXfers) {
+        g->uplTexDummy++;
+        atomic_store_explicit(&g->status->upl_tex_dummy, g->uplTexDummy,
+                              memory_order_relaxed);
+      }
+    }
   }
   for (uint32_t st = 0; st < 2; st++) {
     if (r->stages & (1u << st) && r->slot < kMaxTexTrack) {
@@ -2619,8 +2879,9 @@ static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
       else if (!pend && b.texPendSlot[r->slot])
         b.texPendCount--;
       b.texPendSlot[r->slot] = pend;
-      if (pend)
-        b.texPendRec[r->slot] = *r;
+      if (res)
+        b.texPendRec[r->slot] = *r; /* P2: stashed even when resolved — the
+          * defensive dummy-for-this-pass path re-resolves from it */
     }
   }
   g->dirtyBindings = true;
@@ -2647,7 +2908,11 @@ static bool promotePendingTexBinds() {
         b.texPendCount--;
         continue;
       }
-      if (observeReady(res) && res->texture && res->hasContent) {
+      /* P2: parked FIRST content blocks promotion (storage undefined until
+       * the blit runs at the boundary); parked LATER content promotes —
+       * stale sampling is defined. */
+      if (observeReady(res) && res->texture && res->hasContent &&
+          (!res->pendingTexXfers || res->texStaleOk)) {
         b.textures[slot] = resolveTexView(res, &r);
         b.texRes[slot] = res; /* FLOW-CONTROL: keep the backref exact */
         b.texPendSlot[slot] = false;
@@ -2785,6 +3050,8 @@ static void handleResolveTexture(const d9mt_wire_rec_resolve_texture* r) {
       !dres->texture || !sres->texture)
     return;
   closePass();
+  drainDeferredXfersAtBoundary(); /* P2: parked content must land before a
+                                   * pass that reads/writes these textures */
   closeXfer();
   ensureCmdbuf();
   MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
@@ -2935,6 +3202,7 @@ static int tryExecutePartialClear(const d9mt_wire_rec_clear_image_view* r,
   }
 
   closePass();
+  drainDeferredXfersAtBoundary(); /* P2: parked content lands before this pass */
   closeXfer();
   ensureCmdbuf();
   MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
@@ -3177,6 +3445,7 @@ static bool tryExecuteBlit(const d9mt_wire_rec_blit_texture_view* r) {
     return true;
 
   closePass();
+  drainDeferredXfersAtBoundary(); /* P2: parked content lands before this pass */
   closeXfer();
   ensureCmdbuf();
   const uint32_t mipW = (uint32_t)dres->texture.width >> r->dst_mip ? (uint32_t)dres->texture.width >> r->dst_mip : 1u;
@@ -3794,12 +4063,15 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       now.uplDirect = g->uplDirect;
       now.uplStaged = g->uplStaged;
       now.uplFlushUse = g->uplFlushUse;
+      now.uplPromoted = g->uplPromoted;
       now.uplTexParked = g->uplTexParked;
+      now.uplTexLate = g->uplTexLate;
+      now.uplTexDummy = g->uplTexDummy;
       const Exec::StatsSnap& p = g->statsSnap;
       fprintf(stderr, "[serverd] srv-stats: draws=%llu skip=%llu{psoPend=%llu "
                       "psoFail=%llu noSh=%llu noRt=%llu noIdx=%llu} passes=%llu "
-                      "upl=%llu{dir=%llu stg=%llu useFlush=%llu "
-                      "texPark=%llu} "
+                      "upl=%llu{dir=%llu stg=%llu useFlush=%llu promote=%llu "
+                      "texPark=%llu texLate=%llu texDummy=%llu} "
                       "depth{clrDrop=%llu clrPart=%llu dsUnres=%llu "
                       "dssoDef=%llu lateRes=%llu} /window\n",
               (unsigned long long)(now.draws - p.draws),
@@ -3814,7 +4086,10 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
               (unsigned long long)(now.uplDirect - p.uplDirect),
               (unsigned long long)(now.uplStaged - p.uplStaged),
               (unsigned long long)(now.uplFlushUse - p.uplFlushUse),
+              (unsigned long long)(now.uplPromoted - p.uplPromoted),
               (unsigned long long)(now.uplTexParked - p.uplTexParked),
+              (unsigned long long)(now.uplTexLate - p.uplTexLate),
+              (unsigned long long)(now.uplTexDummy - p.uplTexDummy),
               (unsigned long long)(now.clrDrop - p.clrDrop),
               (unsigned long long)(now.clrDsPart - p.clrDsPart),
               (unsigned long long)(now.dsUnres - p.dsUnres),

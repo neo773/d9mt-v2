@@ -101,6 +101,13 @@ Server (`executor.mm`):
   zero records. Residual non-blob staged uploads (live-range, cold) encode
   their slab blit IMMEDIATELY (in-order, closes an open pass, counted in
   `uplFlushUse`) — the simple correct shape.
+  **P2 REVERSAL**: "cold" was wrong — live streaming windows showed the
+  residual class staging ~69k/window with useFlush=66k (~260 pass
+  closes/frame). The parking/promotion is RESTORED in redesigned form
+  (deferredBufXfers + blockSerial + bufXferMin/Max liveness clause;
+  texture same-pass consumption resolves stale/dummy instead of flushing)
+  — see HANDOFF-FLOWCONTROL.md §2 (P2 shape) for the mechanism, gates, and
+  the markBufRef-poisoning pitfall.
 - blob creates: server buffer allocation + zero-fill + per-resource
   residency — replaced by `{heapBuf, bindBase}` and one residency entry.
 
@@ -111,7 +118,8 @@ GPU-private buffers, and pool-miss fallbacks (`blobFb=` PROF counter).
 ## What stays on the upload path
 
 - ALL texture content (upload_texture + slab + deferredTexXfers parking +
-  drainStash — untouched; next slice candidate);
+  drainStash — P2: parking is now unconditional inside a pass and
+  consumption never flushes, see HANDOFF-FLOWCONTROL.md §2);
 - buffers with `cpuAccess != Write` (GPU-private, readback);
 - blob-pool misses (region exhausted / wire never attached): hostAlloc
   backing + the legacy create-snapshot/note/re-ship/upload records — the
@@ -204,6 +212,11 @@ individually.
   pass-shaped fallout of the flood itself: 149 pass closes/frame plus
   create-worker starvation (noRt=2.7k/window, dsUnres late-resolves) put
   never-rendered attachments on screen; collapses with useFlush -> 0.
+  **P2**: useFlush -> 0 is now BY CONSTRUCTION even during streaming (the
+  residual staged class parks+promotes; texture deliveries never close a
+  pass — HANDOFF-FLOWCONTROL.md §2 P2 shape), and materializePass carries
+  BOTH tripwires (DontCare load + non-Store store, asserted 0 in the P2
+  gates) so any future split-pass action regression counts itself.
 - **Random geometry stretching**: NOT pool premature reuse — all three
   reuse gates compare in the conservative direction (stale completed
   mirror = LATER grants; retire stamp `markerMirror+1` is emitted by the

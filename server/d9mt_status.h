@@ -98,6 +98,16 @@
  *   offset 752  u64      upl_staged        uploads staged (dst range live)
  *   offset 760  u64      upl_promoted      parked blits promoted to memcpy
  *   offset 768  u64      upl_flush_use     consuming-draw pass closes (~0)
+ *
+ * --- v6 (upload parking P2, ADDITIVE — first 776 bytes unchanged) ---------
+ *   offset 776  u64      upl_tex_parked    texture blits parked to a boundary
+ *   offset 784  u64      upl_tex_late      draws that sampled a texture whose
+ *                                          newest upload is still parked
+ *                                          (stale-by-one-pass, benign)
+ *   offset 792  u64      upl_tex_dummy     binds dummy-resolved because the
+ *                                          texture's FIRST content is still
+ *                                          parked (defined sampling; real
+ *                                          from the next pass)
  */
 
 #ifdef __cplusplus
@@ -131,7 +141,7 @@ enum d9mt_status_error {
   d9mt_status_err_clear_verify = 5  /* GPU clear readback mismatch */
 };
 
-#define D9MT_STATUS_VERSION 5u
+#define D9MT_STATUS_VERSION 6u
 
 /* v4 timeline ring depth: power of two, deeper than any realistic
  * client/server frame lag (the present path runs lockstep depth 1). */
@@ -179,9 +189,13 @@ struct d9mt_status {
   d9mt_status_au64 upl_staged;    /* 752 */
   d9mt_status_au64 upl_promoted;  /* 760 */
   d9mt_status_au64 upl_flush_use; /* 768 */
+  /* --- v6 (upload parking P2, ADDITIVE) --- */
+  d9mt_status_au64 upl_tex_parked; /* 776 */
+  d9mt_status_au64 upl_tex_late;   /* 784 */
+  d9mt_status_au64 upl_tex_dummy;  /* 792 */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 776);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 800);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -211,5 +225,8 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_publish_ns) == 624);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_staged) == 752);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_promoted) == 760);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_flush_use) == 768);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_tex_parked) == 776);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_tex_late) == 784);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_tex_dummy) == 792);
 
 #endif /* D9MT_SERVER_STATUS_H */

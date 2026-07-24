@@ -56,36 +56,68 @@ marker is emitted (`synchronizeWsi` runs later in the same CS closure).
   parked — under overload this approaching the window wall-clock is the
   mechanism WORKING), `cBail=` (cumulative, ~0).
 
-### 2. Pass preservation under uploads (server, server/executor.mm)
+### 2. Pass preservation under uploads (server, server/executor.mm) — P2 shape
 
-Staged-upload flushes no longer close render passes on the hot path:
+History: this section's original mechanism (park + promote for buffers,
+park + consumer-FLUSH for textures) was partially DELETED by P1 on the
+assumption that blob-backing zeroed the upload flood. Live GTA streaming
+falsified that: the residual non-blob class (blobFb fallbacks, GPU-private,
+pool misses) still staged ~69k uploads/window with useFlush=66k — ~260 pass
+closes/frame, srvGpu ~19 ms, and a flickering black tile grid during
+streaming windows (pass-shaped fallout of the flood; load/store actions
+verified Load/Store — see the tripwires). texPark read 25/window NOT
+because texture parking was too narrow but because the BUFFER staged path
+shattered the pass first: upload_texture then usually arrived with no pass
+open and encoded plainly. P2 kills both closers by construction:
 
-- **Late promotion (buffers)**: a parked slab->buffer blit whose
-  destination range is consumed by a draw is first re-tested against
-  `completedSerial()` (`promoteParkedXfers`) — with credits bounding the
-  lag, the range staged against a PRIOR frame's refs has usually retired
-  by consumption time, and the blit becomes a direct memcpy (the V15
-  direct path applied late). In-order walk; an entry only promotes when no
-  earlier KEPT entry overlaps the same range (that blit encodes later and
-  would clobber newer bytes). The pass-closing flush (`uplFlushUse`)
-  remains as the counted never-fire backstop — it can still fire for a
-  genuine same-frame overwrite (D1 reads old bytes, upload, D2 reads new
-  bytes: only an encoder boundary can order that), which is correctness,
-  not the disease.
-- **Texture parking**: `upload_texture` inside an open render pass no
-  longer `ensureXfer`s (which closed the pass). The slab copy is taken
-  immediately (heap ack flows, stream-order bytes pinned), the blit parks
-  in `deferredTexXfers` and encodes at EVERY xfer-encoder open (a natural
-  boundary — ensureXfer drains the queue right after opening, which also
-  preserves stream order against the whole copy family with no per-handler
-  hooks). A draw sampling a parked texture forces the flush
-  (`StageState::texRes` backrefs — the V15 honest flag — scanned only
-  while parked blits exist). The stash-drain path (`drainStash`, create-
-  race boot transient) keeps the immediate encode: it can run inside draw
-  preparation AFTER the consumer-flush check, where parking would let a
-  just-promoted bind sample stale content (`allowPark=false`).
-- srv-stats: `upl={dir,stg,useFlush,promote,texPark}`; status v5 exports
-  `upl_staged/upl_promoted/upl_flush_use` (gate assertions + HUD-ready).
+- **Buffer parking + late promotion (RESTORED, redesigned)**: a staged
+  upload inside an open pass parks in `deferredBufXfers` (slab copy taken,
+  heap acked; `blockSerial` = the resource's ref watermark at staging = the
+  GPU readers that forced staging). A consuming draw
+  (`promoteOrFlushParkedBufXfers`, behind the O(bindings)
+  `boundBufHasPendingXfer` pre-check) promotes the blit to a direct memcpy
+  when `completedSerial() >= blockSerial` AND no earlier kept entry
+  overlaps AND the destination is shared-storage — else the counted
+  pass-closing flush backstop (genuine same-frame overwrite / GPU-private
+  dst; correctness, not the disease). CRITICAL DESIGN POINT: the park does
+  NOT stamp `markBufRef` (that poisons blockSerial of every LATER parked
+  upload on the same resource into the flush backstop — the mid-pass gate
+  caught this); parked-range liveness is a separate clause in `rangeLive`
+  (`Resource::pendingBufXfers + bufXferMin/Max`, reset when the count
+  returns to zero). The promoted memcpy DOES markBufRef (its bytes are now
+  observable by encoded work). Parked entries never outlive their frame —
+  submitFrame drains.
+- **Texture parking, flushless consumption**: `upload_texture` inside an
+  open pass ALWAYS parks (the old `allowPark=false` stash-drain exception
+  is gone). A texture delivery NEVER closes a render pass; same-pass
+  consumption resolves by semantics instead:
+  - texture HAD content before the first parked blit (`Resource::
+    texStaleOk`, decided at the first park of a run): binds real-resolve
+    and draws sample the PREVIOUS texels — the blit encodes after the pass
+    in the same cmdbuf, so this is deterministic stale-by-one-pass
+    (upl_tex_late, counted once per draw). D3D9 apps updating+sampling in
+    one frame see their new texels one pass late — visually benign for
+    streaming.
+  - texture had NO content (FIRST upload still parked — private storage
+    undefined until the blit runs): the bind gate (handleBindTextureById /
+    promotePendingTexBinds) keeps the slot dummy+pend for this pass
+    (upl_tex_dummy) and the V18 promote re-resolves it real on the first
+    draw after the boundary drain. `noteParkedTexSampling` also carries a
+    defensive dummy-for-this-pass downgrade should a real-bound slot ever
+    hold parked first content.
+- **Boundary drains**: both queues drain at EVERY xfer-encoder open
+  (ensureXfer — covers the whole copy family with no per-handler hooks),
+  at every pass materialization (BEFORE the render encoder — a parked
+  upload must land ahead of a pass that samples or attaches the resource),
+  at the frame's submit, and explicitly in the custom-pass handlers
+  (resolve / meta-blit / partial clear) which build their own encoders.
+- **TBDR tripwires** (materializePass, counted into exec_errors, asserted
+  0 by the gates): no attachment ever materializes with DontCare LOAD
+  (pre-existing) and — P2 — none with a non-Store STORE action: any pass
+  split mid-frame must Load and Store ALL attachments.
+- srv-stats: `upl={dir,stg,useFlush,promote,texPark,texLate,texDummy}`;
+  status v6 adds `upl_tex_parked/upl_tex_late/upl_tex_dummy` (776/784/792,
+  additive; size 800) to v5's `upl_staged/upl_promoted/upl_flush_use`.
 
 ### 3. Deleted/simplified ad-hoc defenses
 
@@ -124,6 +156,21 @@ Staged-upload flushes no longer close render passes on the hot path:
   credits never trip dead-server detection on a merely-slow server (the
   progress-bail requires a 3 s publication gap; the throttled-consumer
   gate parks 147 times without a single bail).
+- **P2 (a) mid-pass buffer storm**: pass OPENED first (helper-cbv draw so
+  the watermark stays honest), then 16 uploads to a PRIOR frame's
+  referenced slices MID-PASS, then same-pass consuming draws: **6
+  iterations -> 12 passes for 12 frames, useFlush=0, staged=96
+  promoted=96 (every parked blit promoted at its consuming draw), final
+  bytes land (magenta/clear exact)**.
+- **P2 (b) texture streaming storm**: 8 frames x (draw + 8x[upload_texture
+  mid-pass + bind + draw]) on one texture: **9 passes for 9 frames,
+  useFlush=0, texPark=64, texLate=64, per-frame pixel assert that every
+  same-pass draw sampled the PREVIOUS content (late-by-one), landing frame
+  shows the new content, exec_errors=0 (load+store tripwires)**.
+- **P2 (c) first-upload-then-sample-same-pass**: bind+draw (dummy), FIRST
+  upload mid-pass, rebind+draw: **screen stays dummy-black for that pass
+  (never undefined storage, never a pass close), WHITE lands the next
+  pass, texDummy counted, useFlush=0**.
 - Full pre-existing suite green: v13/v14/v15 flood + mid-pass, v16 wrap
   race 20/20, v17/v18 texture gates, occlusion-query gates a1–c, present
   timeline (512 lockstep), kernel-wake latency p50 14 µs, pid watchdog,
@@ -149,8 +196,13 @@ Staged-upload flushes no longer close render passes on the hot path:
   better, because the old number was frames into a queue, not frames on
   screen.
 - srv-stats: passes/frame back to scene shape (~60–80, not ~1,170);
-  `useFlush` ~0 with `promote=` picking up the wrap traffic; `texPark=`
-  climbing during streaming with passes unaffected.
+  `useFlush` ~0 IN ALL WINDOWS INCLUDING STREAMING with `promote=` picking
+  up the residual staged traffic and `texPark=`/`texLate=` climbing during
+  streaming with passes unaffected; `texDummy=` small (first-sight
+  textures only). The streaming-window signature specifically: the old
+  stg=69k -> useFlush=66k (~260 closes/frame, srvGpu ~19 ms, flickering
+  black tile grid) becomes stg~69k -> promote~stg, useFlush~0, passes
+  scene-shaped, grid gone, srvGpu 12–15 ms.
 - PROF: `credit=` ≈ present rate under GPU-bound scenes (expected, healthy),
   `cBail=` 0, `texDrop=` 0, `hb=` alive through streaming lulls (the V18
   ack-wait storm that triggered the V19 wedge no longer exists).

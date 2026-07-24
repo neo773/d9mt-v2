@@ -390,6 +390,25 @@ emit_upload_tex(uint64_t wire_id, uint64_t handle, uint32_t w, uint32_t h,
   emit(&ut, sizeof(ut));
 }
 
+/* Read one BGRA pixel of the LAST published frame. Returns 0 on success. */
+static int
+read_present_px(struct d9mt_status *status, const uint32_t *ids, int x, int y,
+                uint8_t out[4]) {
+  uint32_t s = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+  if (s > 2)
+    return 1;
+  IOSurfaceRef sf = IOSurfaceLookup(ids[s]);
+  if (!sf)
+    return 1;
+  IOSurfaceLock(sf, kIOSurfaceLockReadOnly, NULL);
+  const uint8_t *b = IOSurfaceGetBaseAddress(sf);
+  size_t r = IOSurfaceGetBytesPerRow(sf);
+  memcpy(out, b + (size_t)y * r + (size_t)x * 4, 4);
+  IOSurfaceUnlock(sf, kIOSurfaceLockReadOnly, NULL);
+  CFRelease(sf);
+  return 0;
+}
+
 /* qsort comparator for the kernel-wake latency gate percentiles */
 static int
 cmp_u64(const void *a, const void *b) {
@@ -3836,6 +3855,405 @@ main(int argc, char **argv) {
              "frames -> %" PRIu64 " passes, useFlush=0 (stg=%" PRIu64
              " promoted=%" PRIu64 "), all draws + final bytes correct\n",
              encD, stgD, proD);
+    }
+
+    /* --- P2 GATE (a): MID-PASS BUFFER UPLOAD PARKING + PROMOTION ---------
+     * The residual-flood shape (GTA streaming): a pass is already OPEN when
+     * upload_buffer arrives for a range whose readers are a PRIOR frame's
+     * in-flight draws (staged path), and draws later in the SAME pass
+     * consume the range. The parked blit must promote to a direct memcpy at
+     * the consuming draw (blockSerial retired by then) — passes stay
+     * O(frames), upl_flush_use stays 0, and the consuming draws read the
+     * NEW bytes. Uses the cbv-cube pipeline the previous gate left bound. */
+    {
+      uint8_t magentaA[4] = {255, 0, 255, 255}, dkblueA[4] = {40, 16, 16, 255};
+      float mOffA[16] = {0.1f, 0, 0, 0, 0, 0.1f, 0, 0, 0, 0, 1, 0, 5.f, 0, 0, 1};
+      float mVisA[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+
+      /* helper constant buffer for the pass-opening draw (must NOT touch
+       * 0xC973 — a same-frame ref would stamp the watermark and force the
+       * flush backstop instead of the promotion under test) */
+      struct d9mt_wire_rec_create_buffer cb4;
+      memset(&cb4, 0, sizeof(cb4));
+      cb4.hdr.opcode = d9mt_wire_op_create_buffer;
+      cb4.hdr.size = sizeof(cb4);
+      cb4.wire_id = 974;
+      cb4.client_handle = 0xC974;
+      cb4.size = 4096;
+      emit(&cb4, sizeof(cb4));
+      {
+        uint64_t hg = 0;
+        uint64_t ho = heap_put(mOffA, sizeof(mOffA), &hg);
+        struct d9mt_wire_rec_upload_buffer u4;
+        memset(&u4, 0, sizeof(u4));
+        u4.hdr.opcode = d9mt_wire_op_upload_buffer;
+        u4.hdr.size = sizeof(u4);
+        u4.wire_id = 974;
+        u4.client_handle = 0xC974;
+        u4.dst_offset = 0;
+        u4.size = sizeof(mOffA);
+        u4.heap_offset = ho;
+        u4.heap_generation = hg;
+        emit(&u4, sizeof(u4));
+      }
+
+      struct d9mt_wire_rec_set_render_targets_by_id rtA;
+      memset(&rtA, 0, sizeof(rtA));
+      rtA.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+      rtA.hdr.size = sizeof(rtA);
+      rtA.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+      rtA.color[0].format = 80;
+      rtA.color[0].width = 640;
+      rtA.color[0].height = 480;
+      rtA.color[0].sample_count = 1;
+
+      uint64_t encA0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+      uint64_t fluA0 = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed);
+      uint64_t stgA0 = atomic_load_explicit(&status->upl_staged, memory_order_relaxed);
+      uint64_t proA0 = atomic_load_explicit(&status->upl_promoted, memory_order_relaxed);
+      uint64_t errA0 = atomic_load_explicit(&status->exec_errors, memory_order_relaxed);
+
+      for (int it = 0; it < 6; it++) {
+        /* frame A: 16 draws REFERENCE the 0xC973 slices (in-flight readers) */
+        struct d9mt_wire_rec_bind_uniform_buffer bubA;
+        memset(&bubA, 0, sizeof(bubA));
+        bubA.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+        bubA.hdr.size = sizeof(bubA);
+        bubA.stages = 0x1;
+        bubA.slot = 4;
+        bubA.buf.buffer = 0xC973;
+        bubA.buf.length = 131072;
+        emit(&bubA, sizeof(bubA));
+        emit(&rtA, sizeof(rtA));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        for (uint32_t i = 1; i <= 16; i++) {
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 256ull * i;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dA = {{{d9mt_wire_op_draw_indexed, sizeof(dA), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dA, sizeof(dA));
+        }
+        emit_present(++frame); /* NO wait: A's completion races B's uploads */
+        uint64_t frameA = frame;
+
+        /* frame B: OPEN the pass on the helper buffer, then upload the
+         * SAME 0xC973 slices MID-PASS (parked), wait for A's publication
+         * (GPU completion), then consume — the promotion path, inside ONE
+         * unbroken pass. */
+        emit(&rtA, sizeof(rtA));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct d9mt_wire_rec_bind_uniform_buffer bub4;
+        memset(&bub4, 0, sizeof(bub4));
+        bub4.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+        bub4.hdr.size = sizeof(bub4);
+        bub4.stages = 0x1;
+        bub4.slot = 4;
+        bub4.buf.buffer = 0xC974;
+        bub4.buf.length = 4096;
+        emit(&bub4, sizeof(bub4));
+        {
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur0;
+          memset(&bur0, 0, sizeof(bur0));
+          bur0.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur0.hdr.size = sizeof(bur0);
+          bur0.stages = 0x1;
+          bur0.slot = 4;
+          bur0.offset = 0;
+          bur0.length = 64;
+          emit(&bur0, sizeof(bur0));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } d0 = {{{d9mt_wire_op_draw_indexed, sizeof(d0), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&d0, sizeof(d0)); /* pass opens here (offscreen matrix) */
+        }
+        for (uint32_t i = 1; i <= 16; i++) {
+          const float *m = (it == 5 && i == 16) ? mVisA : mOffA;
+          uint64_t mg = 0;
+          uint64_t moff = heap_put(m, 64, &mg);
+          struct d9mt_wire_rec_upload_buffer ub;
+          memset(&ub, 0, sizeof(ub));
+          ub.hdr.opcode = d9mt_wire_op_upload_buffer;
+          ub.hdr.size = sizeof(ub);
+          ub.wire_id = 973;
+          ub.client_handle = 0xC973;
+          ub.dst_offset = 256ull * i;
+          ub.size = 64;
+          ub.heap_offset = moff;
+          ub.heap_generation = mg;
+          emit(&ub, sizeof(ub)); /* mid-pass: parks (or direct if A retired) */
+        }
+        if (wait_u64(&status->frames, frameA, 15000))
+          FAIL("P2 mid-pass storm (iter %d): frame A never presented", it);
+        emit(&bubA, sizeof(bubA)); /* back to 0xC973 for the consumers */
+        for (uint32_t i = 1; i <= 16; i++) {
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 256ull * i;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dB = {{{d9mt_wire_op_draw_indexed, sizeof(dB), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dB, sizeof(dB)); /* consuming draw — promotion, not flush */
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("P2 mid-pass storm (iter %d): frame B never presented", it);
+      }
+
+      uint64_t encAD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - encA0;
+      uint64_t fluAD = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed) - fluA0;
+      uint64_t stgAD = atomic_load_explicit(&status->upl_staged, memory_order_relaxed) - stgA0;
+      uint64_t proAD = atomic_load_explicit(&status->upl_promoted, memory_order_relaxed) - proA0;
+      uint64_t errAD = atomic_load_explicit(&status->exec_errors, memory_order_relaxed) - errA0;
+      if (fluAD != 0)
+        FAIL("P2 mid-pass storm: %" PRIu64 " consuming-draw pass closes "
+             "(useFlush) — parked mid-pass blits did not promote", fluAD);
+      if (encAD > 13) /* 12 frames x 1 pass + slack */
+        FAIL("P2 mid-pass storm: %" PRIu64 " render passes for 12 frames "
+             "(want O(frames) — mid-pass uploads shattered passes)", encAD);
+      if (errAD != 0)
+        FAIL("P2 mid-pass storm: exec_errors +%" PRIu64 " (load/store "
+             "tripwire or exec fault)", errAD);
+      uint8_t lastA[4], offA[4];
+      if (read_present_px(status, ids, 453, 140, lastA) ||
+          read_present_px(status, ids, 266, 280, offA))
+        FAIL("P2 mid-pass storm: present readback failed");
+      if (memcmp(lastA, magentaA, 4) || memcmp(offA, dkblueA, 4))
+        FAIL("P2 mid-pass storm: last=%02x%02x%02x%02x (want magenta) "
+             "off=%02x%02x%02x%02x (want clear) — promoted bytes did not "
+             "land where the consuming draw reads",
+             lastA[0], lastA[1], lastA[2], lastA[3],
+             offA[0], offA[1], offA[2], offA[3]);
+      printf("[test_feed] P2 mid-pass buffer storm: 6x park-then-consume in "
+             "ONE pass -> %" PRIu64 " passes, useFlush=0 (stg=%" PRIu64
+             " promoted=%" PRIu64 "), bytes land at the consuming draw\n",
+             encAD, stgAD, proAD);
+    }
+
+    /* --- P2 GATE (b): TEXTURE STREAMING STORM IN A PASS (stale-by-one) ---
+     * Heavy upload_texture interleaved with draws that SAMPLE the texture,
+     * all inside one pass. By construction a texture delivery never closes
+     * the pass: same-pass draws sample the PREVIOUS content (parked blits
+     * encode after the pass, so this is deterministic), the new texels land
+     * the next pass, and upl_tex_late counts every stale-sampling draw.
+     * A pass split mid-frame (the old flush) would make later draws sample
+     * the NEW color — the per-frame pixel assert catches exactly that. --- */
+    {
+      emit_bind_shader(0, 0xA003);
+      emit_bind_shader(1, 0xA004);
+      struct d9mt_wire_rec_set_vertex_layout vlT = {
+          {d9mt_wire_op_set_vertex_layout, sizeof(vlT), 0}, 0, 0};
+      emit(&vlT, sizeof(vlT));
+
+      struct d9mt_wire_rec_create_texture ctT;
+      memset(&ctT, 0, sizeof(ctT));
+      ctT.hdr.opcode = d9mt_wire_op_create_texture;
+      ctT.hdr.size = sizeof(ctT);
+      ctT.wire_id = 960;
+      ctT.client_handle = 0xB960;
+      ctT.type = 1;
+      ctT.format = 80;
+      ctT.width = 64;
+      ctT.height = 64;
+      ctT.depth = 1;
+      ctT.mip_levels = 1;
+      ctT.array_layers = 1;
+      ctT.sample_count = 1;
+      emit(&ctT, sizeof(ctT));
+      /* gate (c)'s texture created NOW so its async build settles early */
+      struct d9mt_wire_rec_create_texture ctU = ctT;
+      ctU.wire_id = 961;
+      ctU.client_handle = 0xB961;
+      emit(&ctU, sizeof(ctU));
+
+      static uint8_t solidR[64 * 64 * 4], solidG[64 * 64 * 4];
+      for (size_t k = 0; k < sizeof(solidR); k += 4) {
+        solidR[k] = 0;   solidR[k + 1] = 0;   solidR[k + 2] = 255; solidR[k + 3] = 255;
+        solidG[k] = 0;   solidG[k + 1] = 255; solidG[k + 2] = 0;   solidG[k + 3] = 255;
+      }
+      uint8_t redT[4] = {0, 0, 255, 255}, greenT[4] = {0, 255, 0, 255};
+
+      struct d9mt_wire_rec_bind_texture_by_id btT;
+      memset(&btT, 0, sizeof(btT));
+      btT.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+      btT.hdr.size = sizeof(btT);
+      btT.stages = 0x2;
+      btT.slot = 0;
+      btT.image_wire_id = 960;
+      btT.format = 80;
+
+      /* prime: RED content, converge until the textured quad shows it
+       * (async create + stash tolerance) */
+      emit_upload_tex(960, 0xB960, 64, 64, solidR, sizeof(solidR), 64 * 4);
+      int primed = 0;
+      for (int wv = 1; wv <= 30 && !primed; wv++) {
+        emit(&btT, sizeof(btT));
+        emit_backbuffer_rt();
+        emit_clear(0.f, 0.f, 1.f);
+        emit_draws(1);
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("P2 tex storm prime: frame never presented");
+        uint8_t px[4];
+        if (!read_present_px(status, ids, 320, 240, px) && !memcmp(px, redT, 4))
+          primed = 1;
+      }
+      if (!primed)
+        FAIL("P2 tex storm prime: textured quad never showed RED");
+
+      uint64_t encT0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+      uint64_t fluT0 = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed);
+      uint64_t lateT0 = atomic_load_explicit(&status->upl_tex_late, memory_order_relaxed);
+      uint64_t prkT0 = atomic_load_explicit(&status->upl_tex_parked, memory_order_relaxed);
+      uint64_t errT0 = atomic_load_explicit(&status->exec_errors, memory_order_relaxed);
+
+      const uint8_t *curB = solidR;
+      const uint8_t *curPx = redT;
+      for (int k = 1; k <= 8; k++) {
+        const uint8_t *nxtB = (k & 1) ? solidG : solidR;
+        emit(&btT, sizeof(btT));
+        emit_backbuffer_rt();
+        emit_clear(0.f, 0.f, 1.f);
+        emit_draws(1); /* pass opens; samples the CURRENT content */
+        for (int j = 0; j < 8; j++) {
+          /* mid-pass delivery: parks — MUST NOT close the pass */
+          emit_upload_tex(960, 0xB960, 64, 64, nxtB, 64 * 64 * 4, 64 * 4);
+          emit(&btT, sizeof(btT));
+          emit_draws(1); /* samples STALE current content (late-by-one) */
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("P2 tex storm (frame %d): never presented", k);
+        uint8_t px[4];
+        if (read_present_px(status, ids, 320, 240, px))
+          FAIL("P2 tex storm (frame %d): readback failed", k);
+        if (memcmp(px, curPx, 4))
+          FAIL("P2 tex storm (frame %d): got %02x%02x%02x%02x want the "
+               "PREVIOUS content (%02x%02x%02x%02x) — a mid-pass texture "
+               "delivery split the pass (or sampled parked content early)",
+               k, px[0], px[1], px[2], px[3],
+               curPx[0], curPx[1], curPx[2], curPx[3]);
+        curB = nxtB;
+        curPx = (k & 1) ? greenT : redT;
+      }
+      (void)curB;
+      /* the last frame's parked content must LAND on the next pass */
+      emit(&btT, sizeof(btT));
+      emit_backbuffer_rt();
+      emit_clear(0.f, 0.f, 1.f);
+      emit_draws(1);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("P2 tex storm: landing frame never presented");
+      {
+        uint8_t px[4];
+        if (read_present_px(status, ids, 320, 240, px) || memcmp(px, curPx, 4))
+          FAIL("P2 tex storm: parked content never landed (want "
+               "%02x%02x%02x%02x got %02x%02x%02x%02x)",
+               curPx[0], curPx[1], curPx[2], curPx[3],
+               px[0], px[1], px[2], px[3]);
+      }
+
+      uint64_t encTD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - encT0;
+      uint64_t fluTD = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed) - fluT0;
+      uint64_t lateTD = atomic_load_explicit(&status->upl_tex_late, memory_order_relaxed) - lateT0;
+      uint64_t prkTD = atomic_load_explicit(&status->upl_tex_parked, memory_order_relaxed) - prkT0;
+      uint64_t errTD = atomic_load_explicit(&status->exec_errors, memory_order_relaxed) - errT0;
+      if (fluTD != 0)
+        FAIL("P2 tex storm: %" PRIu64 " pass closes (useFlush) — texture "
+             "deliveries must NEVER close a pass", fluTD);
+      if (encTD > 10) /* 9 frames x 1 pass + slack */
+        FAIL("P2 tex storm: %" PRIu64 " passes for 9 frames (uploads "
+             "shattered passes)", encTD);
+      if (prkTD < 64)
+        FAIL("P2 tex storm: only %" PRIu64 " parked texture blits "
+             "(want 64 — parking did not engage mid-pass)", prkTD);
+      if (lateTD < 32)
+        FAIL("P2 tex storm: upl_tex_late=%" PRIu64 " (want ~64 — stale "
+             "sampling not counted)", lateTD);
+      if (errTD != 0)
+        FAIL("P2 tex storm: exec_errors +%" PRIu64, errTD);
+      printf("[test_feed] P2 tex storm: 8 frames x 8 mid-pass uploads+draws "
+             "-> %" PRIu64 " passes, useFlush=0, texPark=%" PRIu64
+             ", texLate=%" PRIu64 ", stale-by-one asserted per frame, "
+             "content lands next pass\n", encTD, prkTD, lateTD);
+
+      /* --- P2 GATE (c): FIRST upload + same-pass sample -> dummy this
+       * pass (defined black), REAL content the next pass, counted. ------- */
+      uint64_t dumC0 = atomic_load_explicit(&status->upl_tex_dummy, memory_order_relaxed);
+      uint64_t fluC0 = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed);
+      static uint8_t solidW[64 * 64 * 4];
+      memset(solidW, 0xFF, sizeof(solidW));
+      struct d9mt_wire_rec_bind_texture_by_id btU = btT;
+      btU.image_wire_id = 961;
+      emit(&btU, sizeof(btU));
+      emit_backbuffer_rt();
+      emit_clear(1.f, 0.f, 0.f); /* red clear — must be fully overdrawn */
+      emit_draws(1);             /* no content yet: dummy (black) fullscreen */
+      emit_upload_tex(961, 0xB961, 64, 64, solidW, sizeof(solidW), 64 * 4);
+      emit(&btU, sizeof(btU));   /* re-bind mid-pass: FIRST content parked ->
+                                  * stays dummy (upl_tex_dummy) */
+      emit_draws(1);             /* still black; pass must not close */
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("P2 first-upload gate: frame never presented");
+      {
+        uint8_t px[4];
+        if (read_present_px(status, ids, 320, 240, px))
+          FAIL("P2 first-upload gate: readback failed");
+        if (px[0] || px[1] || px[2])
+          FAIL("P2 first-upload gate: got %02x%02x%02x%02x, want dummy "
+               "BLACK — a draw sampled undefined first-content mid-pass "
+               "(or the pass split and sampled the parked upload)",
+               px[0], px[1], px[2], px[3]);
+      }
+      /* real content from the next pass (V18 promote off the parked drain) */
+      int landedW = 0;
+      for (int wv = 0; wv < 10 && !landedW; wv++) {
+        emit(&btU, sizeof(btU));
+        emit_backbuffer_rt();
+        emit_clear(0.f, 0.f, 1.f);
+        emit_draws(1);
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("P2 first-upload gate: landing frame never presented");
+        uint8_t px[4];
+        if (!read_present_px(status, ids, 320, 240, px) &&
+            px[0] == 255 && px[1] == 255 && px[2] == 255)
+          landedW = 1;
+      }
+      if (!landedW)
+        FAIL("P2 first-upload gate: WHITE content never landed after the "
+             "boundary drain");
+      uint64_t dumCD = atomic_load_explicit(&status->upl_tex_dummy, memory_order_relaxed) - dumC0;
+      uint64_t fluCD = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed) - fluC0;
+      if (dumCD < 1)
+        FAIL("P2 first-upload gate: upl_tex_dummy did not count (%" PRIu64 ")",
+             dumCD);
+      if (fluCD != 0)
+        FAIL("P2 first-upload gate: %" PRIu64 " pass closes (useFlush)", fluCD);
+      printf("[test_feed] P2 first-upload gate: dummy-this-pass (black), "
+             "real next pass (white), texDummy=%" PRIu64 ", useFlush=0\n",
+             dumCD);
     }
 
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
