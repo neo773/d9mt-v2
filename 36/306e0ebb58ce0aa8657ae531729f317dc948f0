@@ -1,0 +1,20 @@
+test/code_cubestress.c
+  s_9dc0f2092159a8::t_1da62dbfd2fb06 1-231,257-294
+  s_9dc0f2092159a8::t_ee248195619549 232-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "36306e0ebb58ce0aa8657ae531729f317dc948f0",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
