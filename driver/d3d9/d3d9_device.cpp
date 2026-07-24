@@ -5397,6 +5397,12 @@ namespace dxvk {
         cDstLayers        = convertedDstLayers,
         cSrcSlice         = std::move(slice.slice)
       ] (MtlContext* ctx) {
+        // The conversion result is written by a local compute dispatch and
+        // never passes a tappable staging seam — recording backends must
+        // count + name the server-side content gap (never silent black).
+        ctx->noteUnshippedTextureConversion(cDstImage,
+          uint32_t(cConvertFormat.FormatType));
+
         auto contextObjects = ctx->beginExternalRendering();
 
         m_converter->ConvertFormat(contextObjects,

@@ -47,9 +47,24 @@ namespace dxvk::backend {
      * The PE region is address space, the FILE stays sparse until written. */
     constexpr uint64_t WireHeapCapacity = 256ull << 20;
 
-    /* S3 v2 lazy re-upload stash cap: texture bytes waiting for heap space.
-     * Beyond this the content is dropped for good (stale server texture). */
-    constexpr uint64_t kMaxPendingUploadBytes = 96ull << 20;
+    /* S3 v2 lazy re-upload stash: texture bytes waiting for heap space.
+     * V18: this used to be a DROP-FOR-GOOD cap — a bulk texture-streaming
+     * burst (a game loading its world: hundreds of MiB through Lock/Unlock
+     * in seconds while the server drains creates) blew through it and every
+     * texture past the cap stayed PERMANENTLY BLACK server-side (the
+     * upload_texture record was simply never emitted, one-shot content).
+     * It is now the SOFT threshold that engages the bounded ack-wait below;
+     * content is only lost at the hard cap (counted + named, texDrop=). */
+    constexpr uint64_t kMaxPendingUploadBytes  = 96ull << 20;
+    constexpr uint64_t kHardPendingUploadBytes = 768ull << 20;
+
+    /* V18 bounded CS-thread wait for server heap acks, engaged only when a
+     * texture upload would otherwise cross the soft stash threshold. The
+     * server acks continuously while draining (heapAck after every consumed
+     * region), so under streaming backpressure this converts loss into a
+     * short stall; a dead server exhausts the budget and falls through to
+     * the stash/hard-cap path — never a hang. */
+    constexpr uint32_t kTexAckWaitBudgetMs = 50u;
 
     /* Stall watchdog (S3): one window is the old ~1 s spin bound; the
      * transport survives WireStallWindows consecutive full-ring windows
@@ -189,6 +204,26 @@ namespace dxvk::backend {
     constexpr uint64_t    kQueryStubSamplesPassed = 1u << 20;
     std::atomic<uint64_t> g_queryStubs    = { 0u };
     std::atomic<uint64_t> g_readbackStale = { 0u };
+
+    /* V18 texture-content no-drop guarantee (the world-texture black fix).
+     * Every client path that makes texture content GPU-visible must ship
+     * the same bytes — or COUNT + NAME itself. PROF fields:
+     *  - texWait=   b2t uploads that bounded-blocked for server heap acks
+     *               (bulk-streaming backpressure) before shipping;
+     *  - texStashB= current lazy re-upload stash occupancy (KiB);
+     *  - texDrop=   uploads lost for good at the HARD stash cap — every
+     *               drop is a permanently black server texture; must be 0;
+     *  - texConv=   compute-conversion results (D3D9ConversionFormat_*)
+     *               that cannot cross (no server-side converter) — the V10
+     *               honest flag, now counted + named per occurrence;
+     *  - texSess=   session-boundary create re-emissions whose previously
+     *               shipped content the client no longer holds (the fresh
+     *               server texture starts EMPTY — black until re-written). */
+    std::atomic<uint64_t> g_texAckWaits   = { 0u };
+    std::atomic<uint64_t> g_texStashBytes = { 0u };
+    std::atomic<uint64_t> g_texDrops      = { 0u };
+    std::atomic<uint64_t> g_texConvSkips  = { 0u };
+    std::atomic<uint64_t> g_texSessLoss   = { 0u };
 
     /* ALL-IN steady-state proof: presents where acquireServerFrame returned a
      * usable frame (cumulative; PROF `srvAccepted=` reports the WINDOW delta).
@@ -817,6 +852,26 @@ namespace dxvk::backend {
     return start;
   }
 
+  /* V18: bounded ack-wait twin of heapAlloc for TEXTURE content only.
+   * Texture uploads are one-shot (staging recycles, the frontend never
+   * re-writes an already-streamed texture) — losing one is a permanently
+   * black server texture, so a short CS-thread stall is the correct trade
+   * under bulk-streaming backpressure. Quiet probes: no double-counting. */
+  uint64_t MtlWireContext::heapAllocWait(const void* src, uint64_t bytes, uint64_t* genOut) {
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(kTexAckWaitBudgetMs);
+    for (;;) {
+      ::Sleep(1); /* server ack cadence is per-consumed-region; 1 ms poll */
+      const uint64_t off = heapAlloc(src, bytes, genOut, true /* quiet */);
+      if (off != UINT64_MAX) {
+        g_texAckWaits.fetch_add(1u, std::memory_order_relaxed);
+        return off;
+      }
+      if (std::chrono::steady_clock::now() >= deadline)
+        return UINT64_MAX;
+    }
+  }
+
   bool MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
                                         uint64_t dstOff, const void* src, uint64_t size) {
     uint64_t gen = 0u;
@@ -874,6 +929,7 @@ namespace dxvk::backend {
         return; /* heap still full — keep order, retry later */
       emitUploadTextureRecord(p.rec, off, gen);
       m_pendingTexBytes -= p.bytes.size();
+      g_texStashBytes.store(m_pendingTexBytes, std::memory_order_relaxed);
       m_pendingTexUploads.erase(m_pendingTexUploads.begin() + ptrdiff_t(i));
     }
   }
@@ -958,6 +1014,19 @@ namespace dxvk::backend {
      * surviving a session boundary re-emits its create at next use. */
     if (image->wireId && image->wireSession == g_wt.session)
       return image->wireId;
+    if (image->wireId && image->wireSession != 0u) {
+      /* V18 honest counter: a session-boundary RE-create. The fresh server
+       * texture starts EMPTY — any content shipped in the previous session
+       * is gone server-side and the client keeps no CPU copy to re-ship
+       * (staging recycled). Black until the frontend re-writes it. PROF
+       * texSess=; a nonzero value alongside black textures names this path. */
+      const uint64_t n = g_texSessLoss.fetch_add(1u, std::memory_order_relaxed);
+      if (n < 8u)
+        Logger::warn(str::format("wire tex session re-create WITHOUT content "
+          "re-ship: old wire=", image->wireId, " fmt=",
+          uint32_t(image->info().format), " ", image->info().extent.width, "x",
+          image->info().extent.height, " — server content starts empty"));
+    }
     if (!image->wireEligible) { /* v8: pseudo-resource — never on the wire */
       const uint64_t n = g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
       if (n < 24u) { /* v10: name WHO fails eligibility */
@@ -1976,6 +2045,26 @@ namespace dxvk::backend {
     m_inner->copyTextureToBuffer(dst, off, rowAlign, sliceAlign, format, src, srcSub, srcOff, extent);
   }
 
+  /* V18: the compute-conversion content path (FlushImage's converting
+   * branch: L6V5U5/X8L8V8U8/A2W10V10U10/W11V11U10/YUY2/UYVY/NV12/YV12).
+   * The converted RESULT is produced by a local compute dispatch straight
+   * into the destination image — no staging seam exists to tap and the
+   * server has no converter, so this content CANNOT cross yet. The V10
+   * honest flag, now counted (PROF texConv=) + the first few named, so a
+   * black texture from this shape is attributable in one run. */
+  void MtlWireContext::noteUnshippedTextureConversion(const Rc<MtlTexture>& dst,
+                                                      uint32_t conversionType) {
+    if (!wired())
+      return;
+    const uint64_t n = g_texConvSkips.fetch_add(1u, std::memory_order_relaxed);
+    if (n < 8u && dst != nullptr)
+      Logger::warn(str::format("wire tex upload UNSHIPPED: compute-conversion "
+        "result stays client-local (convType=", conversionType,
+        " dst fmt=", uint32_t(dst->info().format), " ",
+        dst->info().extent.width, "x", dst->info().extent.height,
+        ") — server texture keeps no content"));
+  }
+
   void MtlWireContext::copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
                                            const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                                            MtlDeviceSize sliceAlign, MtlFormat format) {
@@ -2029,22 +2118,61 @@ namespace dxvk::backend {
         }
         uint64_t gen = 0u;
         uint64_t heapOff = UINT64_MAX;
-        if (!stashPending)
+        if (!stashPending) {
           heapOff = heapAlloc(bytes, total, &gen);
+          /* V18: a full heap ABOVE the soft stash threshold used to be the
+           * drop-for-good edge (permanently black world textures under
+           * bulk streaming). Bounded-block for server acks instead. */
+          if (heapOff == UINT64_MAX &&
+              m_pendingTexBytes + total > kMaxPendingUploadBytes)
+            heapOff = heapAllocWait(bytes, total, &gen);
+        }
         if (heapOff != UINT64_MAX) {
           emitUploadTextureRecord(fields, heapOff, gen);
-        } else if (m_pendingTexBytes + total <= kMaxPendingUploadBytes) {
+        } else {
           /* S3 v2 lazy re-upload: heap full — keep the bytes (staging
-           * recycles them) and retry at the image's next bind / present. */
-          PendingTexUpload p;
-          p.image = dst;
-          p.rec = fields;
-          p.bytes.assign(static_cast<const uint8_t*>(bytes),
-                         static_cast<const uint8_t*>(bytes) + total);
-          m_pendingTexBytes += total;
-          m_pendingTexUploads.push_back(std::move(p));
+           * recycles them) and retry at the image's next bind / present.
+           * V18: an exact same-subresource-same-box re-upload REPLACES its
+           * stashed predecessor (newest content wins, FIFO position kept)
+           * so per-frame re-writers cannot inflate the stash. */
+          bool replaced = false;
+          for (auto& p : m_pendingTexUploads) {
+            if (p.image.ptr() == dst.ptr() &&
+                p.rec.mip == fields.mip && p.rec.layer == fields.layer &&
+                p.rec.x == fields.x && p.rec.y == fields.y &&
+                p.rec.z == fields.z &&
+                p.rec.width == fields.width && p.rec.height == fields.height &&
+                p.rec.depth == fields.depth &&
+                p.rec.format == fields.format &&
+                p.rec.data_size == fields.data_size) {
+              p.rec = fields;
+              p.bytes.assign(static_cast<const uint8_t*>(bytes),
+                             static_cast<const uint8_t*>(bytes) + total);
+              replaced = true;
+              break;
+            }
+          }
+          if (!replaced && m_pendingTexBytes + total <= kHardPendingUploadBytes) {
+            PendingTexUpload p;
+            p.image = dst;
+            p.rec = fields;
+            p.bytes.assign(static_cast<const uint8_t*>(bytes),
+                           static_cast<const uint8_t*>(bytes) + total);
+            m_pendingTexBytes += total;
+            g_texStashBytes.store(m_pendingTexBytes, std::memory_order_relaxed);
+            m_pendingTexUploads.push_back(std::move(p));
+          } else if (!replaced) {
+            /* HARD cap: content lost for good — a permanently black server
+             * texture. Counted (PROF texDrop=) + the first few named. */
+            const uint64_t n = g_texDrops.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 8u)
+              Logger::err(str::format("wire tex upload DROPPED (hard stash cap): "
+                "wire=", fields.wire_id, " fmt=", fields.format & 0xFFFFu,
+                " mip=", fields.mip, " box ", fields.x, ",", fields.y, " ",
+                fields.width, "x", fields.height, " bytes=", total,
+                " — server texture stays black"));
+          }
         }
-        /* else: stash cap exceeded — content lost for good (heapDrop'd) */
       }
     }
     m_inner->copyBufferToTexture(dst, dstSub, dstOff, extent, src, off, rowAlign, sliceAlign, format);
@@ -2802,6 +2930,11 @@ namespace dxvk::backend::prof {
       " rej=", s.server_creates_rejected,
       " inel=", g_wireIneligible.load(std::memory_order_relaxed),
       " copySkip=", g_copySkips.load(std::memory_order_relaxed),
+      " texWait=", g_texAckWaits.load(std::memory_order_relaxed),
+      " texStashB=", g_texStashBytes.load(std::memory_order_relaxed) >> 10,
+      " texDrop=", g_texDrops.load(std::memory_order_relaxed),
+      " texConv=", g_texConvSkips.load(std::memory_order_relaxed),
+      " texSess=", g_texSessLoss.load(std::memory_order_relaxed),
       " qStub=", g_queryStubs.load(std::memory_order_relaxed),
       " rbStale=", g_readbackStale.load(std::memory_order_relaxed));
     prev = s;

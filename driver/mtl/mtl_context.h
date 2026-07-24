@@ -223,6 +223,15 @@ namespace dxvk {
     virtual void copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
                              const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                              MtlDeviceSize sliceAlign, MtlFormat format);
+    // Accounting notice (default no-op): the frontend is about to fill `dst`
+    // through a compute-shader format conversion (D3D9ConversionFormat_*)
+    // whose RESULT stays in this process — remote/recording backends cannot
+    // ship it and must count + name the gap rather than silently keep an
+    // empty server-side texture. `conversionType` is the D3D9ConversionFormat.
+    virtual void noteUnshippedTextureConversion(const Rc<MtlTexture>& dst,
+                                                uint32_t conversionType) {
+      (void)dst; (void)conversionType;
+    }
     virtual void resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src, MtlResolveRegion region,
                         MtlFormat format, MtlResolveMode color, MtlResolveMode stencil); // §6.5
     virtual void blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],

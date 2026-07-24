@@ -1463,3 +1463,129 @@ Honest flags / debt:
 - `ready==2` (FAILED nil) resources stay permanently dark by design — the
   reason-coded log + exec_errors make it loud; if GTA names this class,
   chase the descriptor values in the create breadcrumb.
+
+## V18 — WORLD-TEXTURE BLACK: the texture-content loss edges (streamed
+## uploads dropped for good) + every content path named
+
+GPU-capture evidence (live GTA daylight frame, server-side .gputrace):
+the main G-buffer pass (2560x1600, 4 MRT + depth, 126 draws) outputs PURE
+BLACK albedo; a world draw's bound diffuse texture (256x256 BGRA8Unorm,
+real wire texture — the unresolved-bind dummy is 1x1) fetches pure black.
+Menus/HUD cross fine; geometry (V16) and depth (V17) cross. ONLY streamed
+world-texture CONTENT is missing.
+
+THE CHASE — every client path that makes texture content GPU-visible,
+audited for wire crossing:
+1. Lock/Unlock + UpdateTexture/UpdateSurface + managed uploads: ALL
+   funnel through D3D9DeviceEx::UpdateTextureFromBuffer (FlushImage,
+   d3d9_device.cpp) -> ctx->copyBufferToTexture — the tapped seam
+   (upload_texture, op 34). UploadManagedTexture is FlushImage per
+   subresource. Staging is SHARED memory (mapPtr valid). BC crosses
+   NATIVELY: DXT1/3/5 -> BC1/2/3 (d3d9_format.cpp:217-240), wirePitch
+   mirrors computeBufferImagePitch block math (8/16 B per 4x4 block,
+   mtl_format.cpp:21-49), server copyFromBuffer honors block row pitch.
+   code_dxt was already green — the PLAIN BC path was never the bug.
+2. GPU copy family (copy_texture/blit/resolve/mips): wired since v9.
+3. The compute-conversion branch (d3d9_device.cpp FlushImage else-branch)
+   NEVER crosses (the V10 flag) — but its formats are ONLY the bump/video
+   family (L6V5U5/X8L8V8U8/A2W10V10U10/W11V11U10/YUY2/UYVY/NV12/YV12,
+   d3d9_format.cpp:136-210 + 424-433). World diffuse art (DXT/A8R8G8B8)
+   CANNOT route here — this is real debt but NOT the world-black shape.
+4. THE LOSS EDGES (root cause class — silent one-shot content drops):
+   0. BIND-ONCE PERMANENT DUMMY (server, REPRODUCED by the new gate): a
+      bind_texture_by_id that raced the async create/upload resolved the
+      slot to the 1x1 dummy and NOTHING ever re-resolved it — "rebound
+      next draw" only heals apps that actually rebind. code_dxtbox
+      (SetTexture once before the loop, like code_dxt) rendered PURE
+      BLACK on the pre-fix build with server errors=0 and both uploads
+      executed — the exact silent-black shape. Real games re-emit binds
+      whenever a slot CHANGES texture, but any slot that keeps the same
+      texture across draws/frames (HUD overlays, single-material scenes,
+      last-material-standing after sorts) is permanently black.
+   a. mtl_wire_context.cpp copyBufferToTexture tap: heap full (256 MiB,
+      server acks behind during load) -> lazy stash; stash cap 96 MiB ->
+      "content lost for good" — UNCOUNTED per-texture, permanently black.
+      A world-streaming burst (hundreds of MiB through Lock/Unlock while
+      the create worker is also storming) blows the cap; every texture
+      past it stays black FOREVER (uploads are one-shot; staging
+      recycles). Menus (early, small) and HUD (re-written per frame)
+      survive — EXACTLY the observed signature.
+   b. Session-boundary re-create (V17 citizenship): a surviving texture
+      re-emits its CREATE next use, but its previously shipped content is
+      gone server-side and the client keeps no CPU copy — fresh server
+      texture starts EMPTY. Was invisible; now counted.
+
+FIX (fix-by-construction: ship or COUNT+NAME, never silent black):
+- BIND-ONCE PROMOTION (server/executor.mm): StageState remembers the
+  bind record for any slot that resolved to the dummy while the texture
+  was still building/content-less (texPendRec/texPendSlot/texPendCount);
+  the draw-prepare path calls promotePendingTexBinds() and re-resolves
+  the slot (real texture view) the moment the resource turns
+  ready+hasContent, re-materializing the argument tables. FAILED creates
+  (ready==2) clear the pend — the dummy stays by design. Cost: a
+  per-draw counter check; the slot scan only runs while pends exist.
+- Bounded ack-wait (heapAllocWait, 50 ms budget, 1 ms polls of quiet
+  heapAlloc): engaged only when a texture upload would cross the SOFT
+  stash threshold (96 MiB). The server acks per consumed region, so
+  streaming backpressure becomes a short CS stall instead of loss. Dead
+  server exhausts the budget and falls through — never a hang.
+- Stash hard cap 768 MiB (was: drop at 96 MiB). Exact same-box re-uploads
+  REPLACE their stashed predecessor (newest wins, FIFO position kept) so
+  per-frame writers cannot inflate the stash.
+- Drops now only at the hard cap: counted (PROF `texDrop=`, must stay 0)
+  + first-8 named (`wire tex upload DROPPED (hard stash cap): wire= fmt=
+  mip= box=`).
+- Conversion branch: MtlContext::noteUnshippedTextureConversion (default
+  no-op; wire override counts PROF `texConv=` + first-8 named) called at
+  the FlushImage converting-branch emission — the V10 flag is now
+  attributable in one run instead of silent.
+- Session loss: counted (PROF `texSess=`) + first-8 named in
+  ensureTextureCreated when re-emitting a cross-session create.
+- New PROF fields: `texWait=` (ack-waits taken), `texStashB=` (stash KiB),
+  `texDrop=`, `texConv=`, `texSess=`.
+
+GATES (all verified via the driver-side rt_dump.bin readback — the
+window-screenshot path is flaky; rt_dump is deterministic):
+- test/code_dxtworld.c (NEW, PASSES): the world-texture shape — DXT1
+  256x256 FULL mip chain + DXT5 128x128 full chain, MANAGED, every level
+  Lock-filled (per-mip solid colors), fullscreen quad clamped to MIP 2
+  via MAXMIPLEVEL. Center = (0,255,0) mip-2 green, corner = (0,255,255)
+  DXT5 cyan: every subresource of a BC chain crosses with correct block
+  pitch down the chain, and forced-mip sampling reads the right level.
+- test/code_dxtbox.c (NEW, PASSES — and REPRODUCED the bind-once black
+  before the promotion fix): DXT1 128x128 filled blue (SetTexture ONCE),
+  8 s later LockRect RECT{32,32,96,96} rewrites the centre to red.
+  Pre-update dump: all blue (bind-once promotion works — this was pure
+  black before the fix). Post-update dump: centre (255,0,0), edges
+  (0,0,255) — the partial upload_texture lands with correct block
+  origin+pitch and touches ONLY the box.
+- Existing ladder (code_dxt, code_mip, code_texture, code_updatetex, ...)
+  green (see below). Full-clean chain done: rm -rf build; build-bridge;
+  build-driver (tail-calls build-server, synthetic gate PASS) — headers
+  changed (mtl_context.h, mtl_wire_context.h). NOTE: after rm -rf build,
+  d9mt-serverd must be re-staged NEXT TO the loaded winemetal.so
+  (build/winepath/x86_64-unix/ and the CX tree) or the client logs "no
+  render server (claim #0)" and thin-recorder tests render nothing.
+
+Expected GTA signature: textured, lit world (V17 gave depth/lighting; V18
+keeps streamed albedo content AND heals every bind that raced streaming).
+During load `texWait=` climbs and `texStashB=` breathes, then both
+settle; `texDrop=` stays 0. Distance-blur/black-at-distance should also
+resolve (partial mip chains were the stash-cap casualties). If a world
+texture is STILL black with texDrop=0, read `texConv=`/`texSess=` — the
+remaining named debt (server-side converter for the video/bump family;
+cross-session content re-ship) is the next slice.
+
+Honest flags / debt:
+- Compute-conversion textures still cannot cross (no server converter and
+  no tappable staging seam for the converted RESULT) — now loud
+  (`texConv=` + named), still local-only.
+- Cross-session texture content is NOT re-shipped (client CPU copy no
+  longer exists) — `texSess=` names the class; a real fix needs frontend
+  cooperation (re-dirty managed textures on session bump).
+- The bounded wait applies to TEXTURE content only; buffer uploads keep
+  the drop-on-full behavior (counted via heapDrop; dynamic buffers
+  re-ship every frame by design).
+- heapAllocWait stalls the CS thread up to 50 ms per starved upload; only
+  reachable past 96 MiB of stashed content (load-time), steady state
+  never pays it.

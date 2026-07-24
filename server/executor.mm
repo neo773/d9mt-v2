@@ -354,6 +354,16 @@ struct StageState {
   bool texBound[kMaxTexTrack] = {};
   /* S3: resolved REAL texture (or view) per slot; nil = dummy-bound. */
   id<MTLTexture> textures[kMaxTexTrack] = {};
+  /* V18 bind-once promotion: a bind that resolved to the dummy because the
+   * texture was still building (or its content still in flight) keeps its
+   * record here; draws re-resolve the slot once the resource turns
+   * ready+content. Without this, an app that binds a texture ONCE and
+   * never rebinds samples the dummy FOREVER (permanent black) whenever the
+   * bind raced the async create/upload — "rebound next draw" only heals
+   * apps that actually rebind. */
+  d9mt_wire_rec_bind_texture_by_id texPendRec[kMaxTexTrack];
+  bool texPendSlot[kMaxTexTrack] = {};
+  uint32_t texPendCount = 0;
   id<MTLSamplerState> samplers[kMaxTexTrack] = {};
   uint8_t pushData[4096] = {};
   uint32_t pushExtent = 0;
@@ -1212,6 +1222,8 @@ static id<MTLDepthStencilState> resolveDsso() {
 
 /* --- draw-time flush (decisions 2+3 port) ------------------------------------- */
 
+static bool promotePendingTexBinds(); /* V18: defined with the bind handler */
+
 static void flushBindings() {
   ArgTablePair& pair = g->argTables[g->currentArgTable];
 
@@ -1530,6 +1542,11 @@ static bool prepareDraw() {
     g->argTablesBound = true;
     g->dirtyBindings = true;
   }
+
+  /* V18: dummy-bound slots whose texture turned ready+content since the
+   * bind record re-resolve here (bind-once apps never rebind). */
+  if (promotePendingTexBinds())
+    g->dirtyBindings = true;
 
   if (g->dirtyBindings) {
     flushBindings();
@@ -2219,21 +2236,66 @@ static id<MTLTexture> resolveTexView(const std::shared_ptr<Resource>& res,
 
 static void handleBindTextureById(const d9mt_wire_rec_bind_texture_by_id* r) {
   id<MTLTexture> tex = nil;
+  bool pend = false;
   if (r->image_wire_id) {
     auto res = lookupWire(r->image_wire_id);
     /* content gate: a wire texture with no uploads and no server-side render
      * has UNDEFINED private storage — the dummy stays (defined sampling).
-     * v7: a still-building texture also stays dummy (rebound next draw). */
+     * v7: a still-building texture also stays dummy. V18: the slot REMEMBERS
+     * the bind (texPend) and draws promote it once ready+content — apps
+     * that bind once must not sample the dummy forever. */
     if (res && observeReady(res) && res->texture && res->hasContent)
       tex = resolveTexView(res, r);
+    else if (res && res->ready.load(std::memory_order_acquire) != 2)
+      pend = true; /* building, or created with content still in flight */
   }
   for (uint32_t st = 0; st < 2; st++) {
     if (r->stages & (1u << st) && r->slot < kMaxTexTrack) {
-      g->stages[st].textures[r->slot] = tex;
-      g->stages[st].texBound[r->slot] = r->image_wire_id != 0;
+      StageState& b = g->stages[st];
+      b.textures[r->slot] = tex;
+      b.texBound[r->slot] = r->image_wire_id != 0;
+      if (pend && !b.texPendSlot[r->slot])
+        b.texPendCount++;
+      else if (!pend && b.texPendSlot[r->slot])
+        b.texPendCount--;
+      b.texPendSlot[r->slot] = pend;
+      if (pend)
+        b.texPendRec[r->slot] = *r;
     }
   }
   g->dirtyBindings = true;
+}
+
+/* V18 bind-once promotion (see StageState::texPendRec): re-resolve dummy-
+ * bound slots whose texture has since turned ready+content. Runs on the
+ * draw-prepare path; returns true when any slot changed so the argument
+ * tables re-materialize. A FAILED create (ready==2) or a vanished wire id
+ * clears the pend — the dummy stays by design (defined sampling). */
+static bool promotePendingTexBinds() {
+  bool changed = false;
+  for (uint32_t st = 0; st < 2; st++) {
+    StageState& b = g->stages[st];
+    if (!b.texPendCount)
+      continue;
+    for (uint32_t slot = 0; slot < kMaxTexTrack && b.texPendCount; slot++) {
+      if (!b.texPendSlot[slot])
+        continue;
+      const d9mt_wire_rec_bind_texture_by_id& r = b.texPendRec[slot];
+      auto res = lookupWire(r.image_wire_id);
+      if (!res || res->ready.load(std::memory_order_acquire) == 2) {
+        b.texPendSlot[slot] = false;
+        b.texPendCount--;
+        continue;
+      }
+      if (observeReady(res) && res->texture && res->hasContent) {
+        b.textures[slot] = resolveTexView(res, &r);
+        b.texPendSlot[slot] = false;
+        b.texPendCount--;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 /* --- S3 v9: the GPU-side copy/blit family --------------------------------------

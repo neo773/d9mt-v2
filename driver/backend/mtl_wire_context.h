@@ -125,6 +125,8 @@ namespace dxvk::backend {
     void copyTextureToBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize off, MtlDeviceSize rowAlign,
                              MtlDeviceSize sliceAlign, MtlFormat format, const Rc<MtlTexture>& src,
                              MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) override;
+    void noteUnshippedTextureConversion(const Rc<MtlTexture>& dst,
+                                        uint32_t conversionType) override;
     void copyBufferToTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff, MtlSize extent,
                              const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                              MtlDeviceSize sliceAlign, MtlFormat format) override;
@@ -239,8 +241,12 @@ namespace dxvk::backend {
     /* S3 v2 lazy re-upload: texture content whose heap region could not be
      * allocated (heap full during a boot flood) is stashed here — the bytes
      * would otherwise be lost forever (staging recycles). Retried at the
-     * image's next bind_texture_by_id and once per present. Bounded by
-     * kMaxPendingUploadBytes; overflow drops for real. */
+     * image's next bind_texture_by_id and once per present. V18: crossing
+     * the SOFT threshold (kMaxPendingUploadBytes) first engages a bounded
+     * ack-wait (heapAllocWait); exact same-box re-uploads replace their
+     * stashed predecessor; only the HARD cap drops — counted + named
+     * (PROF texDrop=), because a dropped upload is a permanently black
+     * server texture. */
     struct PendingTexUpload {
       Rc<MtlTexture>              image;
       d9mt_wire_rec_upload_texture rec; /* heap fields refreshed at retry */
@@ -295,6 +301,10 @@ namespace dxvk::backend {
      * the server keeps its previous content for that resource. */
     uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut,
                        bool quiet = false);
+    /* V18: bounded ack-wait twin of heapAlloc — TEXTURE content only (one-
+     * shot bytes; a drop is a permanently black server texture). Engaged
+     * when the lazy stash would cross its soft threshold. */
+    uint64_t heapAllocWait(const void* src, uint64_t bytes, uint64_t* genOut);
     /* Returns true when the record actually shipped (false = full-heap drop
      * or unclaimed wire) — V15 re-ship dedup keys off this. */
     bool     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
