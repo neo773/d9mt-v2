@@ -1,0 +1,75 @@
+bridge/unix/winemetal_unix.c
+  s_9dc0f2092159a8::t_62100030bba721 6442
+  s_9dc0f2092159a8::t_4ab9bafbf39a2a 6845-6855
+  s_9dc0f2092159a8::t_930dabe1862171 6912-6915
+  s_9dc0f2092159a8::t_8365a483454940 7228-7243
+  s_9dc0f2092159a8::t_6200f1002985a8 7171-7173
+server/test_feed.c
+  s_9dc0f2092159a8::t_22a3ae41dc827f 2448-2541
+driver/backend/mtl_wire_emit.h
+  s_9dc0f2092159a8::t_1d8e8186322927 70-85
+bridge/winemetal_thunks.h
+  s_9dc0f2092159a8::t_4be61530c3ee81 658-659,663-664
+  s_9dc0f2092159a8::t_37f5d3be3a71c1 643-648
+bridge/winemetal_thunks.c
+  s_9dc0f2092159a8::t_c53cfb1a7685bf 1946-1948
+driver/d3d9/d3d9_swapchain.cpp
+  s_9dc0f2092159a8::t_a35d853f8e3991 809-812
+  s_9dc0f2092159a8::t_313f960d76463a 884-885
+  s_9dc0f2092159a8::t_260fd78083a231 932-933,935-936
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_d36c2828f9c62e 1110
+  s_9dc0f2092159a8::t_4ee2c2f5f201da 33-36
+  s_9dc0f2092159a8::t_265ef1262ef932 2417-2426
+  s_9dc0f2092159a8::t_7f52a078cdca19 2621
+  s_9dc0f2092159a8::t_a751a583bcc9a1 2513-2514
+  s_9dc0f2092159a8::t_700fecc2c45bdc 2241-2416,2427-2480
+  s_9dc0f2092159a8::t_f3526e3d2a2fde 1111
+  s_9dc0f2092159a8::t_cbbfb9b62edba7 2515
+  s_9dc0f2092159a8::t_f9f0a491f69f8e 2622
+bridge/winemetal.h
+  s_9dc0f2092159a8::t_ee368eca72a555 2694-2701
+  s_9dc0f2092159a8::t_ddba9f7683d5af 2667-2674
+server/HANDOFF-TIMELINE.md
+  s_9dc0f2092159a8::t_169ab383b2cd90 109-124
+  s_9dc0f2092159a8::t_a78cd76c4607ad 1-108,125-134
+server/d9mt_status.h
+  s_9dc0f2092159a8::t_d49f7489e3a0d2 71-87
+  s_9dc0f2092159a8::t_08bbaef3f40377 182-185
+  s_9dc0f2092159a8::t_a77a8bbce509f5 152-156,159
+  s_9dc0f2092159a8::t_cd7150e01fa8c8 121-125
+server/executor.mm
+  s_9dc0f2092159a8::t_0405bb7c606d0c 2854-2856,2859-2869,2882-2889
+  s_9dc0f2092159a8::t_56e16beb5a29ce 76,79
+  s_9dc0f2092159a8::t_ef807e355a611c 2824-2834
+  s_9dc0f2092159a8::t_dd7ffbc0fd2067 2756,2758-2770
+  s_9dc0f2092159a8::t_463f7ff5b53c5d 2753-2755
+  s_9dc0f2092159a8::t_752403088f6409 2771-2772
+  s_9dc0f2092159a8::t_0a272107a2c4a1 2835-2836
+  s_9dc0f2092159a8::t_375368c6de0fa2 2890-2891
+  s_380ee15b869c9e::t_26da11e7d9cc93 2721-2752
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9754b7269ae8c20c796aa53d2c4fddcce0c09c3e",
+  "prompts": {},
+  "sessions": {
+    "s_380ee15b869c9e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a21463456228b582e",
+        "model": "unknown"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    },
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
