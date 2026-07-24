@@ -2659,6 +2659,11 @@ struct WMTServerFrame {
   uint32_t minted;       /* 1 = texture was freshly wrapped this call — the
                           * caller must make it resident on its queue before
                           * using it as a copy/blit source (else GPU fault) */
+  uint64_t gpu_resource_id; /* MTLResourceID of the wrapped texture. The SCALED
+                          * present blit samples the wrap through an MTL4
+                          * argument table — argument tables bind by resource
+                          * id, not object handle, and a 0 id samples nothing
+                          * (legal-but-black). Never 0 when usable. */
 };
 WINEMETAL_API uint32_t WireServerFrame_acquire(obj_handle_t device,
                                                uint64_t local_serial,

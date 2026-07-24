@@ -98,6 +98,50 @@ transformImage, setDepthBounds.
   place until a server frame exists (a too-early touch retries instead of
   eating the trigger).
 
+## Post-slice fix — the retina black screen (gputrace-proven)
+
+Symptom: reproducers (tri/cube) black on retina glass, ZERO validation
+errors in client AND server, server IOSurface HAD content (dump harness
+read it fine), `first SERVER frame accepted` logged. A .gputrace of the
+live run showed the scaled present blit ENCODED on the RIGHT drawable
+(1600x1200 CAMetalLayer Drawable, one blitVsMain/blitFsMain draw) with
+buffer[0] + sampler[0] bound and **NO texture bound**.
+
+Root cause: `acquireServerFrame` (mtl_wire_context.cpp) hand-builds the
+server-wrap `MtlTextureViewImpl` and never set `gpuResourceId` (only
+`createImageView` populates it, from `MTLTexture_newTextureView`). The
+scaled present blit (`mtl_context_transfer.cpp blitTextureView`) binds its
+source via `MTL4ArgumentTable_setTexture(table, srcTv->gpuResourceId)` —
+argument tables bind by MTLResourceID, not object handle, and a **0
+resource id is LEGAL-but-samples-black** (no validation error possible).
+Handle-based paths were immune, which is why every probe looked healthy:
+the dump compute copies and the 1:1 `copyTexture` present use object
+handles. Latent since cutover S3; the all-in slice made the server wrap
+the ONLY present source, so the scaled (retina) branch = black every frame.
+NOT drawable pairing, NOT skip-present pacing, NOT a thin-recorder bind
+hole (the blit's binds are direct argtable writes, never the wire taps).
+
+Fix (by construction — no black present can be encoded):
+- `WMTServerFrame`/`unixcall_wire_server_frame` carry
+  `gpu_resource_id = [tex gpuResourceID]._impl` from the unix wrap cache.
+- `acquireServerFrame` stamps `view->gpuResourceId = f.gpu_resource_id`
+  and treats a ZERO id like a zero extent: skip the present entirely.
+- PROF wire line gains `srvAccepted=` (window delta of presents that
+  presented an accepted server frame) — steady state must track the frame
+  rate (~256/window); the `first SERVER frame accepted` line is one-shot
+  by design and proves nothing about steady state. Acceptance itself was
+  verified per-present (unbounded lag, no serial one-shot).
+
+Also verified from the same trace: the EMPTY command buffer per frame is
+the client frame flush (thin recorder records nothing locally) — harmless
+and load-bearing (advances the local submission serial that staging
+fences / EVENT queries / latency ride on). `presentUpscale` (MetalFX) is
+handle-based (`encodeSpatialScale(stex, dtex)`) — no resource-id hole.
+
+Expected reproducer signature after the fix: dark-blue clear + red
+triangle on screen; `srvAccepted=` ≈ 256 per window once the server
+publishes.
+
 ## Expected cube signature (the reproducer proves this, not the build)
 
 - Log: `render server attached ... (thin recorder: server-only rendering)`,

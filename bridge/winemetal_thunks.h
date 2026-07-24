@@ -635,6 +635,10 @@ struct unixcall_wire_server_frame {
   uint32_t out_usable;       /* out: 1 = use the server frame */
   uint32_t out_minted;       /* out: 1 = out_texture was freshly created this
                               * call (PE must add it to the residency set) */
+  uint64_t out_gpu_resource_id; /* out: [tex gpuResourceID] — the scaled present
+                              * blit SAMPLES the wrap through an MTL4 argument
+                              * table, which binds by resource id, not handle.
+                              * 0 = unusable (a 0 id samples nothing: black). */
 };
 
 #pragma pack(pop)

@@ -1942,5 +1942,6 @@ WireServerFrame_acquire(obj_handle_t device, uint64_t local_serial,
   out->format       = params.out_format;
   out->slot         = params.out_slot;
   out->minted       = params.out_minted;
+  out->gpu_resource_id = params.out_gpu_resource_id;
   return 1;
 }

@@ -7045,6 +7045,7 @@ _WireServerFrame_acquire(void *obj) {
   p->out_usable = 0;
   p->out_texture = 0;
   p->out_minted = 0;
+  p->out_gpu_resource_id = 0;
   if (!wire_status)
     return STATUS_SUCCESS;
 
@@ -7093,6 +7094,11 @@ _WireServerFrame_acquire(void *obj) {
   p->out_format       = (uint32_t)MTLPixelFormatBGRA8Unorm;
   p->out_slot         = slot;
   p->out_minted       = minted;
+  /* The SCALED present blit samples this texture through an MTL4 argument
+   * table, which binds by MTLResourceID — a 0 id is legal-but-black (argument
+   * tables are not validated). Ship the real id; the PE side refuses to
+   * present a frame without one. */
+  p->out_gpu_resource_id = [tex gpuResourceID]._impl;
   p->out_usable       = 1;
   return STATUS_SUCCESS;
 }

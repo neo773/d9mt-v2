@@ -179,6 +179,13 @@ namespace dxvk::backend {
     std::atomic<uint64_t> g_queryStubs    = { 0u };
     std::atomic<uint64_t> g_readbackStale = { 0u };
 
+    /* ALL-IN steady-state proof: presents where acquireServerFrame returned a
+     * usable frame (cumulative; PROF `srvAccepted=` reports the WINDOW delta).
+     * In steady state this must track the present rate — acceptance is
+     * per-present, never one-shot (the "first SERVER frame accepted" log line
+     * is one-shot by design; this counter is the per-frame truth). */
+    std::atomic<uint64_t> g_srvAccepted   = { 0u };
+
     /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
 
     /* Monotonic wire identity (spec: client-assigned u64). 0 = "no wire
@@ -2239,7 +2246,14 @@ namespace dxvk::backend::wire {
      * zero/out-of-bounds present copy -> GPU fault -> the present's completion
      * event never signals -> the CS thread parks forever. Never present such a
      * frame — the caller skips the present. */
-    if (f.texture == 0u || f.width == 0u || f.height == 0u) {
+    /* ALL-IN black-screen fix (retina/scaled present): the SCALED present
+     * path samples this wrap in a render pass (blitTextureView) through an
+     * MTL4 argument table — argument tables bind by MTLResourceID, not object
+     * handle, and a 0 id samples nothing (LEGAL-but-black; the debug layer
+     * cannot see it). By construction: no resource id -> no present (skip),
+     * never a black blit. */
+    if (f.texture == 0u || f.width == 0u || f.height == 0u
+     || f.gpu_resource_id == 0u) {
       static bool s_warned = false;
       if (f.texture != 0u && !s_warned) {
         s_warned = true;
@@ -2282,9 +2296,17 @@ namespace dxvk::backend::wire {
     view->view.tex   = f.texture;
     view->image      = tex.ptr();
     view->key.format = fmt;
+    /* THE all-in black-screen fix: the scaled present blit binds its source
+     * via MTL4ArgumentTable_setTexture(srcTv->gpuResourceId) — hand-built
+     * views default the id to 0, and a 0 MTLResourceID samples BLACK with no
+     * validation error (the gputrace showed the blit encoded on the right
+     * drawable with buffer+sampler bound and NO texture). Carry the wrap's
+     * real id across the bridge. Guarded nonzero above. */
+    view->gpuResourceId = f.gpu_resource_id;
 
     outImage = tex;
     outView  = view;
+    g_srvAccepted.fetch_add(1u, std::memory_order_relaxed);
     /* v13.1 black-screen attribution: name the FIRST present that switches
      * the on-screen source to the server frame — a regression that appears
      * with this line in the log is a cutover/present-path issue, one that
@@ -2329,6 +2351,16 @@ namespace dxvk::backend::prof {
       " hb=", s.heartbeat - prev.heartbeat,
       " srvErr=", s.server_error,
       " srvFrames=", s.server_frames - prev.server_frames,
+      " srvAccepted=", [] {
+        /* window delta: presents this 256-frame window that presented an
+         * accepted server frame — steady state must track the frame rate
+         * (256), NOT a one-shot (see g_srvAccepted). */
+        static uint64_t prevAccepted = 0u;
+        const uint64_t now = g_srvAccepted.load(std::memory_order_relaxed);
+        const uint64_t d = now - prevAccepted;
+        prevAccepted = now;
+        return d;
+      }(),
       " srvPace=", g_srvPace.load(std::memory_order_relaxed),
       " srvExecErr=", s.server_exec_errors,
       " psoSkip=", s.server_skipped_pso - prev.server_skipped_pso,
