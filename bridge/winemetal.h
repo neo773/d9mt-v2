@@ -2670,4 +2670,21 @@ WINEMETAL_API uint32_t WireServerFrame_acquire(obj_handle_t device,
                                                uint64_t lag_frames,
                                                struct WMTServerFrame *out);
 
+/* ---------------------------------------------------------------------------
+ * Kernel-wake bounded waits (unixcall 217). The PE producer cannot call
+ * os_sync_wait_on_address itself; this thunk parks unix-side on the shared
+ * ring/status address and returns on wake, value change, or the timeout_us
+ * backstop — it NEVER blocks unbounded (driver/mtl/mtl_futex.h documents the
+ * futex discipline and the memory-ordering contract). Returns the observed
+ * value at return (op-specific; see WMTWireWaitOp). The PE hot path must
+ * short-spin first and only call this when it would otherwise sleep-poll. */
+enum WMTWireWaitOp {
+  WMTWireWaitSpace = 0,       /* a = producer head, b = bytes needed;
+                               * waits on ring tail; returns tail */
+  WMTWireWaitFrameSerial = 1, /* a = target serial; waits on status
+                               * frame_serial; returns frame_serial */
+};
+WINEMETAL_API uint64_t WireRing_wait(uint32_t op, uint32_t timeout_us,
+                                     uint64_t a, uint64_t b);
+
 #endif

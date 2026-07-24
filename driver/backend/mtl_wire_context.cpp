@@ -53,6 +53,13 @@ namespace dxvk::backend {
      * the dead-server safety net stays. */
     constexpr uint32_t WireStallWindows = 5u;
 
+    /* Publish-notice wait budget (acquireServerFrame): how long a present
+     * may park for the server's PREVIOUS-frame publication before falling
+     * back to the freshest already-published frame (a repeat — exactly the
+     * pre-wakeup behavior). Well under one uncapped frame; a lost wake costs
+     * at most this, never a hang. */
+    constexpr uint32_t kPublishWaitUs = 3000u;
+
     /* One ring at a time; a second LIVE context forwards without recording
      * (and retries the claim per present, S3 v5). The claiming context's
      * dtor RELEASES the claim after QUIESCING the server. */
@@ -486,12 +493,16 @@ namespace dxvk::backend {
       return true;
 
     /* Ring full: the consumer is behind (S3: async PSO builds keep it
-     * flowing, but bursts still happen) or dead. Kick defensively, then spin
-     * in WINDOWS: each ~1 s window that ends still-full logs a warn (the
-     * PROF near-miss trail) and counts a stall episode; only
-     * WireStallWindows consecutive full windows — a consumer that made NO
-     * space for the whole budget — trip the PERMANENT disable (the
-     * dead-server safety net). */
+     * flowing, but bursts still happen) or dead. Kick defensively, then wait
+     * in WINDOWS: a short spin (space usually frees within microseconds
+     * under a live consumer — the hot path pays no thunk), then a KERNEL
+     * wait on the consumer's tail cursor (unixcall 217 WMTWireWaitSpace —
+     * the consumer wakes &tail after its tail release-store when waiters
+     * are registered; mtl_futex.h owns the contract). Each ~1 s window that
+     * ends still-full logs a warn (the PROF near-miss trail) and counts a
+     * stall episode; only WireStallWindows consecutive zero-progress
+     * windows — a consumer that made NO space for the whole budget — trip
+     * the PERMANENT disable (the dead-server safety net, unchanged). */
 
     /* No server attached (WMTWireAttachLocal): nothing will EVER consume, so
      * a full ring is final — degrade to forward-only immediately instead of
@@ -509,7 +520,7 @@ namespace dxvk::backend {
       const uint64_t tailAtStart = g_wt.ring->tail.load(std::memory_order_acquire);
       WMTWireStats hbStart = { };
       WireRing_stats(&hbStart);
-      for (uint32_t spin = 0u; spin < (1u << 20); spin++) {
+      for (uint32_t spin = 0u; spin < 1024u; spin++) {
         tail = g_wt.ring->tail.load(std::memory_order_acquire);
         if (g_wt.head - tail + need <= g_wt.cap) {
           if (window > 1u)
@@ -517,8 +528,16 @@ namespace dxvk::backend {
               window, " stall windows"));
           return true;
         }
-        if ((spin & 0x3Fu) == 0x3Fu)
-          ::Sleep(0);
+      }
+      /* Kernel wait, ~1 s bounded (the window budget): returns on the
+       * consumer's tail wake, on consumer death, or on the timeout backstop
+       * — never later than the old spin window, near-zero CPU meanwhile. */
+      tail = WireRing_wait(WMTWireWaitSpace, 1000000u, g_wt.head, need);
+      if (g_wt.head - tail + need <= g_wt.cap) {
+        if (window > 1u)
+          Logger::warn(str::format("MtlWireContext: ring recovered after ",
+            window, " stall windows"));
+        return true;
       }
       /* S3 v4: a live-but-slow consumer heartbeats through a stall (~100
        * ticks per window); frozen heartbeat + zero tail progress = DEAD
@@ -535,7 +554,7 @@ namespace dxvk::backend {
         }
       }
       Logger::warn(str::format("MtlWireContext: ring stall window ", window,
-        "/", WireStallWindows, " (~1s each, consumer behind)"));
+        "/", WireStallWindows, " (~1s each, kernel-parked, consumer behind)"));
       /* consumer moved but the record still doesn't fit: it is ALIVE and the
        * producer is parked, so space converges — only zero-progress windows
        * count toward the disable ("consecutive" semantics). */
@@ -2230,6 +2249,21 @@ namespace dxvk::backend::wire {
       return false;
     if (device == nullptr)
       return false;
+
+    /* Kernel-wake publish notice (unixcall 217 WMTWireWaitFrameSerial): when
+     * the server has not yet published the PREVIOUS present's frame, park on
+     * status->frame_serial — the executor wakes the address right after its
+     * completion-gated release-store — instead of grabbing whatever is
+     * published and presenting a repeat. Bounded (kPublishWaitUs): on
+     * timeout this falls through to exactly today's behavior (freshest
+     * published frame, repeat included), and the unix side never waits
+     * while frame_serial == 0 (boot), so first-frame semantics are
+     * unchanged. Target is localSerial - 1: THIS present's marker record
+     * (serial == localSerial) is emitted after this acquire, so waiting for
+     * localSerial itself could only ever time out. */
+    if (localSerial > 1u)
+      WireRing_wait(WMTWireWaitFrameSerial, kPublishWaitUs,
+                    localSerial - 1u, 0u);
 
     /* ALL-IN: the pace gate is GONE — pass an unbounded lag budget so the
      * freshest PUBLISHED frame is always accepted, however far behind the

@@ -64,13 +64,23 @@
  * consumer advances tail by (capacity - (tail & mask)) — the pad record's
  * size field is ignored (the skip can exceed uint16).
  *
- * KICK / PARK PROTOCOL:
- *   - S1: the cross-process consumer parks on a 1 ms poll (no kick channel
- *     over the process boundary yet — server/README.md caveats), so
- *     WireRing_kick() is currently a no-op. The producer still calls it
- *     ONLY on the empty->nonempty transition (at record-write time it
- *     sampled tail == previous head), keeping the protocol intact for the
- *     S2 kick channel (pipe/kqueue/futex).
+ * KICK / PARK PROTOCOL (kernel wakeups — mtl_futex.h has the full memory-
+ * ordering contract; os_sync_wait_on_address with the SHARED flag, both
+ * cursors live in the MAP_SHARED ring file):
+ *   - CONSUMER PARK: an empty ring futex-waits on &head with a 1 ms
+ *     timeout backstop (exactly the old poll latency on a lost wake; also
+ *     keeps the heartbeat ~100 Hz and the unlink/pid checks ~10 Hz).
+ *     WireRing_kick() wakes &head; the producer calls it ONLY on the
+ *     empty->nonempty transition (at record-write time it sampled
+ *     tail == previous head). The kernel's value-compare closes the
+ *     park/kick race: a wait submitted after the head store returns
+ *     immediately.
+ *   - PRODUCER SPACE WAIT: a full ring short-spins, then parks on &tail
+ *     via unixcall 217 (the i686 PE side cannot call os_sync itself);
+ *     the unix wait registers in space_waiters (seq_cst) before its
+ *     re-check, and the consumer wakes &tail after any tail store that
+ *     observes waiters. Bounded per stall window; the window/heartbeat
+ *     dead-server semantics are unchanged.
  *   - SHUTDOWN: PE writes the Detach record, sets ring->shutdown = 1
  *     (release) and kicks; the server drains what remains, publishes tail
  *     (mirrored into status.progress), sets consumer_exited=1 (release) and
@@ -109,7 +119,14 @@ struct d9mt_wire_ring {
   /* line 1: producer-written */
   d9mt_wire_au64 head;   /* free-running producer cursor (release) */
   d9mt_wire_au64 stalls; /* producer ring-full spin episodes */
-  uint64_t _pad1[6];
+  d9mt_wire_au32 space_waiters; /* producers parked on tail (futex; see
+                                 * mtl_futex.h contract): registered seq_cst
+                                 * by the unix-side wait (unixcall 217) BEFORE
+                                 * its tail re-check; the consumer checks it
+                                 * after every tail store (behind a seq_cst
+                                 * fence) and wakes &tail when nonzero */
+  uint32_t _pad1a;
+  uint64_t _pad1[5];
   /* line 2: consumer-written */
   d9mt_wire_au64 tail;          /* free-running consumer cursor / progress (release) */
   d9mt_wire_au64 records;       /* records decoded (pad records excluded) */

@@ -7,10 +7,12 @@
  * driver/mtl/mtl_wire.h — but the ring now lives in a MAP_SHARED file and
  * the producer is a Rosetta-translated wine process.
  *
- * Differences from the in-process consumer, all S1-deliberate:
- *   - PARK: no condvar/kick can cross the process boundary in S1, so an
- *     empty ring parks on a 1 ms poll (usleep). TODO(S2): kick channel
- *     (pipe/kqueue EVFILT_USER or os_sync futex) to kill the poll.
+ * Differences from the in-process consumer:
+ *   - PARK: an empty ring parks on a kernel futex wait on &ring->head
+ *     (os_sync_wait_on_address SHARED — mtl_futex.h owns the discipline).
+ *     The producer's kick (unixcall 212) wakes the address after its head
+ *     release-store; the 1 ms timeout backstop equals the old poll latency
+ *     on a lost wake and keeps the heartbeat/stat cadences below intact.
  *   - PROGRESS: ring->tail is mirrored into status->progress after every
  *     record — the client-visible consumption cursor.
  *   - LIVENESS: status->heartbeat ticks ~100 Hz whether draining or idle.
@@ -35,6 +37,7 @@
 #include <unistd.h>
 
 #include "d9mt_server.h"
+#include "../driver/mtl/mtl_futex.h"
 
 static uint64_t
 now_ms(void) {
@@ -89,7 +92,11 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
     if (head == tail) {
       if (atomic_load_explicit(&ring->shutdown, memory_order_acquire))
         break;
-      usleep(1000); /* S1 park: no cross-process kick channel yet */
+      /* Kernel park: the producer kicks &head after its head release-store
+       * (value-compare in the kernel closes the race with this wait). The
+       * 1 ms backstop bounds a lost wake to the old poll latency and keeps
+       * the heartbeat (~100 Hz) / unlink+pid checks (~10 Hz) above alive. */
+      d9mt_futex_wait(&ring->head, head, 1000u * 1000u /* 1 ms */);
       continue;
     }
 
@@ -146,6 +153,14 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
        * the progress counter, mirrored client-visibly into status. */
       atomic_store_explicit(&ring->tail, tail, memory_order_release);
       atomic_store_explicit(&status->progress, tail, memory_order_release);
+      /* Space-waiter handoff (mtl_futex.h contract): the seq_cst fence
+       * pairs with the waiter's seq_cst registration in unixcall 217 —
+       * either we see the registration and wake, or the waiter's re-check
+       * sees the tail store above. The load is ~always 0 (waiters exist
+       * only on ring-full), so the hot loop pays one fence, no syscall. */
+      atomic_thread_fence(memory_order_seq_cst);
+      if (atomic_load_explicit(&ring->space_waiters, memory_order_relaxed))
+        d9mt_futex_wake_all(&ring->tail);
       if (detached)
         break;
     }
@@ -192,5 +207,8 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
 
   atomic_fetch_add_explicit(&status->heartbeat, 1, memory_order_relaxed);
   atomic_store_explicit(&ring->consumer_exited, 1, memory_order_release);
+  /* Release any producer parked on tail: it re-checks consumer_exited and
+   * fails fast instead of burning its bounded timeout. */
+  d9mt_futex_wake_all(&ring->tail);
   return 0;
 }

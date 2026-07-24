@@ -51,7 +51,9 @@
 #include <unistd.h>
 
 #include <IOSurface/IOSurface.h>
+#include <mach/mach_time.h>
 
+#include "../driver/mtl/mtl_futex.h"
 #include "../driver/mtl/mtl_wire.h"
 #include "d9mt_status.h"
 
@@ -76,26 +78,45 @@ static struct d9mt_wire_heap *g_heap;
 static uint8_t *g_heap_data;
 static uint64_t g_heap_head;
 
-/* Producer-side space wait: the S3 gate asserts the consumer (async PSO
- * builds!) drains fast enough that this NEVER trips. Bounded so a dead
- * server fails loudly instead of hanging the gate. */
+/* Producer-side space wait, mirroring the production unix-side wait
+ * (unixcall 217 WMTWireWaitSpace): register in ring->space_waiters
+ * (seq_cst, BEFORE the re-check — pairs with the consumer's post-tail-store
+ * fence + waiter load), then futex-park on the consumer's tail cursor.
+ * The S3 gate asserts the consumer (async PSO builds!) drains fast enough
+ * that this NEVER trips. Bounded (~10 s) so a dead server fails loudly
+ * instead of hanging the gate. */
 static int
 waitspace(uint64_t need) {
-  for (int i = 0; i < 2000; i++) {
-    uint64_t tail = atomic_load_explicit(&g_ring->tail, memory_order_acquire);
-    if (g_head + need - tail <= RING_CAP)
-      return 0;
-    if (i == 0)
-      g_producer_waits++;
-    usleep(5000);
+  uint64_t tail = atomic_load_explicit(&g_ring->tail, memory_order_acquire);
+  if (g_head + need - tail <= RING_CAP)
+    return 0;
+  g_producer_waits++;
+  atomic_fetch_add_explicit(&g_ring->space_waiters, 1, memory_order_seq_cst);
+  int rc = 1;
+  for (int i = 0; i < 200; i++) { /* 200 x 50 ms backstop slices = 10 s */
+    tail = atomic_load_explicit(&g_ring->tail, memory_order_acquire);
+    if (g_head + need - tail <= RING_CAP) {
+      rc = 0;
+      break;
+    }
+    d9mt_futex_wait(&g_ring->tail, tail, 50ull * 1000u * 1000u /* 50 ms */);
   }
-  return 1;
+  atomic_fetch_sub_explicit(&g_ring->space_waiters, 1, memory_order_relaxed);
+  return rc;
 }
 
-/* Write one record, publish head. Handles the never-straddle-the-wrap rule
- * with an op_pad header. */
+/* Lost-wake test hook: suppress exactly one empty->nonempty kick so the
+ * consumer's bounded timeout backstop is what consumes the record. */
+static int g_skip_next_kick;
+
+/* Write one record, publish head, kick. Handles the never-straddle-the-wrap
+ * rule with an op_pad header. Kick protocol mirrors the client: wake the
+ * consumer's &head park ONLY on the empty->nonempty transition (tail sampled
+ * == the pre-record head); the kernel's value-compare in the consumer's wait
+ * makes a wake-before-park race harmless. */
 static void
 emit(const void *rec, uint16_t size) {
+  const uint64_t prev_head = g_head;
   uint64_t idx = g_head & (RING_CAP - 1u);
   if ((uint64_t)size > RING_CAP - idx) {
     if (waitspace(RING_CAP - idx)) {
@@ -115,6 +136,12 @@ emit(const void *rec, uint16_t size) {
   g_head += size;
   g_records++;
   atomic_store_explicit(&g_ring->head, g_head, memory_order_release);
+  if (atomic_load_explicit(&g_ring->tail, memory_order_relaxed) == prev_head) {
+    if (g_skip_next_kick)
+      g_skip_next_kick = 0;
+    else
+      d9mt_futex_wake_one(&g_ring->head);
+  }
 }
 
 /* Heap bump allocator (mirror of the client contract: 256-aligned regions,
@@ -311,6 +338,13 @@ emit_upload_tex(uint64_t wire_id, uint64_t handle, uint32_t w, uint32_t h,
   ut.heap_generation = gen;
   ut.data_size = size;
   emit(&ut, sizeof(ut));
+}
+
+/* qsort comparator for the kernel-wake latency gate percentiles */
+static int
+cmp_u64(const void *a, const void *b) {
+  uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+  return x < y ? -1 : (x > y ? 1 : 0);
 }
 
 /* Poll a status u64 until it reaches `want` (acquire). 10 ms steps. */
@@ -2296,6 +2330,119 @@ main(int argc, char **argv) {
       FAIL("session-3 records not consumed");
     printf("[test_feed] session 3: quiesced mid-storm (queue abandoned), "
            "reconnected, worker rebuilt + drew — same pid %d\n", (int)pid);
+  }
+
+  /* --- KERNEL-WAKE GATES (os_sync_wait_on_address, mtl_futex.h) ----------
+   * (a) wake latency: the consumer parks on &ring->head; every kicked
+   *     record must be dequeued with p50 < 200 us over 1k records (the old
+   *     1 ms poll park was ms-class). The waker here is an x86_64 (Rosetta-
+   *     translated) process and the waiter is native arm64, across a
+   *     MAP_SHARED file — exactly the production client/server pair, so a
+   *     PASS also proves the SHARED flag crosses the ISA boundary.
+   * (b) publish notice: a present is followed by a futex wait on
+   *     status->frame_serial; the executor's post-publish wake must land
+   *     (arm64 waker -> x86_64 waiter, the reverse direction).
+   * (c) lost wake: one record emitted with its kick suppressed must still
+   *     be consumed within the consumer's 1 ms timeout backstop (plus
+   *     scheduling margin) and the stream must continue. */
+  {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    enum { LAT_N = 1000 };
+    static uint64_t lat_ns[LAT_N];
+    for (int i = 0; i < LAT_N; i++) {
+      usleep(400); /* drain + park: the consumer futex-parks when empty */
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, (uint32_t)i, 0};
+      const uint64_t t0 = mach_absolute_time();
+      emit(&sr, sizeof(sr)); /* head release-store + kick inside */
+      const uint64_t want = g_head;
+      for (;;) { /* tight observation spin: adds ~ns, not the ms under test */
+        if (atomic_load_explicit(&status->progress, memory_order_acquire) >=
+            want)
+          break;
+        if ((mach_absolute_time() - t0) * tb.numer / tb.denom >
+            2000000000ull)
+          FAIL("wake-latency gate: record %d not consumed within 2 s", i);
+      }
+      lat_ns[i] = (mach_absolute_time() - t0) * tb.numer / tb.denom;
+    }
+    qsort(lat_ns, LAT_N, sizeof(lat_ns[0]), cmp_u64);
+    const uint64_t p50 = lat_ns[LAT_N / 2], p90 = lat_ns[(LAT_N * 9) / 10],
+                   mx = lat_ns[LAT_N - 1];
+    printf("[test_feed] kernel-wake latency over %d records: p50=%" PRIu64
+           "us p90=%" PRIu64 "us max=%" PRIu64 "us\n",
+           LAT_N, p50 / 1000u, p90 / 1000u, mx / 1000u);
+    if (p50 >= 200000ull)
+      FAIL("kernel-wake p50 %" PRIu64 " us >= 200 us gate (poll-class — "
+           "wakes not landing; check [d9mt_futex] fallback warnings)",
+           p50 / 1000u);
+
+    /* (b) publish notice: present -> futex-wait on frame_serial */
+    {
+      const uint64_t target =
+          atomic_load_explicit(&status->frame_serial, memory_order_acquire) +
+          1u;
+      const uint64_t t0 = mach_absolute_time();
+      emit_backbuffer_rt();
+      emit_clear(0.f, 1.f, 0.f);
+      emit_present(target);
+      int ok = 0;
+      for (;;) {
+        uint64_t fs = atomic_load_explicit(&status->frame_serial,
+                                           memory_order_acquire);
+        if (fs >= target) {
+          ok = 1;
+          break;
+        }
+        if ((mach_absolute_time() - t0) * tb.numer / tb.denom >
+            5000000000ull)
+          break;
+        d9mt_futex_wait(&status->frame_serial, fs,
+                        100ull * 1000u * 1000u /* 100 ms backstop slice */);
+      }
+      if (!ok)
+        FAIL("publish-notice gate: frame_serial %" PRIu64 " never published/"
+             "woken", target);
+      printf("[test_feed] publish-notice wake: serial %" PRIu64
+             " observed %" PRIu64 " us after present emit (GPU-completion-"
+             "gated, so ms-class is expected)\n",
+             target,
+             (mach_absolute_time() - t0) * tb.numer / tb.denom / 1000u);
+    }
+
+    /* (c) lost-wake resilience: suppress one kick, the 1 ms backstop must
+     * consume the record anyway — bounded degradation, never a hang. */
+    {
+      usleep(2000); /* ensure the consumer is parked (empty ring) */
+      g_skip_next_kick = 1;
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, 0xBEEFu, 0};
+      const uint64_t t0 = mach_absolute_time();
+      emit(&sr, sizeof(sr)); /* kick swallowed by the hook */
+      const uint64_t want = g_head;
+      for (;;) {
+        if (atomic_load_explicit(&status->progress, memory_order_acquire) >=
+            want)
+          break;
+        if ((mach_absolute_time() - t0) * tb.numer / tb.denom >
+            1000000000ull)
+          FAIL("lost-wake gate: backstop did not consume the record in 1 s");
+        usleep(200);
+      }
+      const uint64_t rec_ns = (mach_absolute_time() - t0) * tb.numer / tb.denom;
+      if (rec_ns >= 50000000ull)
+        FAIL("lost-wake gate: recovery %" PRIu64 " us exceeds the 50 ms bound"
+             " (1 ms backstop + margin)", rec_ns / 1000u);
+      /* ...and the stream continues on the wake path afterwards */
+      struct d9mt_wire_rec_set_stencil_reference sr2 = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr2), 0}, 0xCAFEu, 0};
+      emit(&sr2, sizeof(sr2));
+      if (wait_u64(&status->progress, g_head, 1000))
+        FAIL("lost-wake gate: stream stalled after the suppressed kick");
+      printf("[test_feed] lost-wake backstop: recovered in %" PRIu64
+             " us (1 ms park timeout), stream continued\n", rec_ns / 1000u);
+    }
   }
 
   /* 5. detach => server consumes it and exits 0 */

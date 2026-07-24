@@ -86,6 +86,7 @@
 #include <vector>
 
 #include "d9mt_server.h"
+#include "../driver/mtl/mtl_futex.h"
 
 /* the shared C/C++ headers use std::atomic under C++; the C11-style
  * atomic_*_explicit calls resolve via ADL but the orders need importing */
@@ -2788,6 +2789,10 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       atomic_store_explicit(&status->completed_serial, value, memory_order_relaxed);
       atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
       atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
+      /* Publish notice: wake any client parked on frame_serial (unixcall
+       * 217 op WMTWireWaitFrameSerial). Store (release) THEN wake — the
+       * wake is per-frame, so unconditional (no waiter = cheap ENOENT). */
+      d9mt_futex_wake_all(&status->frame_serial);
     }];
   } else {
     /* nothing in flight (empty frame or already completed): publish inline */
@@ -2796,6 +2801,7 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
                           memory_order_relaxed);
     atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
     atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
+    d9mt_futex_wake_all(&status->frame_serial); /* store (release) THEN wake */
   }
 
   g->presentSlot = (g->presentSlot + 1) % D9MT_SERVER_SURFACES;

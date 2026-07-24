@@ -1945,3 +1945,15 @@ WireServerFrame_acquire(obj_handle_t device, uint64_t local_serial,
   out->gpu_resource_id = params.out_gpu_resource_id;
   return 1;
 }
+
+WINEMETAL_API uint64_t
+WireRing_wait(uint32_t op, uint32_t timeout_us, uint64_t a, uint64_t b) {
+  struct unixcall_wire_wait params;
+  params.op         = op;
+  params.timeout_us = timeout_us;
+  params.a          = a;
+  params.b          = b;
+  params.out_value  = 0;
+  UNIX_CALL(217, &params);
+  return params.out_value;
+}

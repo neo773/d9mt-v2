@@ -605,7 +605,7 @@ struct unixcall_mtl4_barrier {
   uint64_t visibility;
 };
 
-/* d9mt wire transport: codes 211..215, lock-step in both dispatch tables.
+/* d9mt wire transport: codes 211..217, lock-step in both dispatch tables.
  * All members 8-byte / arch-invariant: shared thunks (no thunk32 twins). */
 struct unixcall_wirering_attach {
   struct WMTMemoryPointer base; /* in: page-aligned PE region (VirtualAlloc) */
@@ -655,6 +655,37 @@ static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) =
 _Static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) == 64
             && sizeof(struct unixcall_wire_server_frame) == 72,
             "unixcall_wire_server_frame layout drifted");
+#endif
+
+/* Kernel-wake waits (code 217): bounded futex-style waits the i686 PE
+ * producer cannot perform itself (os_sync_wait_on_address is a libSystem
+ * API) — the unix side parks on the shm address and returns on wake, value
+ * change, or the timeout backstop (driver/mtl/mtl_futex.h owns the
+ * discipline + memory-ordering contract). Ops (enum WMTWireWaitOp,
+ * winemetal.h):
+ *   WMTWireWaitSpace       a = producer head cursor, b = bytes needed;
+ *                          waits on ring->tail until head - tail <= cap - b
+ *                          (or consumer_exited); out_value = tail at return.
+ *   WMTWireWaitFrameSerial a = target serial; waits on status->frame_serial
+ *                          until >= a (never waits while serial == 0 — boot);
+ *                          out_value = frame_serial at return.
+ * All members 8-byte-tiled / arch-invariant. */
+struct unixcall_wire_wait {
+  uint32_t op;         /* in: enum WMTWireWaitOp */
+  uint32_t timeout_us; /* in: bounded backstop, microseconds (never 0/inf) */
+  uint64_t a;          /* in: op-specific (see above) */
+  uint64_t b;          /* in: op-specific (see above) */
+  uint64_t out_value;  /* out: observed value at return (see above) */
+};
+
+#ifdef __cplusplus
+static_assert(offsetof(struct unixcall_wire_wait, out_value) == 24
+           && sizeof(struct unixcall_wire_wait) == 32,
+           "unixcall_wire_wait layout drifted");
+#else
+_Static_assert(offsetof(struct unixcall_wire_wait, out_value) == 24
+            && sizeof(struct unixcall_wire_wait) == 32,
+            "unixcall_wire_wait layout drifted");
 #endif
 
 #pragma pack(pop)

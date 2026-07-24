@@ -36,6 +36,7 @@
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
 #include "../../driver/mtl/mtl_wire.h"
+#include "../../driver/mtl/mtl_futex.h"
 
 #if DXMT_APITRACE_METAL
 #include "apitrace/metal_capi.h"
@@ -6812,14 +6813,93 @@ local:
   return STATUS_SUCCESS;
 }
 
-/* Cross-process the kick has no channel yet (the server parks on a 1 ms
- * poll — server/README.md S1 caveats), and the local fallback has no
- * consumer at all: no-op either way. Kept registered so the producer's
- * empty->nonempty protocol is unchanged; TODO(S2): real kick channel. */
+/* Kernel kick: wake the server's consumer park on &ring->head
+ * (os_sync_wake, SHARED — the ring file is MAP_SHARED in both processes;
+ * mtl_futex.h owns the discipline). The producer calls this ONLY on the
+ * empty->nonempty transition, AFTER its head release-store crossed the
+ * thunk — the kernel's value-compare in the consumer's wait closes the
+ * park/kick race. Local fallback (no consumer): no waiter exists, the wake
+ * is a cheap ENOENT no-op. */
 static NTSTATUS
 _WireRing_kick(void *obj) {
   (void)obj;
+  if (wire_ring)
+    d9mt_futex_wake_one(&wire_ring->head);
   return STATUS_SUCCESS;
+}
+
+/* Kernel-wake bounded waits (code 217) — the PE producer's stand-in for
+ * os_sync_wait_on_address (an i686 PE cannot call libSystem). Both ops
+ * follow the mtl_futex.h discipline: load-check -> wait(addr, observed,
+ * slice) -> re-check, with the caller's timeout_us as the total bound and
+ * 100 ms internal slices so a lost wake re-checks well inside any caller
+ * budget. NEVER unbounded. */
+static uint64_t
+wire_now_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static NTSTATUS
+_WireRing_wait(void *obj) {
+  struct unixcall_wire_wait *p = obj;
+  const uint64_t deadline = wire_now_us() + p->timeout_us;
+  p->out_value = 0;
+  switch (p->op) {
+  case 0: { /* WMTWireWaitSpace: a = producer head, b = bytes needed */
+    struct d9mt_wire_ring *ring = wire_ring;
+    if (!ring)
+      return STATUS_SUCCESS;
+    const uint64_t head = p->a, need = p->b, cap = ring->capacity;
+    /* Register as a space waiter FIRST (seq_cst RMW), THEN re-check: pairs
+     * with the consumer's tail-store -> seq_cst fence -> waiter load
+     * (consumer.m). Either the consumer sees the registration and wakes
+     * &tail, or this re-check sees the new tail. */
+    atomic_fetch_add_explicit(&ring->space_waiters, 1, memory_order_seq_cst);
+    for (;;) {
+      uint64_t tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
+      p->out_value = tail;
+      if (head - tail <= cap - need)
+        break;
+      if (atomic_load_explicit(&ring->consumer_exited, memory_order_acquire))
+        break; /* dead consumer: fail fast, the PE watchdog names it */
+      uint64_t now = wire_now_us();
+      if (now >= deadline)
+        break;
+      uint64_t slice_us = deadline - now;
+      if (slice_us > 100000u)
+        slice_us = 100000u;
+      d9mt_futex_wait(&ring->tail, tail, slice_us * 1000u);
+    }
+    atomic_fetch_sub_explicit(&ring->space_waiters, 1, memory_order_relaxed);
+    return STATUS_SUCCESS;
+  }
+  case 1: { /* WMTWireWaitFrameSerial: a = target serial */
+    if (!wire_status)
+      return STATUS_SUCCESS;
+    const uint64_t target = p->a;
+    for (;;) {
+      uint64_t fs =
+          atomic_load_explicit(&wire_status->frame_serial, memory_order_acquire);
+      p->out_value = fs;
+      /* fs == 0: nothing EVER published (boot) — never park a present on
+       * the first publish; the caller falls through to today's skip. */
+      if (fs >= target || fs == 0u)
+        break;
+      uint64_t now = wire_now_us();
+      if (now >= deadline)
+        break;
+      uint64_t slice_us = deadline - now;
+      if (slice_us > 100000u)
+        slice_us = 100000u;
+      d9mt_futex_wait(&wire_status->frame_serial, fs, slice_us * 1000u);
+    }
+    return STATUS_SUCCESS;
+  }
+  default:
+    return STATUS_SUCCESS;
+  }
 }
 
 static NTSTATUS
@@ -7604,6 +7684,7 @@ const void *__wine_unix_call_funcs[] = {
     &_WireRing_detach,                                             /* 214 */
     &_WireRing_quiesce,                                            /* 215 */
     &_WireServerFrame_acquire_pooled,                              /* 216 */
+    &_WireRing_wait,                                               /* 217 */
 
 };
 
@@ -7841,6 +7922,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_WireRing_detach,                                             /* 214 */
     &_WireRing_quiesce,                                            /* 215 */
     &_WireServerFrame_acquire_pooled,                              /* 216 */
+    &_WireRing_wait,                                               /* 217 */
 
 };
 #endif
