@@ -91,3 +91,20 @@ vertex CubeVsOut cubeCbvVs(CubeVsIn in [[stage_in]],
   o.pos = mvp * float4(in.pos, 1.0);
   return o;
 }
+
+/* S3 v14 ARGUMENT-BUFFER mechanism gate: the REAL client's air_builder shaders
+ * use the translated AB binding model (executor.mm flushBindings fn->ab path,
+ * mtl_context_transfer.cpp flushResources abWords) — NOT the classic per-slot
+ * setAddress of cubeCbvVs. Every texture/sampler/CBV is an 8-byte handle WORD
+ * in one top-level argument buffer at abTableIndex; a CBV word is the buffer's
+ * gpuAddress + its bound range offset. The shader reads the word and derefs the
+ * raw GPU VA (the resource is resident). This exercises the offset path that
+ * the classic gate cannot: the AB word must be REBUILT with the ROTATING range
+ * offset on every draw, or the constants freeze on the first matrix. */
+vertex CubeVsOut cubeCbvAbVs(CubeVsIn in [[stage_in]],
+                             constant uint64_t* ab [[buffer(21)]]) {
+  device const float4x4* mvp = reinterpret_cast<device const float4x4*>(ab[0]);
+  CubeVsOut o;
+  o.pos = (*mvp) * float4(in.pos, 1.0);
+  return o;
+}

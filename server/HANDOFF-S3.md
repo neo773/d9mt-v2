@@ -1106,6 +1106,38 @@ CUTOVER_VERIFY dumps. Diagnosis by reading + what changed:
    first named — whole-ring 1 MiB rebinds must not become per-draw
    megabyte streams; ShaderConstSize is 1 MiB).
 
+### V14 — "frozen server constsum" was a LYING INSTRUMENT, not a render bug
+
+The reported symptom (client constsum rotates per draw, server constsum
+FROZEN at the first value) was chased as a constant-OFFSET mismatch. It is
+NOT one. Verified by READING the offset plumbing end-to-end and by three new
+test_feed gates that mirror the D3D9 constant ring EXACTLY (bind_uniform_
+buffer once, then per draw bind_uniform_buffer_range(offset) -> upload_buffer
+(dst=offset) -> draw): the server applies the rotating range offset PER DRAW
+on every path — classic per-slot setAddress, the translated ARGUMENT-BUFFER
+model (fn->ab handle words; the path the real air_builder client uses, and
+which had ZERO gate coverage before), AND mid-pass multi-draw across the
+ensureXfer pass close. All three PASS: the triangle tracks each frame's
+matrix (moves twice). The client re-ship (snapshotDirtyUniforms) uploads at
+the rotating dst; the wire protocol is self-consistent (range = absolute
+buffer offset on both sides).
+
+ROOT CAUSE of the false alarm: logServerDraw's constant WINDOW sum read
+buffer.contents at RECORD time (handleDraw), but the upload's copyFromBuffer
+blit only executes at submitFrame (present). For a per-frame ROTATING offset
+the fresh offset has NOT been blitted yet -> contents read the zero-fill ->
+a FROZEN hash, even though the draw reads correct bytes (the blit orders
+ahead of the pass via closeXfer/materializePass). The late #240-243 burst
+does NOT defeat this: it is the CURRENT frame's fresh offset that lags, not
+old ones. FIX (executor.mm): handleUploadBuffer now captures the shipped-
+bytes window (Resource::lastUploadWindow/lastUploadOffset); logServerDraw
+reports THAT when the bound offset matches. GATE EVIDENCE (server wire-draw
+on the v14 rotating draws): before = constsum frozen at ae937171… while up=
+correctly rotated (the exact reported shape); after = constsum == up, three
+distinct values tracking mA/mB/mC per draw. If the cube still does not spin,
+it is NOT the constants — trust `up=` and the pixel gates, never the window
+`constsum`, and look at present/cutover.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

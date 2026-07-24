@@ -195,6 +195,41 @@ emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
   emit_shader_map(wire_id, client_handle, stage, entry, lib, lib_size, NULL);
 }
 
+/* Argument-buffer shader emission (the REAL client's translated binding model):
+ * ab=1, ab_word_count AB words (2 bytes each: {u8 kind, u8 reg}) prefix the
+ * library at chunk_offset 0 (padded to 8), ab_table_index names the AB slot.
+ * ab_words points to n_words*2 bytes. Single-chunk (test libs are small). */
+static void
+emit_shader_ab(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
+               const char *entry, const uint8_t *lib, size_t lib_size,
+               const uint8_t *ab_words, uint32_t n_words,
+               uint32_t ab_table_index) {
+  uint32_t abBytes = n_words * 2u;
+  uint32_t abPad = (abBytes + 7u) & ~7u;
+  uint32_t payload = (uint32_t)((lib_size + 7u) & ~7u);
+  uint16_t size =
+      (uint16_t)(sizeof(struct d9mt_wire_rec_create_shader) + abPad + payload);
+  uint8_t buf[sizeof(struct d9mt_wire_rec_create_shader) + 64 + 0xE008];
+  memset(buf, 0, size);
+  struct d9mt_wire_rec_create_shader *r = (void *)buf;
+  r->hdr.opcode = d9mt_wire_op_create_shader;
+  r->hdr.size = size;
+  r->wire_id = wire_id;
+  r->client_handle = client_handle;
+  r->stage = stage;
+  r->ab = 1;
+  r->ab_word_count = n_words;
+  r->ab_table_index = ab_table_index;
+  r->total_size = lib_size;
+  r->chunk_offset = 0;
+  r->chunk_size = (uint32_t)lib_size;
+  memset(r->cbv_slot_map, 0xFF, 8);
+  snprintf(r->entry, sizeof(r->entry), "%s", entry);
+  memcpy((uint8_t *)(r + 1), ab_words, abBytes);
+  memcpy((uint8_t *)(r + 1) + abPad, lib, lib_size);
+  emit(buf, size);
+}
+
 static void
 emit_bind_shader(uint32_t stage, uint64_t handle) {
   struct d9mt_wire_rec_bind_shader b = {
@@ -1623,6 +1658,405 @@ main(int argc, char **argv) {
                old[0], old[1], old[2], old[3]);
         } else {
           usleep(30000);
+        }
+      }
+
+      /* --- v14 THREE-FRAME rotating-offset repro: mirror the D3D9 constant
+       * ring EXACTLY (d3d9_constant_buffer.cpp Alloc + snapshotDirtyUniforms).
+       * bind_uniform_buffer ONCE at slot 4 (the frontend's CreateBuffer), then
+       * per frame: bind_uniform_buffer_range(offset) THEN upload_buffer(dst=
+       * offset) THEN draw — the client's Alloc-emits-range / draw-emits-upload
+       * order. Three DISTINCT matrices at rotating offsets 0,256,512 must move
+       * the triangle TWICE (A->B->C). A server that binds the CBV gpu-address
+       * once and never re-applies the rotating range offset freezes on matrix
+       * A (reads offset 0 forever) — frame B's assert then fails. --- */
+      {
+        uint8_t zeros2[1024] = {0};
+        struct d9mt_wire_rec_create_buffer ccb2;
+        memset(&ccb2, 0, sizeof(ccb2));
+        ccb2.hdr.opcode = d9mt_wire_op_create_buffer;
+        ccb2.hdr.size = sizeof(ccb2);
+        ccb2.wire_id = 972;
+        ccb2.client_handle = 0xC972;
+        ccb2.size = sizeof(zeros2);
+        emit(&ccb2, sizeof(ccb2));
+        uint64_t z2g = 0;
+        uint64_t z2off = heap_put(zeros2, sizeof(zeros2), &z2g);
+        struct d9mt_wire_rec_upload_buffer ubz2;
+        memset(&ubz2, 0, sizeof(ubz2));
+        ubz2.hdr.opcode = d9mt_wire_op_upload_buffer;
+        ubz2.hdr.size = sizeof(ubz2);
+        ubz2.wire_id = 972;
+        ubz2.client_handle = 0xC972;
+        ubz2.size = sizeof(zeros2);
+        ubz2.heap_offset = z2off;
+        ubz2.heap_generation = z2g;
+        emit(&ubz2, sizeof(ubz2));
+
+        /* the three matrices (column-major) and their triangle centroids on a
+         * 640x480 backbuffer (verts (-0.5,-0.5)(0.5,-0.5)(-0.5,0.5)):
+         *   A identity                          -> (266,280)
+         *   B scale0.5 + translate(+0.5,+0.5)   -> (453,140)
+         *   C scale0.5 + translate(-0.5,-0.5)   -> (133,380) */
+        float mA[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        float mB[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0,
+                        0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+        float mC[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0,
+                        0, 0, 1, 0, -0.5f, -0.5f, 0, 1};
+        struct { float *m; uint64_t off; int cx, cy; int px, py; } fr[3] = {
+            {mA, 0, 266, 280, 453, 140},   /* frame A: centroid A, B must clear */
+            {mB, 256, 453, 140, 266, 280}, /* frame B: centroid B, A must clear */
+            {mC, 512, 133, 380, 453, 140}, /* frame C: centroid C, B must clear */
+        };
+        uint8_t magenta3[4] = {255, 0, 255, 255}, dkblue3[4] = {40, 16, 16, 255};
+        int boundOnce = 0;
+        for (int f = 0; f < 3; f++) {
+          int okF = 0;
+          for (int w = 1; w <= 30 && !okF; w++) {
+            emit_bind_shader(0, 0xA00B);
+            emit_bind_shader(1, 0xA006);
+            struct {
+              struct d9mt_wire_rec_set_vertex_layout rec;
+              struct d9mt_wire_vertex_attr attr;
+              struct d9mt_wire_vertex_layout lay;
+            } vl7 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl7), 0}, 1, 1},
+                     {0, 0, 900, 0},
+                     {0, 12, 0, 0}};
+            emit(&vl7, sizeof(vl7));
+            struct d9mt_wire_rec_bind_vertex_buffer bvb4;
+            memset(&bvb4, 0, sizeof(bvb4));
+            bvb4.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+            bvb4.hdr.size = sizeof(bvb4);
+            bvb4.binding = 0;
+            bvb4.stride = 12;
+            bvb4.buf.buffer = 0xC950;
+            bvb4.buf.length = 36;
+            emit(&bvb4, sizeof(bvb4));
+            struct d9mt_wire_rec_bind_index_buffer bib4;
+            memset(&bib4, 0, sizeof(bib4));
+            bib4.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+            bib4.hdr.size = sizeof(bib4);
+            bib4.buf.buffer = 0xC951;
+            bib4.buf.length = 8;
+            bib4.index_type = 0;
+            emit(&bib4, sizeof(bib4));
+
+            /* bind_uniform_buffer ONCE (the frontend binds the whole buffer at
+             * create; subsequent frames only advance the range) */
+            if (!boundOnce) {
+              struct d9mt_wire_rec_bind_uniform_buffer bub2;
+              memset(&bub2, 0, sizeof(bub2));
+              bub2.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+              bub2.hdr.size = sizeof(bub2);
+              bub2.stages = 0x1;
+              bub2.slot = 4;
+              bub2.buf.buffer = 0xC972;
+              bub2.buf.length = sizeof(zeros2);
+              emit(&bub2, sizeof(bub2));
+              boundOnce = 1;
+            }
+
+            /* client order: RANGE first (Alloc), THEN upload (draw time) */
+            struct d9mt_wire_rec_bind_uniform_buffer_range bur3;
+            memset(&bur3, 0, sizeof(bur3));
+            bur3.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+            bur3.hdr.size = sizeof(bur3);
+            bur3.stages = 0x1;
+            bur3.slot = 4;
+            bur3.offset = fr[f].off;
+            bur3.length = 64;
+            emit(&bur3, sizeof(bur3));
+
+            uint64_t m3g = 0;
+            uint64_t m3off = heap_put(fr[f].m, 64, &m3g);
+            struct d9mt_wire_rec_upload_buffer ubm3 = ubz2;
+            ubm3.dst_offset = fr[f].off;
+            ubm3.size = 64;
+            ubm3.heap_offset = m3off;
+            ubm3.heap_generation = m3g;
+            emit(&ubm3, sizeof(ubm3));
+
+            struct d9mt_wire_rec_set_render_targets_by_id rt7;
+            memset(&rt7, 0, sizeof(rt7));
+            rt7.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+            rt7.hdr.size = sizeof(rt7);
+            rt7.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+            rt7.color[0].format = 80;
+            rt7.color[0].width = 640;
+            rt7.color[0].height = 480;
+            rt7.color[0].sample_count = 1;
+            emit(&rt7, sizeof(rt7));
+            emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+            struct {
+              struct d9mt_wire_rec_draw_indexed rec;
+              struct d9mt_wire_draw_indexed_args args[1];
+            } di5 = {{{d9mt_wire_op_draw_indexed, sizeof(di5), 0}, 1, 0},
+                     {{3, 1, 0, 0, 0, 0}}};
+            emit(&di5, sizeof(di5));
+            emit_present(++frame);
+            if (wait_u64(&status->frames, frame, 15000))
+              FAIL("v14 rotating-offset: frame %d never presented", f);
+            uint32_t s8 = atomic_load_explicit(&status->present_slot,
+                                               memory_order_acquire);
+            IOSurfaceRef sf7 = IOSurfaceLookup(ids[s8]);
+            if (!sf7)
+              FAIL("v14 rotating-offset: IOSurfaceLookup failed");
+            IOSurfaceLock(sf7, kIOSurfaceLockReadOnly, NULL);
+            const uint8_t *b7 = IOSurfaceGetBaseAddress(sf7);
+            size_t r7 = IOSurfaceGetBytesPerRow(sf7);
+            uint8_t here[4], prev[4];
+            memcpy(here, b7 + fr[f].cy * r7 + fr[f].cx * 4, 4);
+            memcpy(prev, b7 + fr[f].py * r7 + fr[f].px * 4, 4);
+            IOSurfaceUnlock(sf7, kIOSurfaceLockReadOnly, NULL);
+            CFRelease(sf7);
+            if (!memcmp(here, magenta3, 4) && !memcmp(prev, dkblue3, 4)) {
+              okF = 1;
+              printf("[test_feed] v14 rotating-offset frame %d (off=%llu): "
+                     "triangle at its matrix's centroid (%d,%d), prior "
+                     "position clear (wave %d)\n",
+                     f, (unsigned long long)fr[f].off, fr[f].cx, fr[f].cy, w);
+            } else if (w == 30) {
+              FAIL("v14 rotating-offset frame %d (off=%llu): "
+                   "centroid(%d,%d)=%02x%02x%02x%02x (want magenta) "
+                   "prior(%d,%d)=%02x%02x%02x%02x (want clear) — the server "
+                   "froze on an earlier matrix (rotating range offset not "
+                   "applied per draw)",
+                   f, (unsigned long long)fr[f].off, fr[f].cx, fr[f].cy,
+                   here[0], here[1], here[2], here[3], fr[f].px, fr[f].py,
+                   prev[0], prev[1], prev[2], prev[3]);
+            } else {
+              usleep(30000);
+            }
+          }
+        }
+        printf("[test_feed] v14 rotating-offset: three matrices at offsets "
+               "0/256/512 moved the triangle twice — per-draw range offset "
+               "tracks the client ring\n");
+
+        /* --- v14 ARGUMENT-BUFFER path: the SAME three-frame rotation, but the
+         * vertex shader uses the translated AB binding model the REAL client
+         * emits (air_builder shaders are ALL ab=1). The server's fn->ab draw
+         * flush must rebuild the CBV handle word with the ROTATING range offset
+         * every draw; a stale word freezes the triangle on matrix A. The
+         * classic gate above cannot cover this path. --- */
+        uint8_t abw[2] = {0 /*Cbv*/, 4 /*D3D9 slot 4*/};
+        emit_shader_ab(973, 0xA00C, 0, "cubeCbvAbVs", lib, lib_size,
+                       abw, 1, 21);
+        for (int f = 0; f < 3; f++) {
+          int okF = 0;
+          for (int w = 1; w <= 30 && !okF; w++) {
+            emit_bind_shader(0, 0xA00C); /* AB vertex shader */
+            emit_bind_shader(1, 0xA006); /* cubeFs magenta (classic) */
+            struct {
+              struct d9mt_wire_rec_set_vertex_layout rec;
+              struct d9mt_wire_vertex_attr attr;
+              struct d9mt_wire_vertex_layout lay;
+            } vl8 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl8), 0}, 1, 1},
+                     {0, 0, 900, 0},
+                     {0, 12, 0, 0}};
+            emit(&vl8, sizeof(vl8));
+            struct d9mt_wire_rec_bind_vertex_buffer bvb5;
+            memset(&bvb5, 0, sizeof(bvb5));
+            bvb5.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+            bvb5.hdr.size = sizeof(bvb5);
+            bvb5.binding = 0;
+            bvb5.stride = 12;
+            bvb5.buf.buffer = 0xC950;
+            bvb5.buf.length = 36;
+            emit(&bvb5, sizeof(bvb5));
+            struct d9mt_wire_rec_bind_index_buffer bib5;
+            memset(&bib5, 0, sizeof(bib5));
+            bib5.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+            bib5.hdr.size = sizeof(bib5);
+            bib5.buf.buffer = 0xC951;
+            bib5.buf.length = 8;
+            bib5.index_type = 0;
+            emit(&bib5, sizeof(bib5));
+
+            /* CBV still bound at slot 4 (bind_uniform_buffer above); advance
+             * the range THEN re-ship the matrix, client order. */
+            struct d9mt_wire_rec_bind_uniform_buffer_range bur4;
+            memset(&bur4, 0, sizeof(bur4));
+            bur4.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+            bur4.hdr.size = sizeof(bur4);
+            bur4.stages = 0x1;
+            bur4.slot = 4;
+            bur4.offset = fr[f].off;
+            bur4.length = 64;
+            emit(&bur4, sizeof(bur4));
+
+            uint64_t m4g = 0;
+            uint64_t m4off = heap_put(fr[f].m, 64, &m4g);
+            struct d9mt_wire_rec_upload_buffer ubm4 = ubz2;
+            ubm4.dst_offset = fr[f].off;
+            ubm4.size = 64;
+            ubm4.heap_offset = m4off;
+            ubm4.heap_generation = m4g;
+            emit(&ubm4, sizeof(ubm4));
+
+            struct d9mt_wire_rec_set_render_targets_by_id rt8;
+            memset(&rt8, 0, sizeof(rt8));
+            rt8.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+            rt8.hdr.size = sizeof(rt8);
+            rt8.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+            rt8.color[0].format = 80;
+            rt8.color[0].width = 640;
+            rt8.color[0].height = 480;
+            rt8.color[0].sample_count = 1;
+            emit(&rt8, sizeof(rt8));
+            emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+            struct {
+              struct d9mt_wire_rec_draw_indexed rec;
+              struct d9mt_wire_draw_indexed_args args[1];
+            } di6 = {{{d9mt_wire_op_draw_indexed, sizeof(di6), 0}, 1, 0},
+                     {{3, 1, 0, 0, 0, 0}}};
+            emit(&di6, sizeof(di6));
+            emit_present(++frame);
+            if (wait_u64(&status->frames, frame, 15000))
+              FAIL("v14 AB rotating-offset: frame %d never presented", f);
+            uint32_t s9 = atomic_load_explicit(&status->present_slot,
+                                               memory_order_acquire);
+            IOSurfaceRef sf8 = IOSurfaceLookup(ids[s9]);
+            if (!sf8)
+              FAIL("v14 AB rotating-offset: IOSurfaceLookup failed");
+            IOSurfaceLock(sf8, kIOSurfaceLockReadOnly, NULL);
+            const uint8_t *b8 = IOSurfaceGetBaseAddress(sf8);
+            size_t r8b = IOSurfaceGetBytesPerRow(sf8);
+            uint8_t here[4], prev[4];
+            memcpy(here, b8 + fr[f].cy * r8b + fr[f].cx * 4, 4);
+            memcpy(prev, b8 + fr[f].py * r8b + fr[f].px * 4, 4);
+            IOSurfaceUnlock(sf8, kIOSurfaceLockReadOnly, NULL);
+            CFRelease(sf8);
+            if (!memcmp(here, magenta3, 4) && !memcmp(prev, dkblue3, 4)) {
+              okF = 1;
+              printf("[test_feed] v14 AB rotating-offset frame %d (off=%llu): "
+                     "AB-model draw tracked its matrix at (%d,%d), prior clear "
+                     "(wave %d)\n",
+                     f, (unsigned long long)fr[f].off, fr[f].cx, fr[f].cy, w);
+            } else if (w == 30) {
+              FAIL("v14 AB rotating-offset frame %d (off=%llu): "
+                   "centroid(%d,%d)=%02x%02x%02x%02x (want magenta) "
+                   "prior(%d,%d)=%02x%02x%02x%02x (want clear) — the AB draw "
+                   "flush froze on an earlier matrix (CBV handle word not "
+                   "rebuilt with the rotating range offset)",
+                   f, (unsigned long long)fr[f].off, fr[f].cx, fr[f].cy,
+                   here[0], here[1], here[2], here[3], fr[f].px, fr[f].py,
+                   prev[0], prev[1], prev[2], prev[3]);
+            } else {
+              usleep(30000);
+            }
+          }
+        }
+        printf("[test_feed] v14 AB rotating-offset: the translated argument-"
+               "buffer draw path tracks the rotating range offset too\n");
+
+        /* --- v14 MID-PASS rotation: TWO draws in ONE frame with a range+upload
+         * BETWEEN them. The mid-pass upload's ensureXfer CLOSES the render pass
+         * (HANDOFF-S3 V13 honest-flag); the second draw re-materializes it and
+         * must re-flush the CBV at the ADVANCED offset. Both matrices must land
+         * (triangle A AND triangle B visible) — a server that keeps draw-1's
+         * offset for draw-2 draws A twice and B's centroid stays clear. --- */
+        int midOk = 0;
+        for (int w = 1; w <= 30 && !midOk; w++) {
+          emit_bind_shader(0, 0xA00B); /* classic cubeCbvVs */
+          emit_bind_shader(1, 0xA006);
+          struct {
+            struct d9mt_wire_rec_set_vertex_layout rec;
+            struct d9mt_wire_vertex_attr attr;
+            struct d9mt_wire_vertex_layout lay;
+          } vl9 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl9), 0}, 1, 1},
+                   {0, 0, 900, 0},
+                   {0, 12, 0, 0}};
+          emit(&vl9, sizeof(vl9));
+          struct d9mt_wire_rec_bind_vertex_buffer bvb6;
+          memset(&bvb6, 0, sizeof(bvb6));
+          bvb6.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+          bvb6.hdr.size = sizeof(bvb6);
+          bvb6.binding = 0;
+          bvb6.stride = 12;
+          bvb6.buf.buffer = 0xC950;
+          bvb6.buf.length = 36;
+          emit(&bvb6, sizeof(bvb6));
+          struct d9mt_wire_rec_bind_index_buffer bib6;
+          memset(&bib6, 0, sizeof(bib6));
+          bib6.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+          bib6.hdr.size = sizeof(bib6);
+          bib6.buf.buffer = 0xC951;
+          bib6.buf.length = 8;
+          bib6.index_type = 0;
+          emit(&bib6, sizeof(bib6));
+
+          /* draw 1 at offset 0 (matrix A) */
+          struct d9mt_wire_rec_bind_uniform_buffer_range bA;
+          memset(&bA, 0, sizeof(bA));
+          bA.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bA.hdr.size = sizeof(bA);
+          bA.stages = 0x1; bA.slot = 4; bA.offset = 0; bA.length = 64;
+          emit(&bA, sizeof(bA));
+          uint64_t gA = 0; uint64_t oA = heap_put(mA, 64, &gA);
+          struct d9mt_wire_rec_upload_buffer uA = ubz2;
+          uA.dst_offset = 0; uA.size = 64; uA.heap_offset = oA; uA.heap_generation = gA;
+          emit(&uA, sizeof(uA));
+          struct d9mt_wire_rec_set_render_targets_by_id rt9;
+          memset(&rt9, 0, sizeof(rt9));
+          rt9.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+          rt9.hdr.size = sizeof(rt9);
+          rt9.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+          rt9.color[0].format = 80; rt9.color[0].width = 640;
+          rt9.color[0].height = 480; rt9.color[0].sample_count = 1;
+          emit(&rt9, sizeof(rt9));
+          emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dA = {{{d9mt_wire_op_draw_indexed, sizeof(dA), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dA, sizeof(dA));
+
+          /* mid-pass: advance the range + re-ship matrix B, then draw 2 (no
+           * new RT/clear — same frame, same targets) */
+          struct d9mt_wire_rec_bind_uniform_buffer_range bB = bA;
+          bB.offset = 256;
+          emit(&bB, sizeof(bB));
+          uint64_t gB = 0; uint64_t oB = heap_put(mB, 64, &gB);
+          struct d9mt_wire_rec_upload_buffer uB = ubz2;
+          uB.dst_offset = 256; uB.size = 64; uB.heap_offset = oB; uB.heap_generation = gB;
+          emit(&uB, sizeof(uB));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dB = {{{d9mt_wire_op_draw_indexed, sizeof(dB), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dB, sizeof(dB));
+          emit_present(++frame);
+          if (wait_u64(&status->frames, frame, 15000))
+            FAIL("v14 mid-pass rotation: frame never presented");
+          uint32_t sA = atomic_load_explicit(&status->present_slot,
+                                             memory_order_acquire);
+          IOSurfaceRef sfA = IOSurfaceLookup(ids[sA]);
+          if (!sfA)
+            FAIL("v14 mid-pass rotation: IOSurfaceLookup failed");
+          IOSurfaceLock(sfA, kIOSurfaceLockReadOnly, NULL);
+          const uint8_t *bA2 = IOSurfaceGetBaseAddress(sfA);
+          size_t rA = IOSurfaceGetBytesPerRow(sfA);
+          uint8_t cA[4], cB[4];
+          memcpy(cA, bA2 + 280 * rA + 266 * 4, 4); /* triangle A centroid */
+          memcpy(cB, bA2 + 140 * rA + 453 * 4, 4); /* triangle B centroid */
+          IOSurfaceUnlock(sfA, kIOSurfaceLockReadOnly, NULL);
+          CFRelease(sfA);
+          if (!memcmp(cA, magenta3, 4) && !memcmp(cB, magenta3, 4)) {
+            midOk = 1;
+            printf("[test_feed] v14 mid-pass rotation: both draws in one frame "
+                   "rendered their own matrix (A@266,280 + B@453,140) across "
+                   "the ensureXfer pass close (wave %d)\n", w);
+          } else if (w == 30) {
+            FAIL("v14 mid-pass rotation: A=%02x%02x%02x%02x B=%02x%02x%02x%02x "
+                 "(both want magenta) — the second draw did not pick up the "
+                 "advanced range offset after the mid-pass pass close",
+                 cA[0], cA[1], cA[2], cA[3], cB[0], cB[1], cB[2], cB[3]);
+          } else {
+            usleep(30000);
+          }
         }
       }
     }

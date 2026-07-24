@@ -231,6 +231,15 @@ struct Resource {
    * resource — compared against the client's sum of the bytes it shipped
    * (wire-draw#N `up=` fields). */
   uint64_t uploadSum = 0;
+  /* S3 v14: fnv64 of the FIRST <=64 bytes of the last upload_buffer region and
+   * its dst_offset. logServerDraw's constant window sum used to read
+   * buffer.contents, which for a per-frame ROTATING ring offset LAGS the xfer
+   * blit (blits run at submitFrame; the log runs at record) and so reported a
+   * FROZEN zero-fill hash even though the draw reads correct bytes — the false
+   * "server constsum frozen" that must never mislead again. The window sum now
+   * reads these shipped bytes when the bound offset matches. */
+  uint64_t lastUploadWindow = 0;
+  uint64_t lastUploadOffset = ~0ull;
 };
 
 /* S3 v13 checksum basis for the per-draw input parity logs — identical
@@ -1836,6 +1845,11 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
   std::memcpy(rs.cpu, src, (size_t)r->size);
   res->uploadSum = fnv64(src, (size_t)r->size); /* S3 v13 parity (client twin
     * sums the same bytes at emission — mtl_wire_context emitUploadBuffer) */
+  /* S3 v14: capture the shipped-bytes window so logServerDraw reports the
+   * constants the draw will ACTUALLY read, not the record-time (pre-blit)
+   * buffer.contents that freezes at the fresh rotating offset. */
+  res->lastUploadWindow = fnv64(src, r->size < 64u ? (size_t)r->size : 64u);
+  res->lastUploadOffset = r->dst_offset;
   heapAck(r->heap_generation); /* region free the moment the copy is taken */
   [enc copyFromBuffer:rs.buf
          sourceOffset:(NSUInteger)rs.off
@@ -2831,7 +2845,13 @@ static void logServerDraw() {
     if (!cbv.buf)
       continue;
     cMask |= 1u << slot;
-    const uint64_t wsum = window(cbv.buf, cbv.offset);
+    /* S3 v14: prefer the shipped-bytes window at the bound offset — the draw
+     * reads those (the xfer blit orders ahead of the pass). buffer.contents
+     * lags the blit at record time and freezes at the fresh rotating offset. */
+    const uint64_t wsum =
+        (cbv.res && cbv.res->lastUploadOffset == cbv.offset)
+            ? cbv.res->lastUploadWindow
+            : window(cbv.buf, cbv.offset);
     const uint64_t upsum = cbv.res ? cbv.res->uploadSum : 0;
     const uint8_t s8 = (uint8_t)slot;
     cSum = fnv64(&s8, 1, cSum); cSum = fnv64(&wsum, 8, cSum);
