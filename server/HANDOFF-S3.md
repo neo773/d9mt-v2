@@ -1371,3 +1371,95 @@ Honest flags / debt:
   Lock(DISCARD) rewrite + NOOVERWRITE append variant, IB variant, shape
   must track each frame) is the coordinator's verify vehicle — not in this
   tree yet.
+
+## V17 — GAME-CREATED DS SURFACES: wire-session citizenship + the deferred
+## depth-sample chain (the GTA black/unlit-world chase)
+
+GTA live evidence (V16 build): `set_rt: ds wire=53/79/482 UNRESOLVED — pass
+will run without depth attachment`, rej=0, menus perfect, 3D world dark
+grey/black silhouettes (GTA IV is a deferred renderer: lighting reconstructs
+from DEPTH READS; no depth attachment => black compose regardless of albedo;
+code_rtt3d PASSES, so the COLOR rt->sample chain is healthy — this is purely
+the depth side).
+
+DIAGNOSIS (code-proven; the live log could not discriminate):
+"ds named-but-nil + rej=0" has exactly THREE shapes, and the old one-line
+log named none of them:
+1. UNKNOWN ID — lookupWire misses: the create record does not exist in the
+   CURRENT server session. Client mint paths assign wireId only on
+   successful emission (v8/v11), and creates are hoisted before the set_rt
+   twin (ring FIFO), so a same-session miss is impossible BY CONSTRUCTION —
+   a miss therefore means a CROSS-SESSION survivor: the id was minted in
+   session N, a session boundary (QUIESCE/BEGIN at context churn — GTA's
+   documented device-overlap pattern, HANDOFF-ALLIN B) wiped the server
+   table, and `ensureTextureCreated`'s `if (wireId) return` meant the create
+   was NEVER re-emitted into session N+1. The ~MtlWireContext comment
+   called this survivor "theoretical"; game-created DS surfaces (created
+   once at boot, bound every frame, never recreated) are its natural
+   inhabitants.
+2. STILL BUILDING — the async create worker hasn't published (boot storm:
+   hundreds of queued newLibrary/newTexture jobs ahead of the DS create);
+   set_rt resolves at CONSUME time, so the whole first pass ran without its
+   depth attachment. Reproduced in every test_feed run (the v12 gate's
+   first-wave `ds wire=960 UNRESOLVED` line).
+3. CREATE FAILED — worker newTextureWithDescriptor nil => ready=2 forever;
+   counted in exec_errors, NOT in rej (the live "rej=0 so never emitted"
+   inference was unsound — FAILED(nil) also leaves rej=0).
+
+FIXES (by construction, all three classes):
+- CLIENT wire-session citizenship (mtl_resource.h + mtl_wire_context.cpp):
+  `wireSession` stamped next to wireId at every mint site
+  (ensureTextureCreated / ensureStorageCreated / ensureSamplerCreated).
+  A wireId is valid ONLY for the session its create was emitted into;
+  a mismatch re-emits the create (SAME id — destroy queue and shadow binds
+  keep referencing it; the server table was wiped, so no collision) and for
+  buffers re-ships the initial-content snapshot. A named id without a
+  same-session create record is now structurally impossible. (Shaders
+  excepted: wireMetallib bytes are freed after first emission; shaders die
+  with their device in D3D9, so no legal survivor exists — honest flag.)
+- SERVER late re-resolve (executor.mm materializePass): named-but-nil
+  attachments (color + ds) re-lookup byWire at materialize (first draw) —
+  by then the worker has typically published; every subsequent set_rt
+  retries as before. Counted as `lateRes=` in the srv-stats depth{} group.
+  Resolution ALSO stamps res->hasContent (attachment write defines the
+  storage) so the later depth-as-texture bind passes the content gate.
+- SERVER diagnosis (handleSetRenderTargets): the UNRESOLVED log now names
+  the class — `[UNKNOWN ID (no create this session)]` / `[still building
+  (async create; late-resolves at draw)]` / `[create FAILED server-side
+  (permanent)]`. The next GTA capture reads the cause directly.
+- The deferred DS-sample chain was audited: server DS creates always carry
+  MTLTextureUsageShaderRead, the DS store action is always Store, and
+  bind_texture_by_id view-resolves a depth-format texture unchanged
+  (fmt==tex.pixelFormat fast path) — sampled server-side via depth2d.
+
+GATES (scripts/build-server.sh, full test_feed PASS + full-clean
+build-driver chain green):
+- NEW v17 game-DS gate: CreateDepthStencilSurface-shaped create (fresh
+  wire id, fmt=260 Depth32Float_Stencil8, usage=0x40 attachment-only) ->
+  attached with depth clear 0.6 -> LESSEQUAL depth-WRITE draw (triangle
+  z=0) -> SAME texture bound as a fragment depth2d texture in a second
+  pass (fsDepth, new test_stub entry) -> pixel readback asserts corner
+  ~153 (0.6 stored + sampled: non-trivial) and center ~0 (drawn depth).
+  PASSES (wave 3 — the converge loop absorbs the async-create window).
+- v12 depth-cube, v13/v13.1/v14, v15 flood, v16 wrap-race, sessions/
+  storm/watchdog/wedge/timeline: all green (full run PASS).
+- Existing wine client tests: green via full-clean build-driver.sh
+  (rm -rf build/driver; headers changed => full rebuild mandatory).
+
+Expected GTA signature: set_rt ds binds resolve (dsUnres ~0 after boot;
+lateRes>0 during storms is healthy); 3D world LIT and colored (deferred
+compose reads real depth), player silhouette gone. If the world is STILL
+black, the first 8 UNRESOLVED lines now name the exact class to chase.
+fps note (coordinator): outdoor ~6fps collapse is expected fallout of
+missing depth (no early-Z) + the occlusion-query stub; revisit after this
+fix + the queries slice.
+
+Honest flags / debt:
+- The late re-resolve covers materialize time only; a DS whose create is
+  STILL unpublished at first draw stays detached for that pass (per-bind
+  retry heals the next one). No wait is ever inserted on the consumer.
+- Cross-session shader re-emission is impossible (bytes freed); legal
+  D3D9 apps cannot hit it (resources die with their device).
+- `ready==2` (FAILED nil) resources stay permanently dark by design — the
+  reason-coded log + exec_errors make it loud; if GTA names this class,
+  chase the descriptor values in the create breadcrumb.

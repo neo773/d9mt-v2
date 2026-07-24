@@ -735,7 +735,13 @@ namespace dxvk::backend {
   bool MtlWireContext::ensureStorageCreated(const Rc<MtlAllocation>& storage) {
     if (storage == nullptr)
       return false;
-    if (storage->wireId)
+    /* v17: a wireId is only valid for the SESSION its create was emitted
+     * into — session boundaries (QUIESCE/BEGIN at context churn) wipe the
+     * server's resource table. A survivor re-emits its create (same id)
+     * into the live session; without this, its binds name an id the server
+     * can never resolve (rej=0, permanently dummy-bound — the GTA
+     * game-created-DS blackout shape). */
+    if (storage->wireId && storage->wireSession == g_wt.session)
       return true;
     if (!storage->wireEligible) { /* v8: pseudo-resource — never on the wire */
       const uint64_t n = g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
@@ -748,8 +754,11 @@ namespace dxvk::backend {
     if (!r)
       return false;
     /* id assigned only on successful emission: a 0 wireId resource simply
-     * never resolves server-side (defined: dummy-bound). */
-    storage->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+     * never resolves server-side (defined: dummy-bound). A cross-session
+     * re-emission keeps its id (destroy queue + shadow binds reference it). */
+    if (storage->wireId == 0u)
+      storage->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    storage->wireSession = g_wt.session;
     r->wire_id = storage->wireId;
     r->client_handle = storage->handle.buf;
     r->size = storage->size;
@@ -945,7 +954,9 @@ namespace dxvk::backend {
   uint64_t MtlWireContext::ensureTextureCreated(const Rc<MtlTexture>& image) {
     if (image == nullptr)
       return 0u;
-    if (image->wireId)
+    /* v17: same-session ids only (see ensureStorageCreated) — a texture
+     * surviving a session boundary re-emits its create at next use. */
+    if (image->wireId && image->wireSession == g_wt.session)
       return image->wireId;
     if (!image->wireEligible) { /* v8: pseudo-resource — never on the wire */
       const uint64_t n = g_wireIneligible.fetch_add(1u, std::memory_order_relaxed);
@@ -996,7 +1007,9 @@ namespace dxvk::backend {
     auto* r = beginRecord<d9mt_wire_rec_create_texture>(d9mt_wire_op_create_texture);
     if (!r)
       return 0u;
-    image->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    if (image->wireId == 0u)
+      image->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    image->wireSession = g_wt.session;
     f.wire_id = image->wireId;
     f.client_handle = image->texture.tex;
     f.hdr = r->hdr;
@@ -1057,13 +1070,16 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::ensureSamplerCreated(const Rc<MtlSamplerState>& sampler) {
-    if (sampler == nullptr || sampler->wireId)
-      return;
+    if (sampler == nullptr ||
+        (sampler->wireId && sampler->wireSession == g_wt.session))
+      return; /* v17: same-session ids only (see ensureStorageCreated) */
     auto* impl = static_cast<MtlSamplerStateImpl*>(sampler.ptr());
     auto* r = beginRecord<d9mt_wire_rec_create_sampler>(d9mt_wire_op_create_sampler);
     if (!r)
       return;
-    sampler->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    if (sampler->wireId == 0u)
+      sampler->wireId = g_nextWireId.fetch_add(1u, std::memory_order_relaxed);
+    sampler->wireSession = g_wt.session;
     r->wire_id = sampler->wireId;
     r->client_handle = sampler->sampler;
     r->mag_filter = uint32_t(impl->key.magFilter);

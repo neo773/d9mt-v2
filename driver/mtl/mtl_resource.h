@@ -226,6 +226,13 @@ namespace dxvk {
     // hand-built wrappers and internal temporaries never get a wire id and
     // dummy-resolve server-side. Never inferred at emission time.
     bool            wireEligible = false;
+    // render-server S3 v17: the wire SESSION the create record was emitted
+    // into. Session boundaries (context churn: QUIESCE/BEGIN) wipe the
+    // server's resource table; a wireId from an earlier session is stale by
+    // definition. ensureStorageCreated re-emits the create (same id) when
+    // this doesn't match the live session — a named id without a same-
+    // session create record is structurally impossible.
+    uint32_t        wireSession = 0u;
   };
 
   class MtlDevice;
@@ -338,6 +345,9 @@ namespace dxvk {
     // presenter drawable wraps / dump temporaries stay ineligible — their
     // half-initialized info poisoned the server (run-8 "1x0x0" record).
     bool             wireEligible   = false;
+    // render-server S3 v17: session the create was emitted into (see
+    // MtlAllocation::wireSession) — a mismatch re-emits at next use.
+    uint32_t         wireSession    = 0u;
 
     const MtlImageInfo& info() const { return m_info; }
 
@@ -380,6 +390,8 @@ namespace dxvk {
     MtlObjectHandle sampler = MtlNullHandle;   // id<MTLSamplerState> token
     // render-server S2 identity (see MtlAllocation::wireId).
     uint64_t        wireId  = 0u;
+    // render-server S3 v17: session stamp (see MtlAllocation::wireSession).
+    uint32_t        wireSession = 0u;
   };
 
 

@@ -570,7 +570,7 @@ struct Exec {
     uint64_t draws = 0, skipped = 0, pend = 0, noRt = 0, psoFail = 0,
              noShader = 0, noIndex = 0, encoders = 0, uploads = 0,
              clrDrop = 0, clrDsPart = 0, dsUnres = 0, dssoDef = 0,
-             uplDirect = 0, uplStaged = 0, uplFlushUse = 0;
+             dsLate = 0, uplDirect = 0, uplStaged = 0, uplFlushUse = 0;
   } statsSnap;
 
   /* S3 v9 meta-blit: MSL source compiled once at init (MTL4Compiler),
@@ -887,12 +887,39 @@ static bool passHasValidAttachment() {
   return g->pass.ds.tex != nil;
 }
 
+/* V17: late re-resolve for named-but-nil attachments. set_rt resolves at
+ * CONSUME time, but texture creation runs on the async create worker — the
+ * first bind of a fresh texture (game-created DS surfaces during a boot
+ * storm are the GTA shape) races the worker and the whole pass would run
+ * without its depth attachment. Retry at materialize (first draw): by then
+ * the worker has typically published. Defined after observeReady/lookupWire
+ * via forward declarations. */
+static std::shared_ptr<Resource> lookupWire(uint64_t id);
+static bool observeReady(const std::shared_ptr<Resource>& res);
+static uint64_t g_lateResolves = 0;
+
+static void lateResolveAttachment(RtAttachment& a) {
+  if (!a.named || a.tex || a.backbuffer || !a.wireId)
+    return;
+  auto res = lookupWire(a.wireId);
+  if (res && observeReady(res) && res->texture) {
+    a.tex = res->texture;
+    res->hasContent = true; /* attachment write defines the storage —
+                             * later depth-as-texture sampling depends on it */
+    g_lateResolves++;
+  }
+}
+
 static void materializePass() {
   if (g->pass.active)
     return;
   ensureCmdbuf();
   flushDeferredXfers(); /* V15: parked slab blits ride this natural boundary */
   closeXfer(); /* pending heap blits must order ahead of this pass */
+
+  for (auto& c : g->pass.color)
+    lateResolveAttachment(c);
+  lateResolveAttachment(g->pass.ds);
 
   MTL4RenderPassDescriptor* desc = [[MTL4RenderPassDescriptor alloc] init];
   for (uint32_t i = 0; i < 4; i++) {
@@ -2934,13 +2961,25 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
   resolve(r->depth_stencil, fresh.ds);
   if (fresh.ds.named && !fresh.ds.tex) {
     /* V12: a named-but-nil ds means this pass renders WITHOUT the depth
-     * attachment the client renders WITH — silent divergence class. */
+     * attachment the client renders WITH — silent divergence class.
+     * V17: name the failure CLASS — the three shapes need three different
+     * fixes (unknown id = client emission/session bug; building = async
+     * create race, heals at materialize; FAILED = Metal refused the
+     * descriptor, permanent). */
     g->dsUnresolvedBinds++;
     static int n = 0;
-    if (n++ < 8)
-      fprintf(stderr, "[serverd] set_rt #%d: ds wire=%llu UNRESOLVED — pass "
-                      "will run without depth attachment\n", n,
-              (unsigned long long)r->depth_stencil.image_wire_id);
+    if (n++ < 8) {
+      auto res = lookupWire(r->depth_stencil.image_wire_id);
+      const char* why = !res ? "UNKNOWN ID (no create this session)"
+        : res->ready.load(std::memory_order_acquire) == 2
+          ? "create FAILED server-side (permanent)"
+        : res->ready.load(std::memory_order_acquire) == 0
+          ? "still building (async create; late-resolves at draw)"
+          : "ready but texture nil";
+      fprintf(stderr, "[serverd] set_rt #%d: ds wire=%llu UNRESOLVED [%s] — "
+                      "pass will run without depth attachment\n", n,
+              (unsigned long long)r->depth_stencil.image_wire_id, why);
+    }
   }
   { /* v11 substitution audit: name the first RT binds' routing */
     static int n = 0;
@@ -3310,6 +3349,7 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
       now.clrDsPart = g->clearDsPartialDrop;
       now.dsUnres = g->dsUnresolvedBinds;
       now.dssoDef = g->dssoDefaulted;
+      now.dsLate = g_lateResolves;
       now.uplDirect = g->uplDirect;
       now.uplStaged = g->uplStaged;
       now.uplFlushUse = g->uplFlushUse;
@@ -3318,7 +3358,7 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
                       "psoFail=%llu noSh=%llu noRt=%llu noIdx=%llu} passes=%llu "
                       "upl=%llu{dir=%llu stg=%llu useFlush=%llu} "
                       "depth{clrDrop=%llu clrPart=%llu dsUnres=%llu "
-                      "dssoDef=%llu} /window\n",
+                      "dssoDef=%llu lateRes=%llu} /window\n",
               (unsigned long long)(now.draws - p.draws),
               (unsigned long long)(now.skipped - p.skipped),
               (unsigned long long)(now.pend - p.pend),
@@ -3334,7 +3374,8 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
               (unsigned long long)(now.clrDrop - p.clrDrop),
               (unsigned long long)(now.clrDsPart - p.clrDsPart),
               (unsigned long long)(now.dsUnres - p.dsUnres),
-              (unsigned long long)(now.dssoDef - p.dssoDef));
+              (unsigned long long)(now.dssoDef - p.dssoDef),
+              (unsigned long long)(now.dsLate - p.dsLate));
       g->statsSnap = now;
 
       /* srv-timeline: server-side hops of the present pipeline over the last

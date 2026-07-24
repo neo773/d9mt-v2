@@ -49,6 +49,18 @@ fragment float4 fsTex(VsTexOut in [[stage_in]],
   return tex.sample(s, in.uv);
 }
 
+/* S3 v17 deferred-depth gate: sample a DEPTH texture (the game-created DS
+ * surface bound as a shader input after being a pass attachment — the
+ * deferred-renderer pattern). depth2d is the required MSL type for
+ * depth-format textures; output the depth value in RGB so a pixel readback
+ * asserts non-trivial depth crossed the pass boundary. */
+fragment float4 fsDepth(VsTexOut in [[stage_in]],
+                        depth2d<float> tex [[texture(0)]]) {
+  constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+  float d = tex.sample(s, in.uv);
+  return float4(d, d, d, 1.0);
+}
+
 /* S3 v11 minimal-cube gate: REAL vertex fetch (stage_in from a wire vertex
  * buffer), REAL index fetch, and a constant matrix through the push block
  * (buffer 20, 32-byte shared reservation — the client's pushData layout).

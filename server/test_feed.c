@@ -1525,6 +1525,207 @@ main(int argc, char **argv) {
       emit(&dssOff, sizeof(dssOff));
     }
 
+    /* --- V17 GAME-CREATED DS + DEFERRED DEPTH-SAMPLE: the GTA shape.
+     * CreateDepthStencilSurface mints a FRESH attachment-only DS texture
+     * (usage 0x40, fmt 260) that is (1) attached + depth-cleared to a
+     * non-trivial value, (2) written by a depth-tested draw, then (3) bound
+     * as a SAMPLED depth texture in a later pass (deferred lighting reads
+     * depth) with the readback asserting the stored depth crossed the pass
+     * boundary. A server that loses the create (session/citizenship bugs),
+     * races the async create worker at set_rt (healed by the v17
+     * late-resolve), drops the DS store action, or refuses depth-format
+     * shader reads goes BLACK here — the lit-world blocker. --- */
+    {
+      struct d9mt_wire_rec_create_texture ct7;
+      memset(&ct7, 0, sizeof(ct7));
+      ct7.hdr.opcode = d9mt_wire_op_create_texture;
+      ct7.hdr.size = sizeof(ct7);
+      ct7.wire_id = 962;
+      ct7.client_handle = 0xD962;
+      ct7.type = 1; /* 2D */
+      ct7.format = 260; /* Depth32Float_Stencil8 (client D24S8 mapping) */
+      ct7.width = 640;
+      ct7.height = 480;
+      ct7.depth = 1;
+      ct7.mip_levels = 1;
+      ct7.array_layers = 1;
+      ct7.sample_count = 1;
+      ct7.usage = 0x40; /* MtlUsage::DepthStencil ONLY: attachment-only */
+      emit(&ct7, sizeof(ct7));
+
+      /* the deferred reader: vsTex (uv fullscreen, wire 102/0xA003 already
+       * live) + fsDepth (depth2d sample -> grayscale) */
+      emit_shader(964, 0xA00D, 1, "fsDepth", lib, lib_size);
+
+      int dsOk = 0;
+      for (int w = 1; w <= 30 && !dsOk; w++) {
+        /* pass 1: backbuffer color + the game DS; depth clear 0.6 (a
+         * non-trivial value distinguishable from 0/1); triangle at z=0
+         * writes depth through LESSEQUAL */
+        struct d9mt_wire_rec_set_render_targets_by_id rt7;
+        memset(&rt7, 0, sizeof(rt7));
+        rt7.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt7.hdr.size = sizeof(rt7);
+        rt7.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rt7.color[0].format = 80;
+        rt7.color[0].width = 640;
+        rt7.color[0].height = 480;
+        rt7.color[0].sample_count = 1;
+        rt7.depth_stencil.image_wire_id = 962;
+        rt7.depth_stencil.format = 260;
+        rt7.depth_stencil.width = 640;
+        rt7.depth_stencil.height = 480;
+        rt7.depth_stencil.sample_count = 1;
+        emit(&rt7, sizeof(rt7));
+
+        struct d9mt_wire_rec_clear_render_target_by_id zclr7;
+        memset(&zclr7, 0, sizeof(zclr7));
+        zclr7.hdr.opcode = d9mt_wire_op_clear_render_target_by_id;
+        zclr7.hdr.size = sizeof(zclr7);
+        zclr7.image_wire_id = 962;
+        zclr7.clear_aspects = 0x2;
+        zclr7.value.depth = 0.6f;
+        emit(&zclr7, sizeof(zclr7));
+        emit_clear(0.f, 0.f, 0.f);
+
+        struct d9mt_wire_rec_set_depth_stencil_state dss7;
+        memset(&dss7, 0, sizeof(dss7));
+        dss7.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+        dss7.hdr.size = sizeof(dss7);
+        dss7.depth_compare_op = 3; /* LessEqual */
+        dss7.depth_test = 1;
+        dss7.depth_write = 1;
+        dss7.front.compare_op = dss7.back.compare_op = 7;
+        dss7.front.read_mask = dss7.back.read_mask = 0xFF;
+        dss7.front.write_mask = dss7.back.write_mask = 0xFF;
+        emit(&dss7, sizeof(dss7));
+
+        emit_bind_shader(0, 0xA005); /* cubeVs: half triangle, z=0 */
+        emit_bind_shader(1, 0xA006);
+        struct {
+          struct d9mt_wire_rec_set_vertex_layout rec;
+          struct d9mt_wire_vertex_attr attr;
+          struct d9mt_wire_vertex_layout lay;
+        } vl7 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl7), 0}, 1, 1},
+                 {0, 0, 900 /* RGB32Float */, 0},
+                 {0, 12, 0, 0}};
+        emit(&vl7, sizeof(vl7));
+        struct d9mt_wire_rec_bind_vertex_buffer bvb7;
+        memset(&bvb7, 0, sizeof(bvb7));
+        bvb7.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+        bvb7.hdr.size = sizeof(bvb7);
+        bvb7.binding = 0;
+        bvb7.stride = 12;
+        bvb7.buf.buffer = 0xC950;
+        bvb7.buf.length = 36;
+        emit(&bvb7, sizeof(bvb7));
+        struct d9mt_wire_rec_bind_index_buffer bib7;
+        memset(&bib7, 0, sizeof(bib7));
+        bib7.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+        bib7.hdr.size = sizeof(bib7);
+        bib7.buf.buffer = 0xC951;
+        bib7.buf.length = 8;
+        bib7.index_type = 0;
+        emit(&bib7, sizeof(bib7));
+        struct {
+          struct d9mt_wire_rec_push_data rec;
+          float mvp[16];
+        } pd7 = {{{d9mt_wire_op_push_data, sizeof(pd7), 0}, 1, 0, 64, 0},
+                 {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}};
+        emit(&pd7, sizeof(pd7));
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } di7 = {{{d9mt_wire_op_draw_indexed, sizeof(di7), 0}, 1, 0},
+                 {{3, 1, 0, 0, 0, 0}}};
+        emit(&di7, sizeof(di7));
+
+        /* pass 2: DEFERRED READ — backbuffer only (DS unbound), the SAME DS
+         * bound as a fragment depth texture, fullscreen depth-visualize */
+        struct d9mt_wire_rec_set_depth_stencil_state dss7b = dss7;
+        dss7b.depth_compare_op = 7; /* Always */
+        dss7b.depth_test = 0;
+        dss7b.depth_write = 0;
+        emit(&dss7b, sizeof(dss7b));
+        struct d9mt_wire_rec_bind_texture_by_id bt7;
+        memset(&bt7, 0, sizeof(bt7));
+        bt7.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+        bt7.hdr.size = sizeof(bt7);
+        bt7.stages = 0x2; /* fragment */
+        bt7.slot = 0;
+        bt7.image_wire_id = 962;
+        bt7.format = 260;
+        emit(&bt7, sizeof(bt7));
+        emit_backbuffer_rt();
+        emit_bind_shader(0, 0xA003); /* vsTex */
+        emit_bind_shader(1, 0xA00D); /* fsDepth */
+        struct d9mt_wire_rec_set_vertex_layout vl7b = {
+            {d9mt_wire_op_set_vertex_layout, sizeof(vl7b), 0}, 0, 0};
+        emit(&vl7b, sizeof(vl7b));
+        emit_draws(1);
+
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v17 game-DS: frame never presented");
+        uint32_t s7 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf7 = IOSurfaceLookup(ids[s7]);
+        if (!sf7)
+          FAIL("v17 game-DS: IOSurfaceLookup failed");
+        IOSurfaceLock(sf7, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *b7 = IOSurfaceGetBaseAddress(sf7);
+        size_t r7 = IOSurfaceGetBytesPerRow(sf7);
+        uint8_t center7[4], corner7[4];
+        memcpy(center7, b7 + 240 * r7 + 266 * 4, 4); /* inside triangle under
+                                                        either vertical
+                                                        orientation */
+        memcpy(corner7, b7 + 2 * r7 + 636 * 4, 4);   /* never covered */
+        IOSurfaceUnlock(sf7, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf7);
+        /* corner: cleared depth 0.6 -> ~153 grayscale (non-trivial: neither
+         * 0 nor 255). center: triangle wrote z=0 -> ~0. */
+        int cornerOk = corner7[0] > 140 && corner7[0] < 166 &&
+                       corner7[1] > 140 && corner7[1] < 166 &&
+                       corner7[2] > 140 && corner7[2] < 166;
+        int centerOk = center7[0] < 20 && center7[1] < 20 && center7[2] < 20;
+        if (cornerOk && centerOk) {
+          dsOk = 1;
+          printf("[test_feed] v17 game-DS: create->attach->depth-write->"
+                 "sample chain verified (corner=%u center=%u, wave %d)\n",
+                 corner7[0], center7[0], w);
+        } else if (w == 30) {
+          FAIL("v17 game-DS: corner=%02x%02x%02x%02x (want ~0.6*255 gray: "
+               "cleared depth stored + sampled) center=%02x%02x%02x%02x "
+               "(want ~0: triangle depth written) — the game-created DS "
+               "attach/store/sample chain diverges (the deferred-lighting "
+               "black-world shape)",
+               corner7[0], corner7[1], corner7[2], corner7[3],
+               center7[0], center7[1], center7[2], center7[3]);
+        } else {
+          usleep(30000);
+        }
+      }
+
+      /* restore demo-neutral depth state for later scenarios */
+      struct d9mt_wire_rec_set_depth_stencil_state dss7off;
+      memset(&dss7off, 0, sizeof(dss7off));
+      dss7off.hdr.opcode = d9mt_wire_op_set_depth_stencil_state;
+      dss7off.hdr.size = sizeof(dss7off);
+      dss7off.depth_compare_op = 7; /* Always */
+      dss7off.front.compare_op = dss7off.back.compare_op = 7;
+      dss7off.front.read_mask = dss7off.back.read_mask = 0xFF;
+      dss7off.front.write_mask = dss7off.back.write_mask = 0xFF;
+      emit(&dss7off, sizeof(dss7off));
+      /* unbind the depth texture so later scenarios see slot 0 fresh */
+      struct d9mt_wire_rec_bind_texture_by_id bt7off;
+      memset(&bt7off, 0, sizeof(bt7off));
+      bt7off.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+      bt7off.hdr.size = sizeof(bt7off);
+      bt7off.stages = 0x2;
+      bt7off.slot = 0;
+      bt7off.image_wire_id = 0;
+      emit(&bt7off, sizeof(bt7off));
+    }
+
     /* --- V13 CBV CUBE: the REAL constant mechanism, as decoded from the
      * client emission (d3d9_constant_buffer.cpp + mtl_wire_context.cpp).
      * SetVertexShaderConstantF does NOT ride the push block — it lands in a
