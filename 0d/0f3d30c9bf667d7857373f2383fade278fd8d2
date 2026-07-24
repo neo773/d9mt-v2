@@ -1,0 +1,53 @@
+test/code_cubestress.c
+  s_9dc0f2092159a8::t_63a081d8637a96 252-256
+  s_9dc0f2092159a8::t_843b68a3bf89e6 209,228-230,259-260
+driver/backend/mtl_wire_emit.h
+  s_9dc0f2092159a8::t_49201f6f9433f5 113-154
+  s_9dc0f2092159a8::t_f30ae9bfb70d92 21-22
+server/test_feed.c
+  s_9dc0f2092159a8::t_9bf1e608a4eae0 4397-4461
+  s_9dc0f2092159a8::t_f6f1462401c540 3171-3240
+server/executor.mm
+  s_9dc0f2092159a8::t_2daa838c245248 1903-1916
+  s_9dc0f2092159a8::t_02a66458c691d6 2655-2668
+server/HANDOFF-BLOB.md
+  s_9dc0f2092159a8::t_db0919c7345246 254-297
+driver/mtl/mtl_blob_pool.h
+  s_9dc0f2092159a8::t_218e089998c44c 278-480
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_cf1226306eb343 2655
+  s_9dc0f2092159a8::t_14a0c7d331e994 2662
+  s_9dc0f2092159a8::t_9db229cff04b83 574-575
+  s_9dc0f2092159a8::t_b9062a8217a8fd 187-196
+  s_9dc0f2092159a8::t_4aaefd238776b2 180-182
+  s_9dc0f2092159a8::t_918f3fbd8a9777 573
+  s_9dc0f2092159a8::t_5f1c5833604fc3 2636-2640,2643,2657-2659
+  s_9dc0f2092159a8::t_d0df3cd3976a06 2661,2663-2664
+  s_9dc0f2092159a8::t_80a663a8e52db7 2678
+  s_9dc0f2092159a8::t_fe94ee8c6a61b0 2707,2720
+  s_9dc0f2092159a8::t_8122e39d1fdbe4 3389-3417
+  s_9dc0f2092159a8::t_c672947e020228 197
+  s_9dc0f2092159a8::t_8c9d127f845cbf 2694
+  s_9dc0f2092159a8::t_6e5c7c29b466d8 2660
+driver/d3d9/d3d9_device.cpp
+  s_9dc0f2092159a8::t_f6739f9b04ab13 2779
+  s_9dc0f2092159a8::t_05c77769e92536 3057,3119,3174,3563,4942,5201,5450,5637
+  s_9dc0f2092159a8::t_4522913c441cfb 3004
+  s_9dc0f2092159a8::t_a5f430e716fa19 29-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "0d0f3d30c9bf667d7857373f2383fade278fd8d2",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
