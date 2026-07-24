@@ -243,6 +243,19 @@ static uint64_t fnv64(const void* data, size_t n,
   return h;
 }
 
+/* v13.1 copy_buffer content-sum propagation — IDENTICAL mix on the client
+ * (mtl_wire_context.cpp mixCopySum): wire-draw `up=` parity covers the
+ * staging + copy_buffer transport (static VB/IB), not just upload_buffer. */
+static uint64_t mixCopySum(uint64_t srcSum, uint64_t srcOff, uint64_t dstOff,
+                           uint64_t bytes) {
+  uint64_t h = 0xcbf29ce484222325ull;
+  h = fnv64(&srcSum, 8, h);
+  h = fnv64(&srcOff, 8, h);
+  h = fnv64(&dstOff, 8, h);
+  h = fnv64(&bytes, 8, h);
+  return h;
+}
+
 struct PendingShader {
   struct d9mt_wire_rec_create_shader meta = {};
   std::vector<std::pair<uint8_t, uint8_t>> abWords;
@@ -2067,6 +2080,10 @@ static void handleCopyBuffer(const d9mt_wire_rec_copy_buffer* r) {
     destinationOffset:(NSUInteger)r->dst_offset
                  size:(NSUInteger)r->bytes];
   dres->hasContent = true;
+  /* v13.1 parity: propagate the shipped-content sum through the GPU copy
+   * (client twin propagates the same mix at emission). */
+  dres->uploadSum = mixCopySum(sres->uploadSum, r->src_offset, r->dst_offset,
+                               r->bytes);
 }
 
 static void handleResolveTexture(const d9mt_wire_rec_resolve_texture* r) {
@@ -2788,9 +2805,14 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
  * legitimately read zeros — the `up=` sums (exact bytes that crossed the
  * heap) are the transport-parity discriminator and must match immediately. */
 static void logServerDraw() {
-  if (g->dbgDrawLog >= 4)
+  if (g->dbgDrawLog >= 244)
     return;
   const uint32_t n = g->dbgDrawLog++;
+  /* two bursts, same schedule as the client: #0-3, then #240-243 — by the
+   * late burst the early xfer blits have executed, so the window sums show
+   * the REAL fetched bytes (and prove per-frame constant updates land). */
+  if (n >= 4 && n < 240)
+    return;
   auto window = [](id<MTLBuffer> buf, uint64_t off) -> uint64_t {
     if (!buf || off >= buf.length)
       return 0;
@@ -2819,14 +2841,17 @@ static void logServerDraw() {
   fprintf(stderr,
           "[serverd] wire-draw#%u vb=%llu+%llu/%u vbsum=%016llx up=%016llx "
           "ib=%llu+%llu ibsum=%016llx up=%016llx "
-          "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u\n",
+          "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u "
+          "ups=%llu\n",
           n, (unsigned long long)vbId, (unsigned long long)s.offset, s.stride,
           (unsigned long long)window(s.buf, s.offset), (unsigned long long)vbUp,
           (unsigned long long)ibId, (unsigned long long)g->index.offset,
           (unsigned long long)window(g->index.buf, g->index.offset),
           (unsigned long long)ibUp, cMask,
           (unsigned long long)cSum, (unsigned long long)cUp,
-          (unsigned long long)pushSum, g->stages[0].pushExtent);
+          (unsigned long long)pushSum, g->stages[0].pushExtent,
+          (unsigned long long)atomic_load_explicit(&g->status->uploads_executed,
+                                                   memory_order_relaxed));
   if (n == 0) {
     fprintf(stderr, "[serverd] wire-vl n=%zu/%zu\n",
             g->attrs.size(), g->layouts.size());

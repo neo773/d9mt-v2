@@ -29,7 +29,6 @@
  * no resource-ownership migration is needed.
  */
 
-#include <unordered_map>
 #include <vector>
 
 #include "../mtl/mtl_context.h"
@@ -187,13 +186,14 @@ namespace dxvk::backend {
      * UBO range (re)bound since the last draw. */
     void snapshotDirtyUniforms();
 
-    /* S3 v13 observability: per-draw input checksums (first 4 draws) +
-     * the draw-#1 vertex-layout dump; the server logs the identical format
-     * from ITS resolved state for eyeball diffing. */
+    /* S3 v13 observability: per-draw input checksums (draws #0-3 + a late
+     * burst #240-243 to defeat server-side blit lag) + the draw-#1 vertex-
+     * layout dump; the server logs the identical format from ITS resolved
+     * state for eyeball diffing. Shipped-content sums live FILE-SCOPE
+     * (g_uploadSums, process-lifetime like the transport) so device churn
+     * cannot lose them. */
     void logWireDraw();
     uint32_t m_dbgDrawLog = 0u;
-    /* wire-id -> fnv64 of the LAST content bytes shipped (upload_buffer). */
-    std::unordered_map<uint64_t, uint64_t> m_uploadSums;
     /* client mirror of the per-stage push block (what the server's
      * push_data decode materializes), for pushsum parity logging. */
     uint8_t  m_pushShadow[2][4096] = {};

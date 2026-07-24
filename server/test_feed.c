@@ -1543,6 +1543,88 @@ main(int argc, char **argv) {
           usleep(30000);
         }
       }
+
+      /* --- v13.1 SECOND-FRAME constants: the per-frame update shape. A new
+       * matrix (scale 0.5 + translate +0.5,+0.5) ships at a FRESH ring
+       * offset (the frontend's per-frame Alloc advance) — the triangle must
+       * MOVE: the old centroid returns to the clear color and the new
+       * centroid turns magenta. A server that keeps the FIRST constants
+       * (one-shot upload, stale range, blit misorder) leaves the triangle
+       * in place — the frozen-constants failure shape. --- */
+      int cbv2Ok = 0;
+      for (int w = 1; w <= 30 && !cbv2Ok; w++) {
+        /* x' = 0.5x + 0.5w, y' = 0.5y + 0.5w (column-major) — verts
+         * (-0.5,-0.5)(0.5,-0.5)(-0.5,0.5) -> NDC (0.25,0.25)(0.75,0.25)
+         * (0.25,0.75): pixels (400,180)(560,180)(400,60), centroid
+         * (453,140); the old centroid (266,280) falls outside. */
+        float mvp2[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0,
+                          0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+        uint64_t m2g = 0;
+        uint64_t m2off = heap_put(mvp2, sizeof(mvp2), &m2g);
+        struct d9mt_wire_rec_upload_buffer ubm2 = ubz;
+        ubm2.dst_offset = 320; /* the ring advanced past the frame-1 alloc */
+        ubm2.size = sizeof(mvp2);
+        ubm2.heap_offset = m2off;
+        ubm2.heap_generation = m2g;
+        emit(&ubm2, sizeof(ubm2));
+        struct d9mt_wire_rec_bind_uniform_buffer_range bur2;
+        memset(&bur2, 0, sizeof(bur2));
+        bur2.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+        bur2.hdr.size = sizeof(bur2);
+        bur2.stages = 0x1;
+        bur2.slot = 4;
+        bur2.offset = 320;
+        bur2.length = sizeof(mvp2);
+        emit(&bur2, sizeof(bur2));
+
+        struct d9mt_wire_rec_set_render_targets_by_id rt6;
+        memset(&rt6, 0, sizeof(rt6));
+        rt6.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt6.hdr.size = sizeof(rt6);
+        rt6.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rt6.color[0].format = 80;
+        rt6.color[0].width = 640;
+        rt6.color[0].height = 480;
+        rt6.color[0].sample_count = 1;
+        emit(&rt6, sizeof(rt6));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } di4 = {{{d9mt_wire_op_draw_indexed, sizeof(di4), 0}, 1, 0},
+                 {{3, 1, 0, 0, 0, 0}}};
+        emit(&di4, sizeof(di4));
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v13.1 second-frame constants: frame never presented");
+        uint32_t s7 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf6 = IOSurfaceLookup(ids[s7]);
+        if (!sf6)
+          FAIL("v13.1 second-frame constants: IOSurfaceLookup failed");
+        IOSurfaceLock(sf6, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *b6 = IOSurfaceGetBaseAddress(sf6);
+        size_t r6 = IOSurfaceGetBytesPerRow(sf6);
+        uint8_t moved[4], old[4];
+        memcpy(moved, b6 + 140 * r6 + 453 * 4, 4); /* new centroid */
+        memcpy(old, b6 + 280 * r6 + 266 * 4, 4);   /* frame-1 centroid */
+        IOSurfaceUnlock(sf6, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf6);
+        uint8_t magenta2[4] = {255, 0, 255, 255}, dkblue2[4] = {40, 16, 16, 255};
+        if (!memcmp(moved, magenta2, 4) && !memcmp(old, dkblue2, 4)) {
+          cbv2Ok = 1;
+          printf("[test_feed] v13.1 second-frame constants: new matrix at a "
+                 "fresh ring offset MOVED the triangle (wave %d) — per-frame "
+                 "constant updates apply\n", w);
+        } else if (w == 30) {
+          FAIL("v13.1 second-frame constants: moved=%02x%02x%02x%02x (want "
+               "magenta) old=%02x%02x%02x%02x (want clear) — the server kept "
+               "the FIRST constants (frozen-constants shape)",
+               moved[0], moved[1], moved[2], moved[3],
+               old[0], old[1], old[2], old[3]);
+        } else {
+          usleep(30000);
+        }
+      }
     }
 
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce

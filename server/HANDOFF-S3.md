@@ -1045,6 +1045,67 @@ V13 honest flags:
 - The wire-draw client logs go through Logger::warn (wine log), the server
   through stderr — correlate by draw index, not timestamps.
 
+### V13.1 — first cube-run feedback: tap fixes, per-frame proof, black-window
+### attribution (coordinator anomalies 1-3)
+
+Run 1 evidence: client vbsum/ibsum=0 up=0 (server had real stable sums);
+server constsum FROZEN across draws #0-3; window FULLY BLACK + no
+CUTOVER_VERIFY dumps. Diagnosis by reading + what changed:
+
+1. CLIENT vb/ib sums zero — EXPLAINED, tap extended. The cube's static
+   VB/IB are DEVICE-LOCAL (mapPtr null: window sum unreadable by design,
+   0 = "CPU-private", NOT a divergence) and their content crosses as
+   staging + **copy_buffer** (v9 GPU copy), which the v13 up-sum tap did
+   not cover — hence up=0 while the server held real bytes (VB/IB
+   transport was never broken). Fix: shipped-content sums moved to
+   process-lifetime g_uploadSums (device churn safe) and **copy_buffer now
+   propagates the sum through the copy on BOTH sides** with an identical
+   mix (mixCopySum: srcSum,srcOff,dstOff,bytes) — client twin at the op-37
+   emission, server twin in handleCopyBuffer. Next run: vb/ib `up=` must
+   MATCH (window sums stay 0 client-side for private storage).
+
+2. SERVER constsum frozen — instrument lag vs real one-shot NOT yet
+   separable from run 1 (all 4 logged draws land before the GPU executes
+   the first xfer blits, so contents-window sums legitimately read the
+   create-snapshot zeros). Now DECIDABLE in one run, three ways:
+   - both sides log TWO bursts: draws #0-3 AND #240-243 (late burst is
+     past any blit lag; per-frame updates MUST show there);
+   - the line grew `ups=` (client: cumulative upload_buffer records
+     EMITTED; server: uploads_executed). ups growing between bursts by
+     ~1/frame = per-frame re-ship alive; frozen ups = the client stopped
+     shipping; client grows but server doesn't = transport/decode.
+   - gate: v13.1 SECOND-FRAME scenario ships a DIFFERENT matrix at a fresh
+     ring offset (upload + range advance — the exact frontend per-frame
+     shape) and asserts the triangle MOVED (new centroid magenta, old
+     centroid back to clear). A frozen-constants server FAILS this gate.
+     PASSES on the clean chain.
+   The per-frame client mechanics were re-audited by reading: every
+   frontend constants update runs Alloc -> bindUniformBufferRange (every
+   frame) -> shadow dirty -> draw-time re-ship; ring-wrap renames go
+   through invalidateBuffer (fresh create + full snapshot + rebinds).
+
+3. BLACK WINDOW + no dumps — the LOCAL path is untouched by v13 (all taps
+   are additive; forwarding unchanged; audit in this slice found no local
+   mutation), and dumps-never-wrote + black TOGETHER mean the run died or
+   the present wedged EARLY (<600 frames — the dump cadence never fired).
+   Two attribution tools added for the next run:
+   - acquireServerFrame logs ONE line on the FIRST present that switches
+     the on-screen source to the server frame ("present source: first
+     SERVER frame accepted"). NOTE: THE VISUAL CUTOVER IS LIVE at f8af6aa
+     (d3d9_swapchain.cpp:820 — present prefers the server IOSurface within
+     kServerLagFrames=2); v13 making the server actually render may have
+     flipped the on-screen source for the first time — if the black run
+     shows this line, chase the cutover/present copy (the run-11 GPU-fault
+     wedge shape: fault -> present completion never signals -> CS parks ->
+     black + no dumps). If the line is absent, the wedge is local/wire.
+   - env D9MT_UBO_RESHIP=0 disables ONLY the v13 draw-time re-ship (logs
+     stay): one run with it flips the regression attribution between the
+     upload path and everything else.
+   Hardening regardless: same-draw duplicate of the create-time full
+   snapshot skipped (wasNew), re-ship capped at 256 KiB per range (counted,
+   first named — whole-ring 1 MiB rebinds must not become per-draw
+   megabyte streams; ShaderConstSize is 1 MiB).
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

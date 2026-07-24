@@ -12,9 +12,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -112,6 +114,38 @@ namespace dxvk::backend {
       for (size_t i = 0u; i < n; i++)
         h = (h ^ p[i]) * 0x100000001b3ull;
       return h;
+    }
+
+    /* S3 v13.1: process-lifetime shipped-content sums (wire-id -> fnv64 of
+     * the LAST bytes shipped for that resource). FILE-SCOPE like g_wt so
+     * device/context churn cannot lose them; CS-thread only (single
+     * producer). g_uploadsEmitted feeds the wire-draw `ups=` field — the
+     * per-frame re-ship liveness counter. */
+    std::unordered_map<uint64_t, uint64_t> g_uploadSums;
+    uint64_t g_uploadsEmitted = 0u;
+
+    /* copy_buffer content-sum propagation (v13.1: covers VB/IB whose bytes
+     * cross as staging + copy_buffer, not upload_buffer). IDENTICAL mix on
+     * the server — executor.mm mixCopySum. */
+    uint64_t mixCopySum(uint64_t srcSum, uint64_t srcOff, uint64_t dstOff, uint64_t bytes) {
+      uint64_t h = 0xcbf29ce484222325ull;
+      h = fnv64(&srcSum, 8u, h);
+      h = fnv64(&srcOff, 8u, h);
+      h = fnv64(&dstOff, 8u, h);
+      h = fnv64(&bytes, 8u, h);
+      return h;
+    }
+
+    /* v13.1 bisection kill-switch for the coordinator: D9MT_UBO_RESHIP=0
+     * disables ONLY the draw-time UBO content re-ship (the v13 fix), keeping
+     * the parity logs — one env flip attributes a regression to the upload
+     * path vs everything else in one run. Default ON (correctness). */
+    bool uboReshipEnabled() {
+      static const bool s_on = [] {
+        const char* v = std::getenv("D9MT_UBO_RESHIP");
+        return !(v != nullptr && v[0] == '0');
+      }();
+      return s_on;
     }
 
     /* PE-side attach counter (log correlation with the unix "attach #N"). */
@@ -741,7 +775,8 @@ namespace dxvk::backend {
       endRecord();
       /* S3 v13 parity: sum of the exact bytes shipped — the server records
        * the same sum over the heap region it consumes (Resource::uploadSum). */
-      m_uploadSums[wireId] = fnv64(src, size_t(size));
+      g_uploadSums[wireId] = fnv64(src, size_t(size));
+      g_uploadsEmitted++;
     }
   }
 
@@ -1469,8 +1504,11 @@ namespace dxvk::backend {
    * the pass that this draw materializes (ensureXfer closes an active pass,
    * materializePass closes xfer first). */
   void MtlWireContext::snapshotDirtyUniforms() {
-    if (!wired() || g_wt.heap == nullptr)
+    if (!wired() || g_wt.heap == nullptr || !uboReshipEnabled())
       return;
+    /* Per-draw cost by design: O(16) flag checks; heap work ONLY for slots
+     * (re)bound since the last draw (the cube: one small range per frame).
+     * Never blocks: heapAlloc drops on a full heap. */
     const void* uploaded[16] = {};
     uint32_t nUploaded = 0u;
     for (uint32_t st = 0u; st < 2u; st++) {
@@ -1482,7 +1520,12 @@ namespace dxvk::backend {
         if (sh.buffer == nullptr || sh.length == 0u)
           continue;
         MtlBufferSlice slice(sh.buffer, sh.offset, sh.length); /* CS thread: current storage */
+        const bool wasNew = slice.storage() != nullptr && slice.storage()->wireId == 0u;
         if (!ensureBufferCreated(slice))
+          continue;
+        /* creation just shipped the FULL content snapshot (ensureStorage-
+         * Created) — a same-draw re-ship would be a byte-identical dup. */
+        if (wasNew)
           continue;
         const Rc<MtlAllocation>& storage = slice.storage();
         if (storage == nullptr || storage->mapPtr == nullptr || !storage->wireId)
@@ -1501,22 +1544,38 @@ namespace dxvk::backend {
         const uint64_t len = std::min<uint64_t>(slice.length(), storage->size - off);
         if (!len)
           continue;
+        /* flood guard: a whole-ring rebind (1 MiB ShaderConstSize) must not
+         * turn into a per-draw megabyte stream — the create/invalidate
+         * snapshots own full-content transport; ranges own the per-frame
+         * constants. Counted skip, first occurrence named. */
+        if (len > (256ull << 10)) {
+          static uint64_t s_capped = 0u;
+          if (s_capped++ == 0u)
+            Logger::warn(str::format("snapshotDirtyUniforms: skipping ",
+              len, " B re-ship (cap 256 KiB) slot=", slot));
+          continue;
+        }
         emitUploadBuffer(storage->wireId, storage->handle.buf, off,
                          static_cast<const uint8_t*>(storage->mapPtr) + off, len);
       }
     }
   }
 
-  /* S3 v13 observability: first-4-draws input checksums + the draw-#1 vertex
-   * layout, in a line format the server mirrors exactly ("wire-draw#N ..." /
-   * "wire-vl ..."). Window sums hash the first 64 B the draw fetches; `up`
-   * sums hash the FULL bytes last shipped over the wire for that resource —
-   * `up` is the transport-parity discriminator (the server's window sum lags
-   * GPU blit execution by design; its up-sum must match immediately). */
+  /* S3 v13 observability: input checksums for draws #0-3 AND #240-243 (the
+   * late burst defeats the server's blit-lagged window sums), in a line
+   * format the server mirrors exactly ("wire-draw#N ..." / "wire-vl ...").
+   * Window sums hash the first 64 B the draw fetches (0 = CPU-unreadable
+   * private storage — NOT a divergence); `up` sums hash the FULL bytes last
+   * shipped over the wire for that resource (upload_buffer, or the
+   * copy_buffer mix) — `up` is the transport-parity discriminator. `ups=`
+   * is the cumulative upload_buffer records emitted: it must GROW between
+   * the two bursts if per-frame constants re-ship. */
   void MtlWireContext::logWireDraw() {
-    if (m_dbgDrawLog >= 4u || !wired())
+    if (!wired() || m_dbgDrawLog >= 244u)
       return;
     const uint32_t n = m_dbgDrawLog++;
+    if (n >= 4u && n < 240u)
+      return;
     auto probe = [&](const BufShadow& sh, uint64_t* wid, uint64_t* off,
                      uint64_t* wsum, uint64_t* upsum) {
       *wid = 0u; *off = 0u; *wsum = 0u; *upsum = 0u;
@@ -1528,8 +1587,8 @@ namespace dxvk::backend {
         return;
       *wid = storage->wireId;
       *off = slice.offset();
-      auto it = m_uploadSums.find(storage->wireId);
-      if (it != m_uploadSums.end())
+      auto it = g_uploadSums.find(storage->wireId);
+      if (it != g_uploadSums.end())
         *upsum = it->second;
       if (storage->mapPtr != nullptr && *off < storage->size)
         *wsum = fnv64(static_cast<const uint8_t*>(storage->mapPtr) + *off,
@@ -1554,18 +1613,20 @@ namespace dxvk::backend {
       cUp  = fnv64(&s8, 1u, cUp);  cUp  = fnv64(&upsum, 8u, cUp);
     }
     const uint64_t pushSum = fnv64(m_pushShadow[0], m_pushShadowExtent[0]);
-    char buf[320];
+    char buf[384];
     snprintf(buf, sizeof(buf),
              "wire-draw#%u vb=%llu+%llu/%u vbsum=%016llx up=%016llx "
              "ib=%llu+%llu ibsum=%016llx up=%016llx "
-             "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u",
+             "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u "
+             "ups=%llu",
              n, (unsigned long long)vbId, (unsigned long long)vbOff,
              m_streamShadow[0].stride,
              (unsigned long long)vbSum, (unsigned long long)vbUp,
              (unsigned long long)ibId, (unsigned long long)ibOff,
              (unsigned long long)ibSum, (unsigned long long)ibUp,
              cMask, (unsigned long long)cSum, (unsigned long long)cUp,
-             (unsigned long long)pushSum, m_pushShadowExtent[0]);
+             (unsigned long long)pushSum, m_pushShadowExtent[0],
+             (unsigned long long)g_uploadsEmitted);
     Logger::warn(buf);
     if (n == 0u) {
       snprintf(buf, sizeof(buf), "wire-vl n=%zu/%zu",
@@ -1739,11 +1800,18 @@ namespace dxvk::backend {
           r->dst_wire_id = ds->wireId;
           r->dst_handle = ds->handle.buf;
           r->src_wire_id = ss->wireId;
+          r->src_offset = srcOff;
           r->src_handle = ss->handle.buf;
           r->dst_offset = dstOff;
-          r->src_offset = srcOff;
           r->bytes = bytes;
           endRecord();
+          /* v13.1 parity: propagate the shipped-content sum through the GPU
+           * copy so wire-draw `up=` covers staging+copy_buffer transports
+           * (the static VB/IB shape) — server twin in handleCopyBuffer. */
+          auto it = g_uploadSums.find(ss->wireId);
+          g_uploadSums[ds->wireId] =
+            mixCopySum(it != g_uploadSums.end() ? it->second : 0u,
+                       srcOff, dstOff, bytes);
         }
       } else {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
@@ -2158,6 +2226,17 @@ namespace dxvk::backend::wire {
     outImage = tex;
     outView  = view;
     g_serverEverProduced.store(true, std::memory_order_relaxed);
+    /* v13.1 black-screen attribution: name the FIRST present that switches
+     * the on-screen source to the server frame — a regression that appears
+     * with this line in the log is a cutover/present-path issue, one that
+     * appears without it is local-side. One line per process. */
+    {
+      static std::atomic<bool> s_flipLogged = { false };
+      bool expected = false;
+      if (s_flipLogged.compare_exchange_strong(expected, true))
+        Logger::warn(str::format("present source: first SERVER frame accepted "
+          "(localSerial=", localSerial, ", ", f.width, "x", f.height, ")"));
+    }
     return true;
   }
 
