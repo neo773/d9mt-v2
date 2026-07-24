@@ -966,6 +966,85 @@ V12 honest flags:
   server's depth chain executes the demo-shaped stream correctly, not that
   the demo's actual wire traffic contains what the gate synthesizes.
 
+## V13 — ZERO-PIXEL-DRAW ROOT CAUSE: host-visible CONSTANT-BUFFER content
+## never crossed the wire (+ per-draw input parity checksums)
+
+The V12 state (clear perfect, draws=255 execute, zero pixels) pointed at the
+draw's INPUTS. Found by READING, then fixed and gated:
+
+ROOT CAUSE (input class (c) — VS constants): SetVertexShaderConstantF does
+NOT ride the push block. It lands in the D3D9 constant-buffer RING
+(d3d9_device.cpp UploadConstants → GetConstantBuffer(CbvIndex::
+VSDynamicConstants = slot 4).Alloc → copyConstantData). On Apple Silicon
+D3D9ConstantBuffer::DetermineDmaUsage returns FALSE (UMA, no staging split)
+→ SetupStreamCommand early-outs → `uploadBuffer` is NEVER CALLED for
+constants. The frontend writes the matrix straight through mapPtr AFTER the
+bind — coherent for the LOCAL GPU (shared storage), invisible to the WIRE.
+The server's mirror of the constant buffer kept its create-time
+ensureStorageCreated snapshot (zeros) forever → WVP = 0 → every vertex
+collapses to the origin → draws execute and rasterize NOTHING. Exactly the
+symptom; VB/IB survive only because they are Lock-written BEFORE first bind
+(the create-time snapshot catches them).
+
+THE FIX (client, mtl_wire_context.{h,cpp} snapshotDirtyUniforms): UBO
+shadows gained a `dirty` bit set by bindUniformBuffer(Range); at draw
+emission every dirty UBO range re-ships its CURRENT mapPtr bytes as a
+normal upload_buffer (dedup for both-stage binds like SpecData). Draw time
+is the SOUND tap: the frontend writes constants (app thread) before
+queueing the draw, so the CS thread executing the draw observes the final
+bytes; server-side the upload rides the xfer encoder which orders ahead of
+the pass the draw materializes (ensureXfer closes an active pass,
+materializePass closes xfer first).
+
+OBSERVABILITY (both sides, first 4 draws, identical line format for eyeball
+diff): client `wire-draw#N ...` (Logger) vs server `[serverd] wire-draw#N
+...` (stderr):
+  wire-draw#N vb=<wireid>+<off>/<stride> vbsum=<64B-window> up=<shipped>
+      ib=<wireid>+<off> ibsum=.. up=.. cbv=<VS-slot-mask> constsum=.. up=..
+      pushsum=<fnv of VS push block> pext=<extent>
+plus a draw-#1 `wire-vl` layout dump (attr loc/binding/fmt/off; layout
+binding/stride). READ THE SUMS RIGHT: `up=` hashes the exact bytes shipped/
+consumed over the heap (client emitUploadBuffer twin of the server's
+Resource::uploadSum) — these MUST match immediately and are the transport
+discriminator. The window sums (`vbsum`/`ibsum`/`constsum`) hash the first
+64 B the draw fetches; the SERVER side reads buffer.contents which lags the
+xfer-encoder blit until the GPU executes, so early server window sums
+legitimately read the zero-fill hash — do not call that a divergence. The
+push mirror (client m_pushShadow) uses the same layout math as
+MtlContextImpl::pushData and the executor's push_data decode, so pushsum
+divergence = push transport bug.
+
+GATE (test_feed v13 cbv-cube — the REAL mechanism as decoded from client
+emission, not the v11 push-block hand-craft): create_buffer + zero snapshot,
+bind_uniform_buffer at slot 4, then the per-update pair upload_buffer
+(dst_offset 256) + bind_uniform_buffer_range (offset 256) — the matrix at a
+NON-ZERO ring offset proves offset plumbing — through cubeCbvVs
+(test_stub.metal, float4x4 at AIR buffer 1 via cbv_slot_map[4]=1;
+emit_shader grew an emit_shader_map variant). PASSES (wave 3). Full clean
+chain (rm -rf build; build-bridge; build-driver → build-server + all gates)
+PASSES.
+
+Expected cube-run signature (scripts/run-test.sh code_cube3d): client and
+server wire-draw lines with MATCHING `up=` sums on vb/ib/const; server dump
+= clear + SPINNING CUBE (matching local), decodeErr=0 rej=0 srvErr=0. If
+the cube STILL fails with matching const up-sums, the divergence is inside
+PSO/layout decode — the wire-vl dumps discriminate next.
+
+V13 honest flags:
+- Constants re-upload per DIRTY BIND, not per byte-change: a title that
+  rebinds ranges without changing bytes re-ships them (256 B-ish per draw —
+  heap traffic, not ring traffic). Fine for the cube; profile on GTA.
+- A mid-pass constant update (multi-draw pass) closes the pass server-side
+  (ensureXfer) — pass-count inflation on constant-heavy titles is a KNOWN
+  perf follow-up, not a correctness issue.
+- Direct-mapped NOOVERWRITE dynamic VB/IB writes (no context call at all)
+  are the SAME gap class and remain uncovered — nothing re-snapshots them
+  after the create-time snapshot. The cube's static geometry doesn't hit
+  it; a streaming title will. Same fix shape applies (draw-time dirty
+  snapshot of stream/index shadows) if checksums implicate it.
+- The wire-draw client logs go through Logger::warn (wine log), the server
+  through stderr — correlate by draw index, not timestamps.
+
 ## CUTOVER TODO (next agent — the visual flip; NOT done here)
 
 What presents where TODAY: the client renders locally and presents its OWN

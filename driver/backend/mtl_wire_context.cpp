@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -102,6 +103,15 @@ namespace dxvk::backend {
     int64_t monotonicMs() {
       return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    /* S3 v13 checksum basis for the per-draw input parity logs (identical
+     * constant/loop on the server side — executor.mm fnv64). */
+    uint64_t fnv64(const void* data, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
+      const uint8_t* p = static_cast<const uint8_t*>(data);
+      for (size_t i = 0u; i < n; i++)
+        h = (h ^ p[i]) * 0x100000001b3ull;
+      return h;
     }
 
     /* PE-side attach counter (log correlation with the unix "attach #N"). */
@@ -729,6 +739,9 @@ namespace dxvk::backend {
       r->heap_offset = off;
       r->heap_generation = gen;
       endRecord();
+      /* S3 v13 parity: sum of the exact bytes shipped — the server records
+       * the same sum over the heap region it consumes (Resource::uploadSum). */
+      m_uploadSums[wireId] = fnv64(src, size_t(size));
     }
   }
 
@@ -1081,6 +1094,9 @@ namespace dxvk::backend {
       }
       endRecord();
     }
+    /* S3 v13: layout shadow for the draw-#1 parity dump */
+    m_attrShadow.assign(attrs, attrs + nAttr);
+    m_layoutShadow.assign(layouts, layouts + nLayout);
     m_inner->setVertexLayout(nAttr, attrs, nLayout, layouts);
   }
 
@@ -1283,6 +1299,7 @@ namespace dxvk::backend {
         sh.buffer = slice.buffer();
         sh.offset = slice.offset();
         sh.length = slice.length();
+        sh.dirty = true; /* S3 v13: content re-ships at the next draw */
       }
     }
     m_inner->bindUniformBuffer(stages, slot, std::move(slice));
@@ -1302,6 +1319,8 @@ namespace dxvk::backend {
           continue;
         m_uboShadow[st][slot].offset = offset;
         m_uboShadow[st][slot].length = length;
+        m_uboShadow[st][slot].dirty = true; /* S3 v13: the constant-ring
+          * advance shape — fresh bytes sit at the new range */
       }
     }
     m_inner->bindUniformBufferRange(stages, slot, offset, length);
@@ -1352,6 +1371,22 @@ namespace dxvk::backend {
       r->size = size;
       std::memcpy(r + 1, data, size);
       endRecord();
+    }
+    /* S3 v13 parity mirror (same layout math as MtlContextImpl::pushData and
+     * the executor's push_data decode): pushsum logging compares this shadow
+     * against the block the server's shader actually sees. */
+    {
+      const bool isShared = (stages & (stages - 1u)) != 0u;
+      const uint32_t baseOff = isShared ? 0u : 32u; /* kPushSharedBlockSize */
+      for (uint32_t st = 0u; st < 2u; st++) {
+        if (!(stages & (1u << st)))
+          continue;
+        if (uint64_t(baseOff) + offset + size <= sizeof(m_pushShadow[st])) {
+          std::memcpy(m_pushShadow[st] + baseOff + offset, data, size);
+          if (baseOff + offset + size > m_pushShadowExtent[st])
+            m_pushShadowExtent[st] = baseOff + offset + size;
+        }
+      }
     }
     m_inner->pushData(stages, offset, size, data);
   }
@@ -1423,7 +1458,137 @@ namespace dxvk::backend {
 
   /* --- draws -------------------------------------------------------------------- */
 
+  /* S3 v13 THE FIX (see mtl_wire_context.h): host-visible UBO content — the
+   * D3D9 constant-buffer ring carrying SetVertexShaderConstantF — is written
+   * through mapPtr with NO uploadBuffer call on UMA, so it never crossed the
+   * wire; the server's WVP stayed the create-time zeros and every draw
+   * rasterized nothing. Re-ship each UBO range (re)bound since the last draw.
+   * Ordering is sound: the frontend writes constants (app thread) BEFORE
+   * queueing the draw, and this runs when the CS thread executes the draw;
+   * server-side, upload records ride the xfer encoder which orders ahead of
+   * the pass that this draw materializes (ensureXfer closes an active pass,
+   * materializePass closes xfer first). */
+  void MtlWireContext::snapshotDirtyUniforms() {
+    if (!wired() || g_wt.heap == nullptr)
+      return;
+    const void* uploaded[16] = {};
+    uint32_t nUploaded = 0u;
+    for (uint32_t st = 0u; st < 2u; st++) {
+      for (uint32_t slot = 0u; slot < 8u; slot++) {
+        BufShadow& sh = m_uboShadow[st][slot];
+        if (!sh.dirty)
+          continue;
+        sh.dirty = false;
+        if (sh.buffer == nullptr || sh.length == 0u)
+          continue;
+        MtlBufferSlice slice(sh.buffer, sh.offset, sh.length); /* CS thread: current storage */
+        if (!ensureBufferCreated(slice))
+          continue;
+        const Rc<MtlAllocation>& storage = slice.storage();
+        if (storage == nullptr || storage->mapPtr == nullptr || !storage->wireId)
+          continue;
+        /* both-stage binds (SpecData) mark two shadows — ship once */
+        bool dup = false;
+        for (uint32_t i = 0u; i < nUploaded; i++)
+          dup |= uploaded[i] == storage.ptr();
+        if (dup)
+          continue;
+        if (nUploaded < 16u)
+          uploaded[nUploaded++] = storage.ptr();
+        const uint64_t off = slice.offset();
+        if (off >= storage->size)
+          continue;
+        const uint64_t len = std::min<uint64_t>(slice.length(), storage->size - off);
+        if (!len)
+          continue;
+        emitUploadBuffer(storage->wireId, storage->handle.buf, off,
+                         static_cast<const uint8_t*>(storage->mapPtr) + off, len);
+      }
+    }
+  }
+
+  /* S3 v13 observability: first-4-draws input checksums + the draw-#1 vertex
+   * layout, in a line format the server mirrors exactly ("wire-draw#N ..." /
+   * "wire-vl ..."). Window sums hash the first 64 B the draw fetches; `up`
+   * sums hash the FULL bytes last shipped over the wire for that resource —
+   * `up` is the transport-parity discriminator (the server's window sum lags
+   * GPU blit execution by design; its up-sum must match immediately). */
+  void MtlWireContext::logWireDraw() {
+    if (m_dbgDrawLog >= 4u || !wired())
+      return;
+    const uint32_t n = m_dbgDrawLog++;
+    auto probe = [&](const BufShadow& sh, uint64_t* wid, uint64_t* off,
+                     uint64_t* wsum, uint64_t* upsum) {
+      *wid = 0u; *off = 0u; *wsum = 0u; *upsum = 0u;
+      if (sh.buffer == nullptr)
+        return;
+      MtlBufferSlice slice(const_cast<BufShadow&>(sh).buffer, sh.offset, sh.length);
+      const Rc<MtlAllocation>& storage = slice.storage();
+      if (storage == nullptr)
+        return;
+      *wid = storage->wireId;
+      *off = slice.offset();
+      auto it = m_uploadSums.find(storage->wireId);
+      if (it != m_uploadSums.end())
+        *upsum = it->second;
+      if (storage->mapPtr != nullptr && *off < storage->size)
+        *wsum = fnv64(static_cast<const uint8_t*>(storage->mapPtr) + *off,
+                      size_t(std::min<uint64_t>(64u, storage->size - *off)));
+    };
+    uint64_t vbId, vbOff, vbSum, vbUp, ibId, ibOff, ibSum, ibUp;
+    probe(m_streamShadow[0], &vbId, &vbOff, &vbSum, &vbUp);
+    probe(m_indexShadow, &ibId, &ibOff, &ibSum, &ibUp);
+    /* VS-visible constants: chain-hash every bound VS UBO slot (window +
+     * up-sum separately) so one number covers the whole constant state. */
+    uint64_t cSum = 0xcbf29ce484222325ull, cUp = 0xcbf29ce484222325ull;
+    uint32_t cMask = 0u;
+    for (uint32_t slot = 0u; slot < 8u; slot++) {
+      const BufShadow& sh = m_uboShadow[0][slot];
+      if (sh.buffer == nullptr)
+        continue;
+      cMask |= 1u << slot;
+      uint64_t wid, off, wsum, upsum;
+      probe(sh, &wid, &off, &wsum, &upsum);
+      const uint8_t s8 = uint8_t(slot);
+      cSum = fnv64(&s8, 1u, cSum); cSum = fnv64(&wsum, 8u, cSum);
+      cUp  = fnv64(&s8, 1u, cUp);  cUp  = fnv64(&upsum, 8u, cUp);
+    }
+    const uint64_t pushSum = fnv64(m_pushShadow[0], m_pushShadowExtent[0]);
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "wire-draw#%u vb=%llu+%llu/%u vbsum=%016llx up=%016llx "
+             "ib=%llu+%llu ibsum=%016llx up=%016llx "
+             "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u",
+             n, (unsigned long long)vbId, (unsigned long long)vbOff,
+             m_streamShadow[0].stride,
+             (unsigned long long)vbSum, (unsigned long long)vbUp,
+             (unsigned long long)ibId, (unsigned long long)ibOff,
+             (unsigned long long)ibSum, (unsigned long long)ibUp,
+             cMask, (unsigned long long)cSum, (unsigned long long)cUp,
+             (unsigned long long)pushSum, m_pushShadowExtent[0]);
+    Logger::warn(buf);
+    if (n == 0u) {
+      snprintf(buf, sizeof(buf), "wire-vl n=%zu/%zu",
+               m_attrShadow.size(), m_layoutShadow.size());
+      Logger::warn(buf);
+      for (size_t i = 0u; i < m_attrShadow.size(); i++) {
+        snprintf(buf, sizeof(buf), "wire-vl a%zu loc=%u bind=%u fmt=%u off=%u",
+                 i, m_attrShadow[i].location, m_attrShadow[i].binding,
+                 uint32_t(m_attrShadow[i].format), m_attrShadow[i].offset);
+        Logger::warn(buf);
+      }
+      for (size_t i = 0u; i < m_layoutShadow.size(); i++) {
+        snprintf(buf, sizeof(buf), "wire-vl l%zu bind=%u stride=%u pi=%u div=%u",
+                 i, m_layoutShadow[i].binding, m_layoutShadow[i].stride,
+                 m_layoutShadow[i].perInstance ? 1u : 0u, m_layoutShadow[i].divisor);
+        Logger::warn(buf);
+      }
+    }
+  }
+
   void MtlWireContext::draw(uint32_t count, const MtlDrawArgs* args) {
+    snapshotDirtyUniforms();
+    logWireDraw();
     if (auto* r = beginRecord<d9mt_wire_rec_draw>(d9mt_wire_op_draw,
           count * uint32_t(sizeof(d9mt_wire_draw_args)))) {
       r->count = count;
@@ -1440,6 +1605,8 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
+    snapshotDirtyUniforms();
+    logWireDraw();
     if (auto* r = beginRecord<d9mt_wire_rec_draw_indexed>(d9mt_wire_op_draw_indexed,
           count * uint32_t(sizeof(d9mt_wire_draw_indexed_args)))) {
       r->count = count;

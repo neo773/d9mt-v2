@@ -76,3 +76,18 @@ vertex CubeVsOut cubeVs(CubeVsIn in [[stage_in]],
 fragment float4 cubeFs(CubeVsOut in [[stage_in]]) {
   return float4(1.0, 0.0, 1.0, 1.0); /* magenta */
 }
+
+/* S3 v13 REAL-constant-mechanism gate: the D3D9 frontend ships shader float
+ * constants (SetVertexShaderConstantF) through a host-visible constant-buffer
+ * RING — bind_uniform_buffer at CbvIndex::VSDynamicConstants (slot 4), then
+ * per-update upload_buffer content + bind_uniform_buffer_range advancing the
+ * ring offset — NOT the push block. The shader reads the CBV at the AIR slot
+ * named by create_shader.cbv_slot_map[4] (here: buffer 1); the argument table
+ * address already carries the bound range offset, so the matrix sits at
+ * struct offset 0. */
+vertex CubeVsOut cubeCbvVs(CubeVsIn in [[stage_in]],
+                           constant float4x4& mvp [[buffer(1)]]) {
+  CubeVsOut o;
+  o.pos = mvp * float4(in.pos, 1.0);
+  return o;
+}

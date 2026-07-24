@@ -29,6 +29,7 @@
  * no resource-ownership migration is needed.
  */
 
+#include <unordered_map>
 #include <vector>
 
 #include "../mtl/mtl_context.h"
@@ -167,10 +168,38 @@ namespace dxvk::backend {
       uint64_t      length = 0u;
       uint32_t      stride = 0u; /* vertex streams */
       uint32_t      type   = 0u; /* index buffer: MtlIndexType */
+      bool          dirty  = false; /* UBO: (re)bound since the last draw-time
+                                     * content snapshot (S3 v13) */
     };
     BufShadow m_streamShadow[16];
     BufShadow m_uboShadow[2][8];
     BufShadow m_indexShadow;
+
+    /* S3 v13 THE ZERO-PIXEL-DRAW FIX: host-visible UBO content (the D3D9
+     * constant-buffer ring — SetVertexShaderConstantF lands there) never
+     * crossed the wire. On UMA the frontend writes constants through mapPtr
+     * with NO uploadBuffer call (D3D9ConstantBuffer::SetupStreamCommand
+     * early-outs when !m_useDma), so the server kept the create-time snapshot
+     * (zeros) forever -> WVP = 0 -> every vertex collapses -> draws rasterize
+     * nothing. Draw emission is the sound tap: the frontend writes constants
+     * (app thread) BEFORE queueing the draw, so the CS thread executing the
+     * draw observes the final bytes. snapshotDirtyUniforms() re-ships every
+     * UBO range (re)bound since the last draw. */
+    void snapshotDirtyUniforms();
+
+    /* S3 v13 observability: per-draw input checksums (first 4 draws) +
+     * the draw-#1 vertex-layout dump; the server logs the identical format
+     * from ITS resolved state for eyeball diffing. */
+    void logWireDraw();
+    uint32_t m_dbgDrawLog = 0u;
+    /* wire-id -> fnv64 of the LAST content bytes shipped (upload_buffer). */
+    std::unordered_map<uint64_t, uint64_t> m_uploadSums;
+    /* client mirror of the per-stage push block (what the server's
+     * push_data decode materializes), for pushsum parity logging. */
+    uint8_t  m_pushShadow[2][4096] = {};
+    uint32_t m_pushShadowExtent[2] = {};
+    std::vector<MtlVertexAttr>   m_attrShadow;
+    std::vector<MtlVertexLayout> m_layoutShadow;
 
     /* S3 v2 lazy re-upload: texture content whose heap region could not be
      * allocated (heap full during a boot flood) is stashed here — the bytes

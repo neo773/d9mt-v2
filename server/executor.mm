@@ -227,7 +227,21 @@ struct Resource {
   };
   std::vector<StashedUpload> stash;
   bool residencyAdded = false;
+  /* S3 v13 parity: fnv64 of the LAST upload_buffer bytes consumed for this
+   * resource — compared against the client's sum of the bytes it shipped
+   * (wire-draw#N `up=` fields). */
+  uint64_t uploadSum = 0;
 };
+
+/* S3 v13 checksum basis for the per-draw input parity logs — identical
+ * constant/loop on the client side (mtl_wire_context.cpp fnv64). */
+static uint64_t fnv64(const void* data, size_t n,
+                      uint64_t h = 0xcbf29ce484222325ull) {
+  const uint8_t* p = (const uint8_t*)data;
+  for (size_t i = 0; i < n; i++)
+    h = (h ^ p[i]) * 0x100000001b3ull;
+  return h;
+}
 
 struct PendingShader {
   struct d9mt_wire_rec_create_shader meta = {};
@@ -282,12 +296,14 @@ struct Stream {
   uint64_t offset = 0, length = 0;
   uint32_t stride = 0;
   bool bound = false;
+  std::shared_ptr<Resource> res; /* S3 v13: parity logging (wireId/uploadSum) */
 };
 
 struct CbvBinding {
   id<MTLBuffer> buf = nil;
   uint64_t offset = 0;
   bool bound = false;
+  std::shared_ptr<Resource> res; /* S3 v13: parity logging (wireId/uploadSum) */
 };
 
 struct StageState {
@@ -436,7 +452,11 @@ struct Exec {
     uint64_t offset = 0, length = 0;
     uint32_t type = 0; /* 0=u16 1=u32 */
     bool bound = false;
+    std::shared_ptr<Resource> res; /* S3 v13: parity logging */
   } index;
+
+  /* S3 v13: first-4-executed-draws input parity log counter */
+  uint32_t dbgDrawLog = 0;
 
   Pass pass;
   bool dirtyPso = true, dirtyState = true, dirtyBindings = true;
@@ -1801,6 +1821,8 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
     return;
   }
   std::memcpy(rs.cpu, src, (size_t)r->size);
+  res->uploadSum = fnv64(src, (size_t)r->size); /* S3 v13 parity (client twin
+    * sums the same bytes at emission — mtl_wire_context emitUploadBuffer) */
   heapAck(r->heap_generation); /* region free the moment the copy is taken */
   [enc copyFromBuffer:rs.buf
          sourceOffset:(NSUInteger)rs.off
@@ -2758,6 +2780,67 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
 
 /* --- draws ------------------------------------------------------------------- */
 
+/* S3 v13 observability twin of MtlWireContext::logWireDraw — the identical
+ * "wire-draw#N ..." / "wire-vl ..." line format from the SERVER's resolved
+ * state, for eyeball diffing against the client emission. Window sums hash
+ * the first 64 B at the bound offset of the buffer's CPU view; they LAG the
+ * xfer-encoder blit (contents update when the GPU executes), so early frames
+ * legitimately read zeros — the `up=` sums (exact bytes that crossed the
+ * heap) are the transport-parity discriminator and must match immediately. */
+static void logServerDraw() {
+  if (g->dbgDrawLog >= 4)
+    return;
+  const uint32_t n = g->dbgDrawLog++;
+  auto window = [](id<MTLBuffer> buf, uint64_t off) -> uint64_t {
+    if (!buf || off >= buf.length)
+      return 0;
+    const uint64_t len = buf.length - off < 64 ? buf.length - off : 64;
+    return fnv64((const uint8_t*)buf.contents + off, (size_t)len);
+  };
+  const Stream& s = g->streams[0];
+  const uint64_t vbId = s.res ? s.res->wireId : 0;
+  const uint64_t vbUp = s.res ? s.res->uploadSum : 0;
+  const uint64_t ibId = g->index.res ? g->index.res->wireId : 0;
+  const uint64_t ibUp = g->index.res ? g->index.res->uploadSum : 0;
+  uint64_t cSum = 0xcbf29ce484222325ull, cUp = 0xcbf29ce484222325ull;
+  uint32_t cMask = 0;
+  for (uint32_t slot = 0; slot < 8; slot++) {
+    const CbvBinding& cbv = g->stages[0].cbvs[slot];
+    if (!cbv.buf)
+      continue;
+    cMask |= 1u << slot;
+    const uint64_t wsum = window(cbv.buf, cbv.offset);
+    const uint64_t upsum = cbv.res ? cbv.res->uploadSum : 0;
+    const uint8_t s8 = (uint8_t)slot;
+    cSum = fnv64(&s8, 1, cSum); cSum = fnv64(&wsum, 8, cSum);
+    cUp  = fnv64(&s8, 1, cUp);  cUp  = fnv64(&upsum, 8, cUp);
+  }
+  const uint64_t pushSum = fnv64(g->stages[0].pushData, g->stages[0].pushExtent);
+  fprintf(stderr,
+          "[serverd] wire-draw#%u vb=%llu+%llu/%u vbsum=%016llx up=%016llx "
+          "ib=%llu+%llu ibsum=%016llx up=%016llx "
+          "cbv=%02x constsum=%016llx up=%016llx pushsum=%016llx pext=%u\n",
+          n, (unsigned long long)vbId, (unsigned long long)s.offset, s.stride,
+          (unsigned long long)window(s.buf, s.offset), (unsigned long long)vbUp,
+          (unsigned long long)ibId, (unsigned long long)g->index.offset,
+          (unsigned long long)window(g->index.buf, g->index.offset),
+          (unsigned long long)ibUp, cMask,
+          (unsigned long long)cSum, (unsigned long long)cUp,
+          (unsigned long long)pushSum, g->stages[0].pushExtent);
+  if (n == 0) {
+    fprintf(stderr, "[serverd] wire-vl n=%zu/%zu\n",
+            g->attrs.size(), g->layouts.size());
+    for (size_t i = 0; i < g->attrs.size(); i++)
+      fprintf(stderr, "[serverd] wire-vl a%zu loc=%u bind=%u fmt=%u off=%u\n",
+              i, g->attrs[i].location, g->attrs[i].binding,
+              g->attrs[i].format, g->attrs[i].offset);
+    for (size_t i = 0; i < g->layouts.size(); i++)
+      fprintf(stderr, "[serverd] wire-vl l%zu bind=%u stride=%u pi=%u div=%u\n",
+              i, g->layouts[i].binding, g->layouts[i].stride,
+              g->layouts[i].per_instance, g->layouts[i].divisor);
+  }
+}
+
 static void handleDraw(const d9mt_wire_rec_draw* r) {
   const d9mt_wire_draw_args* args = (const d9mt_wire_draw_args*)(r + 1);
   if (!prepareDraw()) {
@@ -2767,6 +2850,7 @@ static void handleDraw(const d9mt_wire_rec_draw* r) {
                                 memory_order_relaxed);
     return;
   }
+  logServerDraw();
   id<MTL4RenderCommandEncoder> enc = g->pass.encoder;
 
   if (g->topology == 5) { /* TriangleFan emulation */
@@ -2818,6 +2902,7 @@ static void handleDrawIndexed(const d9mt_wire_rec_draw_indexed* r) {
                                 memory_order_relaxed);
     return;
   }
+  logServerDraw();
   id<MTL4RenderCommandEncoder> enc = g->pass.encoder;
   const uint64_t idxSize = g->index.type == 0 ? 2 : 4;
   const MTLIndexType idxType =
@@ -3193,6 +3278,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
         Stream& s = g->streams[r->binding];
         auto res = r->buf.buffer ? lookupHandle(r->buf.buffer) : nullptr;
         s.buf = res ? res->buffer : nil;
+        s.res = res;
         s.offset = r->buf.offset;
         s.length = r->buf.length;
         s.stride = r->stride;
@@ -3219,6 +3305,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
       const auto* r = (const d9mt_wire_rec_bind_index_buffer*)hdr;
       auto res = r->buf.buffer ? lookupHandle(r->buf.buffer) : nullptr;
       g->index.buf = res ? res->buffer : nil;
+      g->index.res = res;
       g->index.offset = r->buf.offset;
       g->index.length = r->buf.length;
       g->index.type = r->index_type;
@@ -3232,6 +3319,7 @@ d9mt_executor_record(const struct d9mt_wire_rec_hdr* hdr) {
           auto res = r->buf.buffer ? lookupHandle(r->buf.buffer) : nullptr;
           CbvBinding& cbv = g->stages[st].cbvs[r->slot];
           cbv.buf = res ? res->buffer : nil;
+          cbv.res = res;
           cbv.offset = r->buf.offset;
           cbv.bound = cbv.buf != nil;
         }

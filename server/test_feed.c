@@ -153,10 +153,12 @@ heap_put(const void *bytes, uint64_t size, uint64_t *gen) {
   return start;
 }
 
-/* Chunked create_shader emission (mirrors the client's chunking). */
+/* Chunked create_shader emission (mirrors the client's chunking).
+ * cbv_map: 8-entry CbvIndex -> AIR buffer-slot map (NULL = no CBVs). */
 static void
-emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
-            const char *entry, const uint8_t *lib, size_t lib_size) {
+emit_shader_map(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
+                const char *entry, const uint8_t *lib, size_t lib_size,
+                const int8_t *cbv_map) {
   const uint32_t kChunk = 0xE000u;
   uint64_t off = 0;
   while (off < lib_size || lib_size == 0) {
@@ -174,7 +176,10 @@ emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
     r->total_size = lib_size;
     r->chunk_offset = off;
     r->chunk_size = chunk;
-    memset(r->cbv_slot_map, 0xFF, 8); /* -1: no CBVs */
+    if (cbv_map)
+      memcpy(r->cbv_slot_map, cbv_map, 8);
+    else
+      memset(r->cbv_slot_map, 0xFF, 8); /* -1: no CBVs */
     snprintf(r->entry, sizeof(r->entry), "%s", entry);
     memcpy(r + 1, lib + off, chunk);
     emit(buf, size);
@@ -182,6 +187,12 @@ emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
     if (off >= lib_size)
       break;
   }
+}
+
+static void
+emit_shader(uint64_t wire_id, uint64_t client_handle, uint32_t stage,
+            const char *entry, const uint8_t *lib, size_t lib_size) {
+  emit_shader_map(wire_id, client_handle, stage, entry, lib, lib_size, NULL);
 }
 
 static void
@@ -1379,6 +1390,159 @@ main(int argc, char **argv) {
       dssOff.front.read_mask = dssOff.back.read_mask = 0xFF;
       dssOff.front.write_mask = dssOff.back.write_mask = 0xFF;
       emit(&dssOff, sizeof(dssOff));
+    }
+
+    /* --- V13 CBV CUBE: the REAL constant mechanism, as decoded from the
+     * client emission (d3d9_constant_buffer.cpp + mtl_wire_context.cpp).
+     * SetVertexShaderConstantF does NOT ride the push block — it lands in a
+     * host-visible constant-buffer RING: one create_buffer + full-content
+     * snapshot at first bind (bind_uniform_buffer at CbvIndex::
+     * VSDynamicConstants = slot 4), then per-update upload_buffer content +
+     * bind_uniform_buffer_range advancing the ring offset. The shader reads
+     * the CBV at the AIR slot in create_shader.cbv_slot_map[4]. The v13
+     * client fix (snapshotDirtyUniforms) emits exactly this shape; a server
+     * that drops any link (upload into a bound CBV, range offset, slot map)
+     * degenerates the draw to ZERO pixels — the reproducer shape. --- */
+    {
+      /* the constant ring buffer: create + zero snapshot (ensureStorage
+       * Created's shape), matrix uploaded at a NON-ZERO ring offset below */
+      uint8_t zeros[512] = {0};
+      struct d9mt_wire_rec_create_buffer ccb;
+      memset(&ccb, 0, sizeof(ccb));
+      ccb.hdr.opcode = d9mt_wire_op_create_buffer;
+      ccb.hdr.size = sizeof(ccb);
+      ccb.wire_id = 970;
+      ccb.client_handle = 0xC970;
+      ccb.size = sizeof(zeros);
+      emit(&ccb, sizeof(ccb));
+      uint64_t zg = 0;
+      uint64_t zoff = heap_put(zeros, sizeof(zeros), &zg);
+      struct d9mt_wire_rec_upload_buffer ubz;
+      memset(&ubz, 0, sizeof(ubz));
+      ubz.hdr.opcode = d9mt_wire_op_upload_buffer;
+      ubz.hdr.size = sizeof(ubz);
+      ubz.wire_id = 970;
+      ubz.client_handle = 0xC970;
+      ubz.size = sizeof(zeros);
+      ubz.heap_offset = zoff;
+      ubz.heap_generation = zg;
+      emit(&ubz, sizeof(ubz));
+
+      /* cubeCbvVs: stage_in + float4x4 at AIR buffer 1, mapped from D3D9
+       * CBV slot 4 (VSDynamicConstants) via cbv_slot_map */
+      int8_t map[8] = {-1, -1, -1, -1, 1, -1, -1, -1};
+      emit_shader_map(971, 0xA00B, 0, "cubeCbvVs", lib, lib_size, map);
+
+      int cbvOk = 0;
+      for (int w = 1; w <= 30 && !cbvOk; w++) {
+        emit_bind_shader(0, 0xA00B);
+        emit_bind_shader(1, 0xA006); /* cubeFs: magenta */
+        struct {
+          struct d9mt_wire_rec_set_vertex_layout rec;
+          struct d9mt_wire_vertex_attr attr;
+          struct d9mt_wire_vertex_layout lay;
+        } vl6 = {{{d9mt_wire_op_set_vertex_layout, sizeof(vl6), 0}, 1, 1},
+                 {0, 0, 900 /* RGB32Float */, 0},
+                 {0, 12, 0, 0}};
+        emit(&vl6, sizeof(vl6));
+        struct d9mt_wire_rec_bind_vertex_buffer bvb3;
+        memset(&bvb3, 0, sizeof(bvb3));
+        bvb3.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+        bvb3.hdr.size = sizeof(bvb3);
+        bvb3.binding = 0;
+        bvb3.stride = 12;
+        bvb3.buf.buffer = 0xC950; /* v11 triangle VB (same session) */
+        bvb3.buf.length = 36;
+        emit(&bvb3, sizeof(bvb3));
+        struct d9mt_wire_rec_bind_index_buffer bib3;
+        memset(&bib3, 0, sizeof(bib3));
+        bib3.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+        bib3.hdr.size = sizeof(bib3);
+        bib3.buf.buffer = 0xC951; /* v11 IB */
+        bib3.buf.length = 8;
+        bib3.index_type = 0;
+        emit(&bib3, sizeof(bib3));
+
+        /* frontend shape: whole-buffer bind at slot 4 ... */
+        struct d9mt_wire_rec_bind_uniform_buffer bub;
+        memset(&bub, 0, sizeof(bub));
+        bub.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+        bub.hdr.size = sizeof(bub);
+        bub.stages = 0x1; /* vertex */
+        bub.slot = 4;     /* VSDynamicConstants */
+        bub.buf.buffer = 0xC970;
+        bub.buf.length = sizeof(zeros);
+        emit(&bub, sizeof(bub));
+
+        /* ... then the per-update pair: content upload + range advance to a
+         * NON-ZERO ring offset (proves offset plumbing end to end) */
+        float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        uint64_t mg = 0;
+        uint64_t moff = heap_put(mvp, sizeof(mvp), &mg);
+        struct d9mt_wire_rec_upload_buffer ubm = ubz;
+        ubm.dst_offset = 256;
+        ubm.size = sizeof(mvp);
+        ubm.heap_offset = moff;
+        ubm.heap_generation = mg;
+        emit(&ubm, sizeof(ubm));
+        struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+        memset(&bur, 0, sizeof(bur));
+        bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+        bur.hdr.size = sizeof(bur);
+        bur.stages = 0x1;
+        bur.slot = 4;
+        bur.offset = 256;
+        bur.length = sizeof(mvp);
+        emit(&bur, sizeof(bur));
+
+        struct d9mt_wire_rec_set_render_targets_by_id rt5;
+        memset(&rt5, 0, sizeof(rt5));
+        rt5.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+        rt5.hdr.size = sizeof(rt5);
+        rt5.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+        rt5.color[0].format = 80;
+        rt5.color[0].width = 640;
+        rt5.color[0].height = 480;
+        rt5.color[0].sample_count = 1;
+        emit(&rt5, sizeof(rt5));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        struct {
+          struct d9mt_wire_rec_draw_indexed rec;
+          struct d9mt_wire_draw_indexed_args args[1];
+        } di3 = {{{d9mt_wire_op_draw_indexed, sizeof(di3), 0}, 1, 0},
+                 {{3, 1, 0, 0, 0, 0}}};
+        emit(&di3, sizeof(di3));
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("v13 cbv-cube: frame never presented");
+        uint32_t s6 = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sf5 = IOSurfaceLookup(ids[s6]);
+        if (!sf5)
+          FAIL("v13 cbv-cube: IOSurfaceLookup failed");
+        IOSurfaceLock(sf5, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *b5 = IOSurfaceGetBaseAddress(sf5);
+        size_t r5 = IOSurfaceGetBytesPerRow(sf5);
+        uint8_t center[4], corner[4];
+        memcpy(center, b5 + 280 * r5 + 266 * 4, 4); /* triangle centroid */
+        memcpy(corner, b5 + 2 * r5 + 636 * 4, 4);   /* outside triangle */
+        IOSurfaceUnlock(sf5, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sf5);
+        uint8_t magenta[4] = {255, 0, 255, 255}, dkblue[4] = {40, 16, 16, 255};
+        if (!memcmp(center, magenta, 4) && !memcmp(corner, dkblue, 4)) {
+          cbvOk = 1;
+          printf("[test_feed] v13 cbv-cube: constants through the REAL "
+                 "mechanism (CBV slot 4 + upload_buffer + range offset) "
+                 "produced pixels (wave %d)\n", w);
+        } else if (w == 30) {
+          FAIL("v13 cbv-cube: center=%02x%02x%02x%02x corner=%02x%02x%02x%02x"
+               " — CBV constants did not reach the VS (upload/bind/range/"
+               "slot-map chain broken)",
+               center[0], center[1], center[2], center[3],
+               corner[0], corner[1], corner[2], corner[3]);
+        } else {
+          usleep(30000);
+        }
+      }
     }
 
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
