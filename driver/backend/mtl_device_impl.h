@@ -63,6 +63,13 @@ namespace dxvk::backend {
     void recycleStorage(Rc<MtlAllocation>&& alloc) {
       if (alloc == nullptr)
         return;
+      /* P1 credit law: LOCAL completion put this backing here, but the
+       * SERVER may still be up to N frames behind — stamp the last frame
+       * marker that can reference the blob pages; takeRecycledStorage gates
+       * reuse on the server's completed serial (the premature-reuse class
+       * the PoC reproduced). */
+      if (alloc->blobOffset != ~0ull)
+        alloc->blobRetireStamp = wire::blobStamp();
       std::lock_guard<std::mutex> lock(m_recycleMutex);
       if (m_recycled.size() < MaxRecycledBackings)
         m_recycled.push_back(std::move(alloc));
@@ -70,11 +77,19 @@ namespace dxvk::backend {
 
     Rc<MtlAllocation> takeRecycledStorage() {
       std::lock_guard<std::mutex> lock(m_recycleMutex);
-      if (m_recycled.empty())
-        return nullptr;
-      Rc<MtlAllocation> alloc = std::move(m_recycled.back());
-      m_recycled.pop_back();
-      return alloc;
+      for (size_t i = m_recycled.size(); i-- > 0u; ) {
+        /* P1: a blob-backed recycled entry is reusable only once the
+         * server's completed frame serial covers its retire stamp; skip
+         * not-yet-covered entries (renameBuffer mints a fresh slice — the
+         * frame credits bound how long an entry waits to ~N presents). */
+        if (m_recycled[i]->blobOffset != ~0ull &&
+            !wire::blobReusable(m_recycled[i]->blobRetireStamp))
+          continue;
+        Rc<MtlAllocation> alloc = std::move(m_recycled[i]);
+        m_recycled.erase(m_recycled.begin() + ptrdiff_t(i));
+        return alloc;
+      }
+      return nullptr;
     }
 
   private:

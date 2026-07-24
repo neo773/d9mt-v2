@@ -6692,12 +6692,33 @@ _WireRing_attach(void *obj) {
     const uint64_t htotal = params->heap_bytes;
     const uint64_t hcap = htotal > D9MT_WIRE_HEAP_DATA_OFFSET
                         ? htotal - D9MT_WIRE_HEAP_DATA_OFFSET : 0;
-    if (hbase && hcap && !(hcap & (hcap - 1u)) &&
+    /* P1 blob layout (mtl_wire.h): a blob-extended file is hcap = upload
+     * capacity + D9MT_WIRE_HEAP_BLOB_CAPACITY, recognized by "hcap is NOT a
+     * power of two but hcap - BLOB_CAPACITY is" — legacy pow2 files stay
+     * all-upload. Header capacity = the UPLOAD capacity only; both sides
+     * derive the blob region from file size vs header capacity. */
+    uint64_t ucap = hcap;
+    if (hcap > D9MT_WIRE_HEAP_BLOB_CAPACITY && (hcap & (hcap - 1u)) &&
+        !((hcap - D9MT_WIRE_HEAP_BLOB_CAPACITY) &
+          (hcap - D9MT_WIRE_HEAP_BLOB_CAPACITY - 1u)))
+      ucap = hcap - D9MT_WIRE_HEAP_BLOB_CAPACITY;
+    if (hbase && ucap && !(ucap & (ucap - 1u)) &&
         !((uintptr_t)hbase & (uintptr_t)(page - 1))) {
       if (wire_create_map("heap", (size_t)htotal, hbase, wire_heap_path) == (void *)hbase) {
         struct d9mt_wire_heap *h = (struct d9mt_wire_heap *)hbase;
+        /* P1: PRE-FAULT the blob region (write every page + msync) BEFORE
+         * the server spawns below — its newBufferWithBytesNoCopy wrap wires
+         * pages at wrap time; pages faulted later are invisible to the GPU
+         * (the S1 sparse-file finding; the PoC's proven precondition). The
+         * upload region stays sparse: it is CPU-copied on both sides. */
+        if (ucap != hcap) {
+          uint8_t *blob = hbase + D9MT_WIRE_HEAP_DATA_OFFSET + ucap;
+          const size_t blob_bytes = (size_t)(hcap - ucap);
+          memset(blob, 0, blob_bytes);
+          msync(blob, blob_bytes, MS_SYNC);
+        }
         /* fresh O_TRUNC file: cursors already zero; header last */
-        h->capacity = hcap;
+        h->capacity = ucap;
         h->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
         h->magic = D9MT_WIRE_HEAP_MAGIC;
         wire_heap = h;

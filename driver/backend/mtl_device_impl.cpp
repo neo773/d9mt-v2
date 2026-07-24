@@ -160,6 +160,16 @@ namespace dxvk::backend {
      * (deferred) release — server-side destroy precedes any handle reuse. */
     if (wireId)
       wire::queueDestroy(wireId, handle.buf);
+    /* P1 blob backing: the pages belong to the shared heap's blob pool, not
+     * VirtualAlloc — return the slice (credit-law stamped inside) and keep
+     * every free path below away from the mapping. The deferred Metal-object
+     * release is unchanged and harmless: local GPU work never reads these
+     * after retirement, and server reuse is gated by the freelist serial. */
+    if (blobOffset != ~0ull) {
+      wire::blobRetire(blobOffset, blobReserved);
+      blobOffset = ~0ull;
+      mapPtr = nullptr; /* deferred path must not VirtualFree heap pages */
+    }
     if (residencyDevice) {
       /* Deferred destruction (mtl_residency.h invariant 3): the tracker
        * removes the set entry, releases the Metal buffer and frees the
@@ -181,18 +191,48 @@ namespace dxvk::backend {
     }
   }
 
+  /* P1 (VENUS_CONTRACT_DIFF.md): CPU-writable backings allocate from the
+   * shared heap's blob region — the slice's pages become the buffer on BOTH
+   * sides (the wine-side Metal buffer wraps them via bytesNoCopy exactly
+   * like a hostAlloc backing, and the server's heap wrap addresses them by
+   * offset), so Lock-written bytes are server-GPU-visible with zero copies
+   * and zero records. Pool miss / no wire -> hostAlloc (legacy upload path).
+   * Read-class (readback) backings stay hostAlloc: they are GPU-written
+   * locally and gain nothing from the blob. */
+  static bool blobBackBuffer(MtlCpuAccess access, uint64_t size,
+                             WMTBufferInfo& bufferInfo,
+                             uint64_t* blobOff, uint64_t* blobReserved) {
+    *blobOff = ~0ull;
+    *blobReserved = 0u;
+    if (access != MtlCpuAccess::Write || size == 0u)
+      return false;
+    void* ptr = nullptr;
+    if (!wire::blobAlloc(size, &ptr, blobOff, blobReserved))
+      return false;
+    /* fresh slices may carry a retired generation's bytes — D3D9 DISCARD
+     * contract wants undefined-but-ours; zero like hostAlloc does */
+    std::memset(ptr, 0, size_t(size));
+    bufferInfo.memory.set(ptr);
+    return true;
+  }
+
   Rc<MtlBuffer> MtlDeviceImpl::createBuffer(const MtlBufferCreateInfo& info) {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = info.size;
     bufferInfo.options = storageOptions(info.cpuAccess);
-    /* 32-bit PE rule: CPU-visible backing allocated in OUR space */
-    bufferInfo.memory.set(info.cpuAccess != MtlCpuAccess::None
-      ? hostAlloc(info.size)
-      : nullptr);
+    uint64_t blobOff = ~0ull, blobReserved = 0u;
+    if (!blobBackBuffer(info.cpuAccess, info.size, bufferInfo, &blobOff, &blobReserved)) {
+      /* 32-bit PE rule: CPU-visible backing allocated in OUR space */
+      bufferInfo.memory.set(info.cpuAccess != MtlCpuAccess::None
+        ? hostAlloc(info.size)
+        : nullptr);
+    }
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
 
     if (!handle) {
+      if (blobOff != ~0ull)
+        wire::blobRetire(blobOff, blobReserved);
       Logger::err("MtlDeviceImpl: createBuffer failed");
       return nullptr;
     }
@@ -209,6 +249,8 @@ namespace dxvk::backend {
     storage->mapPtr = bufferInfo.memory.get();
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
+    storage->blobOffset = blobOff;
+    storage->blobReserved = blobReserved;
     storage->residencyDevice = this;
     storage->wireEligible = info.size > 0u; /* v8: canonical birth */
     m_residency->allocCreated(handle);   // resident from creation to retirement
@@ -386,13 +428,23 @@ namespace dxvk::backend {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = impl->size;
     bufferInfo.options = storageOptions(impl->info.cpuAccess);
-    bufferInfo.memory.set(impl->info.cpuAccess != MtlCpuAccess::None
-      ? hostAlloc(impl->size)
-      : nullptr);
+    /* P1: DISCARD renames draw a FRESH blob slice from the pool (freelist
+     * gated on the server's completed serial — mtl_blob_pool.h). This IS the
+     * Venus rename model: a new region per generation, reuse only after
+     * completion covers the last reader. Fallback: hostAlloc + uploads. */
+    uint64_t blobOff = ~0ull, blobReserved = 0u;
+    if (!blobBackBuffer(impl->info.cpuAccess, impl->size, bufferInfo,
+                        &blobOff, &blobReserved)) {
+      bufferInfo.memory.set(impl->info.cpuAccess != MtlCpuAccess::None
+        ? hostAlloc(impl->size)
+        : nullptr);
+    }
 
     obj_handle_t handle = MTLDevice_newBuffer(m_device.handle(), &bufferInfo);
 
     if (!handle) {
+      if (blobOff != ~0ull)
+        wire::blobRetire(blobOff, blobReserved);
       Logger::err("MtlDeviceImpl: renameBuffer failed");
       return nullptr;
     }
@@ -403,6 +455,8 @@ namespace dxvk::backend {
     storage->mapPtr = bufferInfo.memory.get();
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
+    storage->blobOffset = blobOff;
+    storage->blobReserved = blobReserved;
     storage->residencyDevice = this;
     storage->wireEligible = impl->size > 0u; /* v8: canonical rename */
     m_residency->allocCreated(handle);   // renamed backing resident until it retires

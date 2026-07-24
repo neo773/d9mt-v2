@@ -198,14 +198,9 @@ namespace dxvk::backend {
       uint32_t      type   = 0u; /* index buffer: MtlIndexType */
       bool          dirty  = false; /* UBO: (re)bound since the last draw-time
                                      * content snapshot (S3 v13) */
-      /* V15 re-ship dedup: the exact range+content last shipped from this
-       * shadow. A rebind of the same slice with unchanged bytes (fnv64) is
-       * heap traffic the server already holds — skip it. Only updated when
-       * the emit actually landed (heapAlloc can drop on a full heap). */
-      uint64_t      lastShipWire = 0u;
-      uint64_t      lastShipOff  = 0u;
-      uint64_t      lastShipLen  = 0u;
-      uint64_t      lastShipSum  = 0u;
+      /* P1 DELETED: the V15 lastShip* re-ship dedup hashing — blob-backed
+       * storages skip the re-ship entirely (their pages ARE the server
+       * buffer), so the flood the dedup bounded no longer exists. */
     };
     BufShadow m_streamShadow[16];
     BufShadow m_uboShadow[2][8];

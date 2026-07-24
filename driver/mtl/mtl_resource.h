@@ -233,6 +233,16 @@ namespace dxvk {
     // this doesn't match the live session — a named id without a same-
     // session create record is structurally impossible.
     uint32_t        wireSession = 0u;
+    // P1 blob backing (VENUS_CONTRACT_DIFF.md): data-area-relative offset of
+    // this backing's slice in the shared heap's blob region (~0ull = private
+    // host backing). Set at creation by the canonical device paths; the
+    // create record ships it so the server binds {heap wrap, offset} and
+    // content NEVER rides the wire for this backing. blobReserved is the
+    // pool's rounded reservation (retire size); blobRetireStamp is the
+    // credit-law stamp taken when the backing enters the recycle pool.
+    uint64_t        blobOffset      = ~0ull;
+    uint64_t        blobReserved    = 0u;
+    uint64_t        blobRetireStamp = 0u;
   };
 
   class MtlDevice;

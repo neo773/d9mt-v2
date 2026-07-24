@@ -83,6 +83,31 @@ namespace dxvk::backend::wire {
   void timelineCommitDone();                       /* t7: synchronizeWsi returned (blit encoded + committed + presented) */
   void timelinePresentEnd();                       /* t8: presenter->present returned; may flush the window */
 
+  /* --- P1 blob substrate (VENUS_CONTRACT_DIFF.md P1; mtl_blob_pool.h) -----
+   * CPU-visible buffer backings are carved from the shared heap's blob
+   * region; the slice's pages are the buffer on both sides, so content for
+   * these backings never crosses the wire again. */
+
+  /* App or CS thread (createBuffer / renameBuffer). On success fills the
+   * slice's CPU pointer (into the shared mapping), its data-area-relative
+   * heap offset (the create record's heap_offset) and the pool reservation
+   * (pass back to blobRetire). false = pool unavailable/exhausted — caller
+   * falls back to a private host backing + the legacy upload path. */
+  bool blobAlloc(uint64_t size, void** mapPtr, uint64_t* heapOffset,
+                 uint64_t* reserved);
+
+  /* Any thread (~MtlAllocationImpl). Returns the slice to the freelist,
+   * stamped with the current in-flight frame marker — the credit law gates
+   * its reuse on the server's completed frame serial. */
+  void blobRetire(uint64_t heapOffset, uint64_t reserved);
+
+  /* Recycle-pool gate (mtl_device_impl.h): blobStamp() = the conservative
+   * last-referencing-frame stamp for a backing entering the recycle pool;
+   * blobReusable(stamp) = the server's completed serial covers it (or the
+   * wire is down and no server read can ever happen). */
+  uint64_t blobStamp();
+  bool blobReusable(uint64_t stamp);
+
   /* Any thread (D3D9Query::GetData path — MtlBackendQuery::getData in
    * mtl_context_transfer.cpp). Polls the shared occlusion result ring
    * (mtl_wire.h d9mt_wire_query_ring, HANDOFF-QUERIES.md) for the query

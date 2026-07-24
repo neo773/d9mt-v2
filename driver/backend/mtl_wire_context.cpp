@@ -24,6 +24,8 @@
 #include "mtl_device_impl.h"
 #include "mtl_wire_emit.h"
 
+#include "../mtl/mtl_blob_pool.h" /* P1 blob-slice allocator (shared w/ test_feed) */
+
 #include "../mtl/mtl_format.h"
 
 #include "../../bridge/winemetal.h"
@@ -46,6 +48,14 @@ namespace dxvk::backend {
     /* S3 shared heap: 256 MiB sparse file (RENDER_SERVER_SPEC layout #2).
      * The PE region is address space, the FILE stays sparse until written. */
     constexpr uint64_t WireHeapCapacity = 256ull << 20;
+
+    /* P1 blob region appended to the heap file (VENUS_CONTRACT_DIFF.md P1):
+     * CPU-visible buffer backings live HERE — the pages are the buffer on
+     * both sides, content never rides the wire for them. The unix attach
+     * pre-faults this region (non-sparse) before the server boots so the
+     * server's newBufferWithBytesNoCopy wrap is sound (the PoC's proven
+     * precondition; the S1 sparse-file finding stands for lazy faults). */
+    constexpr uint64_t WireBlobCapacity = D9MT_WIRE_HEAP_BLOB_CAPACITY;
 
     /* S3 v2 lazy re-upload stash: texture bytes waiting for heap space.
      * FLOW-CONTROL: frame credits bound the server's consumption lag to
@@ -139,6 +149,31 @@ namespace dxvk::backend {
 
     /* True once WireRing_attach has been issued (profiler stats source). */
     std::atomic<bool> g_wireAttached = { false };
+
+    /* --- P1 blob pool state (mtl_blob_pool.h; VENUS_CONTRACT_DIFF.md P1) ---
+     * The pool is shared between the app thread (Lock DISCARD renames /
+     * createBuffer) and the CS thread (retires) — one mutex, tiny critical
+     * sections. g_blobReady release-publishes the attach-time init.
+     *
+     * The two serial mirrors implement the credit law without extra
+     * unixcalls:
+     *  - g_markerMirror: the last present marker EMITTED (the frame being
+     *    recorded is g_markerMirror + 1 — the conservative stamp for a
+     *    retiring slice's last possible server reader);
+     *  - g_srvCompletedFrame: the freshest status frame_serial observed
+     *    (completion-gated publication — "pixels done"); sampled at the
+     *    per-present sites that already read WireRing_stats, so the gate is
+     *    at most one present stale, in the SAFE direction. The N=2 frame
+     *    credits (HANDOFF-FLOWCONTROL.md) bound the stamp/completed gap, so
+     *    the freelist drains within ~2-3 presents — the existing credit
+     *    mechanism IS the second half of the gate, not a new one. */
+    std::mutex g_blobMutex;
+    d9mt_blob_pool g_blobPool;
+    std::atomic<bool> g_blobReady = { false };
+    std::atomic<uint64_t> g_markerMirror = { 0u };
+    std::atomic<uint64_t> g_srvCompletedFrame = { 0u };
+    std::atomic<uint64_t> g_blobAllocs = { 0u };  /* PROF blob= */
+    std::atomic<uint64_t> g_blobFallbacks = { 0u }; /* pool miss -> host backing */
 
     /* S3 v4 / V19: dead-server latch. presentObserved (app thread) tracks
      * the server heartbeat (V19: watchdog-owned server-side, ticks while
@@ -471,13 +506,23 @@ namespace dxvk::backend {
       return false;
     }
 
-    /* S3: the shared heap region (content transport). Optional — a failed
-     * reserve degrades to a ring-only attach (uploads never emitted). */
-    const uint64_t heapTotal = D9MT_WIRE_HEAP_DATA_OFFSET + WireHeapCapacity;
+    /* S3: the shared heap region (content transport), P1: + the blob region
+     * (blob-backed CPU-visible buffers). Optional — a failed reserve retries
+     * WITHOUT the blob region (legacy layout), then degrades to ring-only. */
+    uint64_t heapTotal =
+      D9MT_WIRE_HEAP_DATA_OFFSET + WireHeapCapacity + WireBlobCapacity;
     g_wt.heapMem = static_cast<uint8_t*>(::VirtualAlloc(nullptr, SIZE_T(heapTotal),
       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!g_wt.heapMem) {
+      Logger::warn("MtlWireContext: blob-extended heap reserve failed, retrying legacy layout");
+      heapTotal = D9MT_WIRE_HEAP_DATA_OFFSET + WireHeapCapacity;
+      g_wt.heapMem = static_cast<uint8_t*>(::VirtualAlloc(nullptr, SIZE_T(heapTotal),
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    }
     if (!g_wt.heapMem)
       Logger::warn("MtlWireContext: heap region reserve failed, content uploads disabled");
+    const bool wantBlob =
+      heapTotal == D9MT_WIRE_HEAP_DATA_OFFSET + WireHeapCapacity + WireBlobCapacity;
 
     uint32_t heapOk = 0u;
     const uint32_t mode = WireRing_attach(g_wt.ringMem, total,
@@ -497,6 +542,14 @@ namespace dxvk::backend {
       g_wt.heap = reinterpret_cast<d9mt_wire_heap*>(g_wt.heapMem);
       g_wt.heapData = g_wt.heapMem + D9MT_WIRE_HEAP_DATA_OFFSET;
       g_wt.heapCap = WireHeapCapacity;
+      /* P1: the blob pool spans [upload capacity, end of file). The unix
+       * side recognized the enlarged file (h->capacity == WireHeapCapacity)
+       * and PRE-FAULTED the blob region before spawning the server. */
+      if (wantBlob && g_wt.heap->capacity == WireHeapCapacity) {
+        std::lock_guard<std::mutex> lock(g_blobMutex);
+        d9mt_blob_init(&g_blobPool, WireHeapCapacity, WireBlobCapacity);
+        g_blobReady.store(true, std::memory_order_release);
+      }
     } else if (g_wt.heapMem) {
       /* plain memory nobody consumes — release it, run ring-only */
       ::VirtualFree(g_wt.heapMem, 0, MEM_RELEASE);
@@ -880,13 +933,20 @@ namespace dxvk::backend {
     r->size = storage->size;
     r->usage = 0u;       /* informational; not tracked at slice level */
     r->cpu_access = 0u;
-    r->heap_offset = 0u; /* content rides upload_buffer records instead */
+    /* P1: blob-backed storage ships its heap placement instead of implying
+     * private backing — the server binds {heap wrap, offset}, no allocation,
+     * no copies (VENUS_CONTRACT_DIFF.md P1). 0 = legacy private backing. */
+    const bool blob = storage->blobOffset != ~0ull;
+    r->heap_offset = blob ? storage->blobOffset : 0u;
     endRecord();
     /* S3: initial content snapshot for host-visible backings — static VB/IB
      * bytes are Lock-written BEFORE the first bind (which is when this
      * create fires), so this catches most one-shot geometry. Private
-     * backings (mapPtr null) get content only through uploadBuffer taps. */
-    if (g_wt.heap && storage->mapPtr && storage->size)
+     * backings (mapPtr null) get content only through uploadBuffer taps.
+     * P1 DELETED for blob backings: the mapPtr pages ARE the server buffer —
+     * the snapshot's whole job (make Lock-written bytes server-visible) is
+     * done by the page aliasing itself. */
+    if (!blob && g_wt.heap && storage->mapPtr && storage->size)
       emitUploadBuffer(storage->wireId, storage->handle.buf, 0u,
                        storage->mapPtr, storage->size);
     return true;
@@ -1273,6 +1333,9 @@ namespace dxvk::backend {
         r->frame_serial = ++g_wt.presentSerial;
         r->backbuffer_wire_id = bbId;
         endRecord();
+        /* P1: marker mirror for the blob credit law — a slice retiring while
+         * frame N+1 records is stamped N+1 (its last possible server reader). */
+        g_markerMirror.store(g_wt.presentSerial, std::memory_order_release);
       }
       /* timeline t1: the present marker is on the wire (kicked). */
       wire::timelineMarkerNote(g_wt.presentSerial);
@@ -1718,18 +1781,17 @@ namespace dxvk::backend {
      * (re)bound since the last draw (the cube: one small range per frame).
      * Never blocks: heapAlloc drops on a full heap.
      *
-     * V15 (the GTA upload flood, ~836 upload records/frame): two cuts —
-     * 1. SKIP a range whose exact [wire,offset,len,fnv64] already shipped
-     *    from this shadow (titles rebind ranges without changing bytes);
-     * 2. MERGE contiguous/overlapping dirty ranges on the SAME storage into
-     *    ONE upload_buffer record per draw. */
+     * P1: blob-backed storages (the constant ring's steady state) SKIP the
+     * re-ship entirely — their pages are the server buffer, so the draw-time
+     * tap's whole job is already done by the page aliasing. The V15 dedupe
+     * hashing (lastShip*) that bounded the re-ship flood is DELETED with the
+     * flood itself; the residual non-blob path (private/fallback backings)
+     * keeps only the range MERGE below. */
     struct Cand {
       const MtlAllocation* key;   /* storage identity */
       uint64_t wireId, handle;
       const uint8_t* base;        /* mapPtr */
       uint64_t off, len;
-      BufShadow* shadows[16];
-      uint32_t nShadows;
     };
     Cand cands[16];
     uint32_t nCand = 0u;
@@ -1752,6 +1814,11 @@ namespace dxvk::backend {
         const Rc<MtlAllocation>& storage = slice.storage();
         if (storage == nullptr || storage->mapPtr == nullptr || !storage->wireId)
           continue;
+        /* P1 DELETED for blob backings: the v13 draw-time content re-ship —
+         * SetVertexShaderConstantF bytes land in blob pages the server draws
+         * from directly. */
+        if (storage->blobOffset != ~0ull)
+          continue;
         const uint64_t off = slice.offset();
         if (off >= storage->size)
           continue;
@@ -1769,13 +1836,7 @@ namespace dxvk::backend {
               len, " B re-ship (cap 256 KiB) slot=", slot));
           continue;
         }
-        /* V15 cut 1: this exact range+content already crossed the heap */
-        const uint64_t sum =
-            fnv64(static_cast<const uint8_t*>(storage->mapPtr) + off, size_t(len));
-        if (sh.lastShipWire == storage->wireId && sh.lastShipOff == off &&
-            sh.lastShipLen == len && sh.lastShipSum == sum)
-          continue;
-        /* V15 cut 2: coalesce into an existing candidate on the same storage
+        /* V15 merge: coalesce into an existing candidate on the same storage
          * when the ranges touch (covers both-stage binds — identical ranges —
          * and split float/int/bool blocks in one constant set) */
         Cand* c = nullptr;
@@ -1799,26 +1860,14 @@ namespace dxvk::backend {
           c->base = static_cast<const uint8_t*>(storage->mapPtr);
           c->off = off;
           c->len = len;
-          c->nShadows = 0u;
-        } else {
-          continue; /* table full (cannot happen: 16 shadows max) */
         }
-        if (c->nShadows < 16u)
-          c->shadows[c->nShadows++] = &sh;
-        /* stash the per-shadow slice identity for the post-emit dedup mark */
-        sh.lastShipWire = storage->wireId;
-        sh.lastShipOff = off;
-        sh.lastShipLen = len;
-        sh.lastShipSum = sum;
       }
     }
     for (uint32_t i = 0u; i < nCand; i++) {
       Cand& c = cands[i];
-      if (!emitUploadBuffer(c.wireId, c.handle, c.off, c.base + c.off, c.len)) {
-        /* full-heap drop: un-mark so the next draw retries the re-ship */
-        for (uint32_t s = 0u; s < c.nShadows; s++)
-          c.shadows[s]->lastShipWire = 0u;
-      }
+      /* full-heap drop is tolerable here: the shadow stays clean only until
+       * the next rebind marks it dirty again (residual path, cold). */
+      emitUploadBuffer(c.wireId, c.handle, c.off, c.base + c.off, c.len);
     }
   }
 
@@ -2377,8 +2426,15 @@ namespace dxvk::backend {
       const Rc<MtlAllocation>& fresh = buffer->storage();
       if (fresh != nullptr) {
         const bool wasNew = fresh->wireId == 0u;
-        ensureStorageCreated(fresh); /* emits the initial content snapshot */
-        if (!wasNew && g_wt.heap && fresh->mapPtr && fresh->size)
+        ensureStorageCreated(fresh); /* blob: ships {heap_offset}; legacy:
+                                      * emits the initial content snapshot */
+        /* P1 DELETED for blob backings: the DISCARD-time content re-ship
+         * (and its partial-bytes honesty flag) — a fresh blob slice is
+         * server-visible the instant the app's Lock writes land, and the
+         * rename already changed the backing source, so there is nothing to
+         * copy and no stale window. Legacy (non-blob) renames keep it. */
+        if (!wasNew && fresh->blobOffset == ~0ull &&
+            g_wt.heap && fresh->mapPtr && fresh->size)
           emitUploadBuffer(fresh->wireId, fresh->handle.buf, 0u,
                            fresh->mapPtr, fresh->size);
         emitShadowBinds(buffer.ptr());
@@ -2393,8 +2449,21 @@ namespace dxvk::backend {
     if (wired() && g_wt.heap && dst != nullptr && staging != nullptr && size) {
       const Rc<MtlAllocation>& storage = dst->storage();
       const void* bytes = staging->mapPtr(srcOff);
-      if (storage != nullptr && bytes && ensureStorageCreated(storage))
-        emitUploadBuffer(storage->wireId, storage->handle.buf, dstOff, bytes, size);
+      if (storage != nullptr && bytes && ensureStorageCreated(storage)) {
+        if (storage->blobOffset != ~0ull) {
+          /* P1 DELETED: the upload_buffer emission for blob-backed dsts.
+           * The dst pages are the server buffer; land the staging bytes at
+           * THIS stream position with a CPU copy (the exact position the
+           * old heap snapshot occupied) — server draws emitted after this
+           * record observe them via the page aliasing, zero records. The
+           * forwarded inner op re-writes the same bytes locally (benign). */
+          if (storage->mapPtr && dstOff + size <= storage->size)
+            std::memcpy(static_cast<uint8_t*>(storage->mapPtr) + dstOff,
+                        bytes, size_t(size));
+        } else {
+          emitUploadBuffer(storage->wireId, storage->handle.buf, dstOff, bytes, size);
+        }
+      }
     }
     m_inner->uploadBuffer(dst, dstOff, staging, srcOff, size);
   }
@@ -2417,6 +2486,13 @@ namespace dxvk::backend {
     if (!wired() || g_wt.heap == nullptr || storage == nullptr || length == 0u)
       return;
     if (storage->mapPtr == nullptr || storage->size == 0u || offset >= storage->size)
+      return;
+    /* P1 DELETED: the V16 dirty-range re-ship for blob-backed storages. The
+     * Lock-written pages ARE the server buffer — the app's writes are GPU-
+     * visible the instant they land (Venus: flush is a nop, coherency is the
+     * substrate's job). ensureStorageCreated still runs lazily at first
+     * bind; nothing to ship here. */
+    if (storage->blobOffset != ~0ull)
       return;
     const uint64_t len = std::min<uint64_t>(length, storage->size - offset);
     const bool wasNew = storage->wireId == 0u;
@@ -2525,6 +2601,65 @@ namespace dxvk::backend {
 /* --- S2 cross-file wire surface (mtl_wire_emit.h) --------------------------- */
 namespace dxvk::backend::wire {
 
+  /* --- P1 blob substrate (VENUS_CONTRACT_DIFF.md P1; mtl_blob_pool.h) ------ */
+
+  bool blobAlloc(uint64_t size, void** mapPtr, uint64_t* heapOffset,
+                 uint64_t* reserved) {
+    if (!g_blobReady.load(std::memory_order_acquire) || size == 0u ||
+        g_wireDown.load(std::memory_order_acquire))
+      return false;
+    /* The credit-law gate: freelist slices reuse only once the server's
+     * completed serial covers their retire stamp. A dead/downed wire means
+     * no server reader can ever exist — everything is reusable. */
+    const uint64_t completed =
+      g_serverDead.load(std::memory_order_acquire)
+        ? UINT64_MAX
+        : g_srvCompletedFrame.load(std::memory_order_acquire);
+    uint64_t off;
+    { std::lock_guard<std::mutex> lock(g_blobMutex);
+      off = d9mt_blob_alloc(&g_blobPool, size, completed);
+    }
+    if (off == UINT64_MAX) {
+      g_blobFallbacks.fetch_add(1u, std::memory_order_relaxed);
+      return false;
+    }
+    *mapPtr = g_wt.heapData + off; /* heapData is attach-time write-once */
+    *heapOffset = off;
+    *reserved = d9mt_blob_round(size);
+    g_blobAllocs.fetch_add(1u, std::memory_order_relaxed);
+    return true;
+  }
+
+  void blobRetire(uint64_t heapOffset, uint64_t reserved) {
+    if (!g_blobReady.load(std::memory_order_acquire))
+      return;
+    /* Conservative stamp: the frame being recorded at retire time (marker+1)
+     * is the last frame whose records can reference this slice — retire runs
+     * at/after the last emitted reference by Rc discipline. Wire down = no
+     * future reader: stamp 0, immediately reusable. */
+    const uint64_t stamp =
+      g_wireDown.load(std::memory_order_acquire) ||
+      g_serverDead.load(std::memory_order_acquire)
+        ? 0u
+        : g_markerMirror.load(std::memory_order_acquire) + 1u;
+    std::lock_guard<std::mutex> lock(g_blobMutex);
+    d9mt_blob_retire(&g_blobPool, heapOffset, reserved, stamp);
+  }
+
+  uint64_t blobStamp() {
+    if (g_wireDown.load(std::memory_order_acquire) ||
+        g_serverDead.load(std::memory_order_acquire))
+      return 0u;
+    return g_markerMirror.load(std::memory_order_acquire) + 1u;
+  }
+
+  bool blobReusable(uint64_t stamp) {
+    if (stamp == 0u || g_wireDown.load(std::memory_order_acquire) ||
+        g_serverDead.load(std::memory_order_acquire))
+      return true;
+    return g_srvCompletedFrame.load(std::memory_order_acquire) >= stamp;
+  }
+
   void queueDestroy(uint64_t wireId, uint64_t clientHandle) {
     std::lock_guard<std::mutex> lock(g_destroyMutex);
     if (g_pendingDestroys.size() >= kMaxPendingDestroys) {
@@ -2608,6 +2743,10 @@ namespace dxvk::backend::wire {
      * counts as "kept pace" for this present. */
     if (s.server_frame_serial + 1u >= local)
       g_srvPace.fetch_add(1u, std::memory_order_relaxed);
+    /* P1: per-present completed mirror for the blob credit law (app thread —
+     * the freelist gate reads it at the next rename/alloc). */
+    if (s.server_frame_serial != 0u)
+      g_srvCompletedFrame.store(s.server_frame_serial, std::memory_order_release);
 
     /* S3 v4 / V19 dead-server latch: the heartbeat ticks ~100 Hz while the
      * server PROCESS lives (V19: watchdog-owned, workload-independent).
@@ -2916,6 +3055,8 @@ namespace dxvk::backend::wire {
       const uint64_t target = g_wt.presentSerial + 1u - credits;
       /* zero-timeout probe: returns the current serial without parking */
       uint64_t lastFs = WireRing_wait(WMTWireWaitFrameSerial, 0u, target, 0u);
+      if (lastFs != 0u) /* P1: completed mirror for the blob credit law */
+        g_srvCompletedFrame.store(lastFs, std::memory_order_release);
       if (lastFs != 0u && lastFs < target) { /* 0 = boot: never gate */
         const int64_t t0 = monotonicMs();
         int64_t lastProgressMs = t0;
@@ -2923,6 +3064,8 @@ namespace dxvk::backend::wire {
         for (;;) {
           const uint64_t fs =
             WireRing_wait(WMTWireWaitFrameSerial, kCreditSliceUs, target, 0u);
+          if (fs != 0u) /* P1: completed mirror */
+            g_srvCompletedFrame.store(fs, std::memory_order_release);
           if (fs == 0u || fs >= target)
             break; /* credit granted */
           if (g_serverDead.load(std::memory_order_acquire))
@@ -3158,7 +3301,12 @@ namespace dxvk::backend::prof {
       " qWire=", g_queryWire.load(std::memory_order_relaxed),
       " qEvict=", g_queryEvicted.load(std::memory_order_relaxed),
       " qSess=", g_querySessLoss.load(std::memory_order_relaxed),
-      " rbStale=", g_readbackStale.load(std::memory_order_relaxed));
+      " rbStale=", g_readbackStale.load(std::memory_order_relaxed),
+      /* P1 blob substrate: blob= cumulative blob-backed allocations;
+       * blobFb= pool misses that fell back to host backing + uploads (must
+       * stay ~0 once the working set settles — growth = region exhausted). */
+      " blob=", g_blobAllocs.load(std::memory_order_relaxed),
+      " blobFb=", g_blobFallbacks.load(std::memory_order_relaxed));
     prev = s;
   }
 
