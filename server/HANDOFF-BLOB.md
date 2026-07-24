@@ -135,6 +135,68 @@ GPU-private buffers, and pool-miss fallbacks (`blobFb=` PROF counter).
   wrap-race 20/20, FLOW-CONTROL storm/park/overload-pacing, queries,
   present-timeline, watchdog, wedge, idle-liveness: all PASS UNCHANGED.
 
+## POST-PORT RESIDUALS (live-run findings, FIXED on top of a0e24c3)
+
+The first street run (log: /private/tmp/gta4-d9mt-launch.log) proved the blob
+path (textures instant, 0 upload flood while the pool held) and exposed the
+sizing/reuse residuals. Counters are CUMULATIVE: `blob=` plateaued at 6,837
+at scene load and never grew again while `blobFb=` climbed thousands per
+window — the pool was PERMANENTLY exhausted and all dynamic-buffer traffic
+fell back to the legacy staged path (stg=1.8M/window, useFlush=1.2M pass
+closes, srvGpu 910 ms).
+
+Root causes, all in the pool, all fixed + soak-gated:
+1. **Region too small**: the street load burst is ~6.8k live slices
+   (~107-134 MiB at 16 KiB granularity) — exactly AT the old 128 MiB cap.
+   Now 512 MiB blob + 128 MiB upload (rebalance: buffer content left the
+   upload ring by design; budget comment at `D9MT_WIRE_HEAP_BLOB_CAPACITY`
+   and `WireHeapCapacity`). Total PE reserve 640 MiB + 16 KiB; reserve
+   failure still degrades to the legacy pow2 layout, then ring-only.
+2. **Freelist cap leaked the region**: mass scene-transition retires
+   (6.8k at once) overflowed the 1024-entry freelist; overflow entries were
+   DROPPED = region bytes lost for the session. Cap now 8192
+   (`D9MT_BLOB_MAX_FREE`), and `blobFlDrop=` in PROF is the never-fire
+   tripwire.
+3. **Exact-size-only reuse stranded free bytes**: after a scene transition
+   the next scene's sizes stop matching retired sizes — every alloc missed
+   despite free bytes. Now: exact-size pass, then bump, then SPLIT-FIT of
+   the smallest covered larger entry, then (pressure path, once) a
+   covered-only coalesce + bump-frontier reclaim and one retry.
+   Coalescing must NEVER happen at retire time: a fresh retire is uncovered
+   and merging drags old bytes behind max-serial forever (the soak
+   reproduced it: a rolling never-covered mega-block burned bump to the cap
+   by frame 500).
+4. **Mid-frame mirror staleness**: `blobAlloc` misses now refresh
+   `g_srvCompletedFrame` once via `WireRing_stats` (unixcall on the MISS
+   path only) and retry before falling back; the first 8 fallbacks log the
+   requested size + pool state (`blob pool MISS #n size=...`).
+
+Gate: test_feed **BLOB GATE 0b** (production-shaped soak) — 1000 frames at
+3x the measured street rate, completion throttled 3 frames behind, two 6.8k
+scene bursts with a size shift (16K->32K), per-16KiB-slot shadow asserting
+zero misses, zero freelist drops, zero premature/aliased grants. It FAILS on
+every one of the four bugs above individually.
+
+### qWire=0 (the "dead bracket emission") — NOT a transport break
+Forensics: `dbbe412..a0e24c3` did not touch beginQuery/endQuery/createGpuQuery
+(byte-identical), and the live log shows `qStub=0 qWire=0 qEvict=0 qSess=0`
+across ALL 38 windows — every occlusion endQuery increments qWire OR qStub,
+so zero of both proves the GAME issued zero occlusion brackets this session
+(CreateQuery cannot fail: QuerySupported returns D3D_OK for OCCLUSION and the
+ctor is a plain new). The game withheld its occlusion system under the
+2-3 fps fallback-flood collapse; expect qWire to return at the game's rate
+once blobFb=0 restores frame times. Liveness is now named:
+"first occlusion bracket emitted (op 43)" logs once at emission, and the
+5 server-execution query gates stay green (begun=5 published=5).
+
+### noRt=2,724/window + dsUnres=5 (street artifacts) — same root, documented
+Both appeared only in the fully-collapsed windows. The V17 reason log names
+dsUnres as "still building (async create; late-resolves at draw)" — the
+create worker starved behind the 1.8M staged-upload flood; noRt is the same
+starvation on color-RT creates (draws skipped while the RT resource is
+pending). No separate mechanism found; re-measure after blobFb=0 and only
+then chase whatever residue remains (counters stay in srv-stats).
+
 ## Expected GTA signature (next real-game run)
 
 - `upl=` per PROF window collapses ~100x (only texture + residual buffer

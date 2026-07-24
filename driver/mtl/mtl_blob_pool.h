@@ -43,11 +43,15 @@ extern "C" {
  * one granularity serves the client wrap, the server wrap and the pool. */
 #define D9MT_BLOB_ALIGN 16384ull
 
-/* Retired slices awaiting their completion serial. 1024 x 24 B; DISCARD
- * churn is bounded by the frame credits (~a few generations per logical
- * buffer), so overflow means a leak-class bug — count it, drop the entry
- * (the region is lost for the session, never corrupted). */
-#define D9MT_BLOB_MAX_FREE 1024u
+/* Retired slices awaiting their completion serial. 8192 x 24 B (~192 KiB).
+ * Sized for the measured worst case, which is NOT steady-state DISCARD churn
+ * but the scene-load burst: a street scene allocates ~6.8k one-shot
+ * staging-class slices in one window and retires them together — a smaller
+ * cap silently DROPPED the overflow and leaked the region for the session
+ * (the exact exhaustion signature: blob= plateaus, blobFb= climbs forever).
+ * Overflow is still counted and dropped (never corrupted), but at this size
+ * it means a leak-class bug, not a load burst. */
+#define D9MT_BLOB_MAX_FREE 8192u
 
 struct d9mt_blob_free {
   uint64_t off;
@@ -84,32 +88,74 @@ static inline void d9mt_blob_init(struct d9mt_blob_pool* p, uint64_t base,
  * GPU-completed frame serial (the status field); a freelist entry is
  * eligible ONLY when completed_serial >= its retire stamp — THE gate the
  * premature-reuse test locks in. Returns the data-area-relative offset or
- * UINT64_MAX. Exact-size reuse (the D3D9 rename shape: a logical buffer's
- * generations all share one size) keeps the scan trivial. */
+ * UINT64_MAX.
+ *
+ * Reuse policy, two passes over the freelist:
+ *  1. exact size (the D3D9 rename shape: a logical buffer's generations all
+ *     share one size) — the steady-state hit, O(n) scan, no fragmentation;
+ *  2. SPLIT-FIT: the smallest covered entry with size > need gives up its
+ *     front `need` bytes and keeps the remainder (same retire serial —
+ *     conservative and correct). Without this, scene transitions strand the
+ *     region: retired sizes stop matching the next scene's request sizes and
+ *     every alloc after bump exhaustion misses despite free bytes (measured:
+ *     the fallback-flood signature blobFb= climbing while blob= is flat). */
+static inline int d9mt_blob_coalesce_covered(struct d9mt_blob_pool* p,
+                                             uint64_t completed_serial);
+
 static inline uint64_t d9mt_blob_alloc(struct d9mt_blob_pool* p, uint64_t size,
                                        uint64_t completed_serial) {
   const uint64_t need = d9mt_blob_round(size);
   if (need == 0 || need > p->capacity)
     return UINT64_MAX;
-  for (uint32_t i = 0; i < p->nfree; i++) {
-    if (p->freelist[i].size == need && p->freelist[i].serial <= completed_serial) {
-      const uint64_t off = p->freelist[i].off;
-      p->freelist[i] = p->freelist[--p->nfree]; /* swap-remove */
+  for (uint32_t attempt = 0; attempt < 2u; attempt++) {
+    for (uint32_t i = 0; i < p->nfree; i++) {
+      if (p->freelist[i].size == need && p->freelist[i].serial <= completed_serial) {
+        const uint64_t off = p->freelist[i].off;
+        p->freelist[i] = p->freelist[--p->nfree]; /* swap-remove */
+        return off;
+      }
+    }
+    if (p->bump + need <= p->capacity) {
+      const uint64_t off = p->base + p->bump;
+      p->bump += need;
       return off;
     }
+    /* bump exhausted: split the smallest covered larger entry */
+    {
+      uint32_t best = UINT32_MAX;
+      for (uint32_t i = 0; i < p->nfree; i++) {
+        if (p->freelist[i].size > need && p->freelist[i].serial <= completed_serial &&
+            (best == UINT32_MAX || p->freelist[i].size < p->freelist[best].size))
+          best = i;
+      }
+      if (best != UINT32_MAX) {
+        const uint64_t off = p->freelist[best].off;
+        p->freelist[best].off += need;
+        p->freelist[best].size -= need;
+        return off;
+      }
+    }
+    /* last resort, once: defragment the covered population and retry */
+    if (attempt != 0 || !d9mt_blob_coalesce_covered(p, completed_serial))
+      break;
   }
-  if (p->bump + need > p->capacity) {
-    p->drops++;
-    return UINT64_MAX; /* caller falls back to private backing + uploads */
-  }
-  const uint64_t off = p->base + p->bump;
-  p->bump += need;
-  return off;
+  p->drops++;
+  return UINT64_MAX; /* caller falls back to private backing + uploads */
 }
 
 /* Retire a slice. `serial` = the last frame marker that may reference it
  * (conservative: the marker of the frame being recorded at retire time);
- * 0 = provably never referenced (wire never up) -> immediately reusable. */
+ * 0 = provably never referenced (wire never up) -> immediately reusable.
+ *
+ * NO merging happens here: a fresh retire is (almost) always UNCOVERED, and
+ * merging it into an older entry would drag that entry's bytes back behind
+ * the max serial forever (measured in the soak gate: a rolling never-covered
+ * mega-block that starves every reuse and burns the bump cursor to the cap).
+ * Coalescing runs at ALLOC time among COVERED entries only
+ * (d9mt_blob_coalesce_covered). A top-of-bump block also must NOT return to
+ * the bump cursor here — bump allocs are ungated and the serial may be
+ * uncovered (the PoC's premature-reuse class); the covered-coalesce pass
+ * reclaims the frontier safely instead. */
 static inline void d9mt_blob_retire(struct d9mt_blob_pool* p, uint64_t off,
                                     uint64_t size, uint64_t serial) {
   const uint64_t need = d9mt_blob_round(size);
@@ -123,6 +169,47 @@ static inline void d9mt_blob_retire(struct d9mt_blob_pool* p, uint64_t off,
   p->freelist[p->nfree].size = need;
   p->freelist[p->nfree].serial = serial;
   p->nfree++;
+}
+
+/* Pressure-path defragmentation: merge adjacent COVERED entries (all serials
+ * <= completed, so the merged serial stays covered — never delays reuse) and
+ * return covered blocks touching the bump frontier straight to the cursor
+ * (safe: covered = provably reader-free). O(n^2) worst case, called ONLY
+ * when exact/bump/split all missed — self-limiting (it collapses nfree). */
+static inline int d9mt_blob_coalesce_covered(struct d9mt_blob_pool* p,
+                                             uint64_t completed_serial) {
+  int merged_any = 0;
+  uint32_t i = 0;
+  while (i < p->nfree) {
+    if (p->freelist[i].serial > completed_serial) {
+      i++;
+      continue;
+    }
+    int merged = 0;
+    for (uint32_t j = 0; j < p->nfree; j++) {
+      if (j == i || p->freelist[j].serial > completed_serial)
+        continue;
+      if (p->freelist[i].off + p->freelist[i].size == p->freelist[j].off) {
+        p->freelist[i].size += p->freelist[j].size;
+        if (p->freelist[j].serial > p->freelist[i].serial)
+          p->freelist[i].serial = p->freelist[j].serial;
+        p->freelist[j] = p->freelist[--p->nfree];
+        merged = merged_any = 1;
+        break;
+      }
+    }
+    if (!merged) {
+      /* covered block ending at the bump frontier: give the bytes back */
+      if (p->freelist[i].off + p->freelist[i].size == p->base + p->bump) {
+        p->bump -= p->freelist[i].size;
+        p->freelist[i] = p->freelist[--p->nfree];
+        merged_any = 1;
+        continue; /* re-examine the swapped-in entry at index i */
+      }
+      i++;
+    }
+  }
+  return merged_any;
 }
 
 #ifdef __cplusplus

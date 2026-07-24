@@ -3148,6 +3148,100 @@ main(int argc, char **argv) {
              "completed<retire, granted at completed>=retire\n");
     }
 
+    /* --- P1 BLOB GATE 0b: production-shaped SOAK (the street signature that
+     * exhausted the 128 MiB region: blob= plateaued, blobFb= climbed).
+     * Model, at 3x the measured street rate, 1000 frames, completion
+     * THROTTLED 3 frames behind allocation:
+     *   - scene-load burst (f=100): 6800 slices that stay LIVE (the street
+     *     working set);
+     *   - scene TRANSITION (f=500): the whole burst retires AT ONCE (floods
+     *     the freelist — the old 1024 cap dropped 5.7k entries = leaked the
+     *     region) and re-allocates with DIFFERENT sizes (the old exact-size-
+     *     only reuse stranded every retired byte);
+     *   - steady churn: 81 allocs/frame (3x street ~27), held 2 frames.
+     * Asserts: zero pool drops (blobFb==0 equivalent), zero freelist drops
+     * (no leak), and NO premature reuse (every granted slot is FREE or
+     * cooling with serial <= completed) — checked per 16 KiB slot. --- */
+    {
+      enum { SOAK_SLOTS = 32768 };            /* 512 MiB / 16 KiB */
+      static struct d9mt_blob_pool spool;     /* ~192 KiB, off the stack */
+      static uint8_t  slotLive[SOAK_SLOTS];   /* 0=free 1=live 2=cooling */
+      static uint64_t slotSerial[SOAK_SLOTS];
+      static uint64_t burstOff[6800];
+      static uint64_t churnOff[2][81], churnSz[2][81];
+      const uint64_t soakBase = 128ull << 20;
+      const uint64_t soakCap  = 512ull << 20;
+      d9mt_blob_init(&spool, soakBase, soakCap);
+      memset(slotLive, 0, sizeof(slotLive));
+      uint64_t burstSz = 16384u; /* first scene: 16 KiB slices */
+      int burstLive = 0;
+      for (uint64_t f = 1; f <= 1000; f++) {
+        const uint64_t completed = f > 3 ? f - 3 : 0; /* throttled consumer */
+        /* helper-free alloc+assert (C: inline the checks) */
+        #define SOAK_ALLOC(szv, outoff) do {                                   \
+          uint64_t _off = d9mt_blob_alloc(&spool, (szv), completed);           \
+          if (_off == UINT64_MAX)                                              \
+            FAIL("blob soak: pool MISS at frame %llu (drops=%llu flDrops=%llu" \
+                 " bump=%llu nfree=%u) — the fallback flood would return",     \
+                 (unsigned long long)f, (unsigned long long)spool.drops,       \
+                 (unsigned long long)spool.freelist_drops,                     \
+                 (unsigned long long)spool.bump, spool.nfree);                 \
+          uint64_t _s0 = (_off - soakBase) / D9MT_BLOB_ALIGN;                  \
+          uint64_t _sn = d9mt_blob_round(szv) / D9MT_BLOB_ALIGN;               \
+          for (uint64_t _s = _s0; _s < _s0 + _sn; _s++) {                      \
+            if (slotLive[_s] == 1 ||                                           \
+                (slotLive[_s] == 2 && slotSerial[_s] > completed))             \
+              FAIL("blob soak: PREMATURE/ALIASED grant frame %llu slot %llu "  \
+                   "(state=%u serial=%llu completed=%llu)",                    \
+                   (unsigned long long)f, (unsigned long long)_s,              \
+                   slotLive[_s], (unsigned long long)slotSerial[_s],           \
+                   (unsigned long long)completed);                             \
+            slotLive[_s] = 1;                                                  \
+          }                                                                    \
+          (outoff) = _off;                                                     \
+        } while (0)
+        #define SOAK_RETIRE(offv, szv) do {                                    \
+          d9mt_blob_retire(&spool, (offv), (szv), f + 1);                      \
+          uint64_t _s0 = ((offv) - soakBase) / D9MT_BLOB_ALIGN;                \
+          uint64_t _sn = d9mt_blob_round(szv) / D9MT_BLOB_ALIGN;               \
+          for (uint64_t _s = _s0; _s < _s0 + _sn; _s++) {                      \
+            slotLive[_s] = 2;                                                  \
+            slotSerial[_s] = f + 1;                                            \
+          }                                                                    \
+        } while (0)
+        if (f == 100 || f == 500) {
+          if (burstLive) { /* scene transition: mass retire, then new sizes */
+            for (int i = 0; i < 6800; i++)
+              SOAK_RETIRE(burstOff[i], burstSz);
+            burstSz = 32768u; /* the next scene's slices are a DIFFERENT size */
+          }
+          for (int i = 0; i < 6800; i++)
+            SOAK_ALLOC(burstSz, burstOff[i]);
+          burstLive = 1;
+        }
+        /* steady churn: retire the batch held 2 frames, allocate this one */
+        const int slotIdx = (int)(f & 1u);
+        if (f > 2) {
+          for (int i = 0; i < 81; i++)
+            SOAK_RETIRE(churnOff[slotIdx][i], churnSz[slotIdx][i]);
+        }
+        for (int i = 0; i < 81; i++) {
+          const uint64_t sz = i < 60 ? 16384u : (i < 75 ? 65536u : 262144u);
+          churnSz[slotIdx][i] = sz;
+          SOAK_ALLOC(sz, churnOff[slotIdx][i]);
+        }
+        #undef SOAK_ALLOC
+        #undef SOAK_RETIRE
+      }
+      if (spool.drops != 0 || spool.freelist_drops != 0)
+        FAIL("blob soak: drops=%llu flDrops=%llu after clean run",
+             (unsigned long long)spool.drops,
+             (unsigned long long)spool.freelist_drops);
+      printf("[test_feed] blob soak: 1000 frames @3x street rate + 2 scene "
+             "bursts (6800 slices, size shift 16K->32K), throttled "
+             "completion — 0 misses, 0 freelist drops, 0 premature grants\n");
+    }
+
     /* --- P1 BLOB GATE A: the PoC scenario through the REAL server
      * (poc_blobmodel ported onto the wire): blob-backed VB + CB created
      * with {heap_offset,size}, per-frame slices written CLIENT-SIDE into

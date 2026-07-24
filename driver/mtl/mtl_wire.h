@@ -747,8 +747,17 @@ D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_render_target_by_id) == 56);
 
 /* Blob region size the client requests at attach (the unix side recognizes
  * the enlarged file: upload capacity = total - this when the remainder is a
- * power of two and the total is not — legacy 256 MiB files stay legacy). */
-#define D9MT_WIRE_HEAP_BLOB_CAPACITY (128ull << 20)
+ * power of two and the total is not — legacy pow2 files stay legacy).
+ *
+ * BUDGET (measured, GTA IV street, PROF window = 256 frames): the scene-load
+ * burst allocates ~6.8k live slices ~= 107-134 MiB reserved at the 16 KiB
+ * granularity, on top of steady-state churn of ~30-100 slices/frame held for
+ * credits(2)+1 presents before the freelist gate covers them, plus the
+ * fragmentation floor of split-fit reuse. 128 MiB sat exactly AT the burst
+ * peak and every alloc after it missed (blob= plateaued at 6837, blobFb=
+ * climbed thousands/window — the fallback flood). 512 MiB = ~3.8x the
+ * measured peak; misses (blobFb=) must be ~0 in steady state. */
+#define D9MT_WIRE_HEAP_BLOB_CAPACITY (512ull << 20)
 
 struct d9mt_wire_heap {
   /* line 0: immutable after attach */

@@ -45,9 +45,17 @@ namespace dxvk::backend {
      * 4 MiB ring filled during GTA IV boot and tripped the watchdog. */
     constexpr uint64_t WireRingCapacity = 16ull << 20;
 
-    /* S3 shared heap: 256 MiB sparse file (RENDER_SERVER_SPEC layout #2).
-     * The PE region is address space, the FILE stays sparse until written. */
-    constexpr uint64_t WireHeapCapacity = 256ull << 20;
+    /* S3 shared heap UPLOAD region (RENDER_SERVER_SPEC layout #2). The PE
+     * region is address space, the FILE stays sparse until written.
+     * P1 rebalance: blob backing moved the whole CPU-visible buffer class
+     * off this ring (~15x fewer upload bytes by design — only texture
+     * content and cold non-blob residue remain), so the upload ring shrinks
+     * 256 -> 128 MiB and the reclaimed address space goes to the blob region
+     * (a 32-bit PE game must still reserve upload+blob contiguously; total
+     * is 128 MiB + 512 MiB + 16 KiB header). Must stay a power of two (ring
+     * wrap masking + the unix side's layout recognition). heapDrop=/texDrop=
+     * are the tripwires if texture streaming ever outgrows this. */
+    constexpr uint64_t WireHeapCapacity = 128ull << 20;
 
     /* P1 blob region appended to the heap file (VENUS_CONTRACT_DIFF.md P1):
      * CPU-visible buffer backings live HERE — the pages are the buffer on
@@ -2530,6 +2538,11 @@ namespace dxvk::backend {
           endRecord();
           q->wireQueryId = id;
           q->wireSession = g_wt.session;
+          /* Emission liveness, named once: qWire==0 in a whole run means the
+           * GAME issued no occlusion brackets (both this line absent AND
+           * qStub==0 prove it) — not a transport break. */
+          if (id == 1u)
+            Logger::info("MtlWireContext: first occlusion bracket emitted (op 43)");
         }
       }
       return;
@@ -2611,7 +2624,7 @@ namespace dxvk::backend::wire {
     /* The credit-law gate: freelist slices reuse only once the server's
      * completed serial covers their retire stamp. A dead/downed wire means
      * no server reader can ever exist — everything is reusable. */
-    const uint64_t completed =
+    uint64_t completed =
       g_serverDead.load(std::memory_order_acquire)
         ? UINT64_MAX
         : g_srvCompletedFrame.load(std::memory_order_acquire);
@@ -2619,8 +2632,37 @@ namespace dxvk::backend::wire {
     { std::lock_guard<std::mutex> lock(g_blobMutex);
       off = d9mt_blob_alloc(&g_blobPool, size, completed);
     }
+    if (off == UINT64_MAX && completed != UINT64_MAX) {
+      /* Opportunistic retire sweep BEFORE falling back: the per-present
+       * mirror can be a present stale while allocation is per-draw — a
+       * mid-frame burst would otherwise starve into the legacy upload path
+       * even though the server has already completed the covering frame.
+       * One stats read (only on the miss path, ~0 once the region is sized
+       * right) refreshes the mirror, then the freelist is retried. */
+      WMTWireStats s = { };
+      WireRing_stats(&s);
+      if (s.server_frame_serial > completed) {
+        completed = s.server_frame_serial;
+        g_srvCompletedFrame.store(completed, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(g_blobMutex);
+        off = d9mt_blob_alloc(&g_blobPool, size, completed);
+      }
+    }
     if (off == UINT64_MAX) {
-      g_blobFallbacks.fetch_add(1u, std::memory_order_relaxed);
+      const uint64_t n =
+        g_blobFallbacks.fetch_add(1u, std::memory_order_relaxed) + 1u;
+      if (n <= 8u) {
+        uint64_t bump = 0u, nfree = 0u, fldrops = 0u;
+        { std::lock_guard<std::mutex> lock(g_blobMutex);
+          bump = g_blobPool.bump;
+          nfree = g_blobPool.nfree;
+          fldrops = g_blobPool.freelist_drops;
+        }
+        Logger::warn(str::format("MtlWireContext: blob pool MISS #", n,
+          " size=", size, " (bump=", bump, "/", WireBlobCapacity,
+          " nfree=", nfree, " flDrops=", fldrops, " completed=", completed,
+          ") — falling back to legacy upload path"));
+      }
       return false;
     }
     *mapPtr = g_wt.heapData + off; /* heapData is attach-time write-once */
@@ -3304,9 +3346,15 @@ namespace dxvk::backend::prof {
       " rbStale=", g_readbackStale.load(std::memory_order_relaxed),
       /* P1 blob substrate: blob= cumulative blob-backed allocations;
        * blobFb= pool misses that fell back to host backing + uploads (must
-       * stay ~0 once the working set settles — growth = region exhausted). */
+       * stay ~0 once the working set settles — growth = region exhausted);
+       * blobFlDrop= retires lost to a full freelist (region leaked for the
+       * session — the leak-class tripwire, must stay 0). */
       " blob=", g_blobAllocs.load(std::memory_order_relaxed),
-      " blobFb=", g_blobFallbacks.load(std::memory_order_relaxed));
+      " blobFb=", g_blobFallbacks.load(std::memory_order_relaxed),
+      " blobFlDrop=", [] {
+        std::lock_guard<std::mutex> lock(g_blobMutex);
+        return g_blobPool.freelist_drops;
+      }());
     prev = s;
   }
 
