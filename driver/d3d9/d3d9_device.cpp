@@ -5620,8 +5620,28 @@ namespace dxvk {
       return D3D_OK;
 
     // Nothing else to do for directly mapped buffers. Those were already written.
-    if (pResource->GetMapMode() != D3D9_COMMON_BUFFER_MAP_MODE_BUFFER)
+    if (pResource->GetMapMode() != D3D9_COMMON_BUFFER_MAP_MODE_BUFFER) {
+      // V16: "already written" holds for LOCAL rendering only (UMA map
+      // writes are GPU-visible). A remoting backend must still SEE the
+      // bytes: hand the Lock-conjoined dirty range to the context seam
+      // (silent no-op locally). DEFAULT pool only — SYSTEMMEM/MANAGED
+      // upload at draw time through the staging paths. Capturing the mapped
+      // ALLOCATION (not the buffer) pins the exact DISCARD generation the
+      // app wrote, immune to later renames.
+      if (pResource->Desc()->Pool == D3DPOOL_DEFAULT
+       && !pResource->DirtyRange().IsDegenerate()) {
+        D3D9Range& range = pResource->DirtyRange();
+        EmitCs([
+          cStorage = pResource->GetMappedSlice(),
+          cOffset  = MtlDeviceSize(range.min),
+          cLength  = MtlDeviceSize(range.max - range.min)
+        ] (MtlContext* ctx) {
+          ctx->noteBufferWrite(cStorage, cOffset, cLength);
+        });
+        range.Clear();
+      }
       return D3D_OK;
+    }
 
     // There is no part of the buffer that hasn't been uploaded yet.
     // This shouldn't happen.

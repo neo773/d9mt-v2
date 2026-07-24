@@ -144,6 +144,8 @@ namespace dxvk::backend {
     void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) override;
     void uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                       const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size) override;
+    void noteBufferWrite(const Rc<MtlAllocation>& storage,
+                         MtlDeviceSize offset, MtlDeviceSize length) override;
     bool ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage) override;
 
     /* --- queries (occlusion begin/end: STUBBED all-passed, no forward;

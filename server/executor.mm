@@ -359,6 +359,11 @@ struct StageState {
   uint32_t pushExtent = 0;
   bool pushDirty = false;
   uint64_t pushGpuAddr = 0;
+  /* V16: submission serial the pushGpuAddr slice was allocated under — a
+   * slice from an OLDER serial lives in slab memory that ringAlloc rewinds
+   * once that serial completes, while draws encoded NOW would still read it
+   * through the argument-table snapshot. See flushBindings. */
+  uint64_t pushSerial = 0;
 };
 
 struct RtAttachment {
@@ -1196,12 +1201,20 @@ static void flushBindings() {
     id<MTL4ArgumentTable> table = pair.table[st];
     const std::shared_ptr<Shader>& fn = st == 0 ? g->vs : g->fs;
 
-    /* push data -> fresh ring slice (snapshot semantics) */
-    if (b.pushDirty && b.pushExtent) {
+    /* push data -> fresh ring slice (snapshot semantics). V16: ALSO re-slice
+     * when the cached slice is from an OLDER submission — ringAlloc rewinds
+     * a slab once its serial completes, so a stale pushGpuAddr points into
+     * memory the rewound slab hands to a NEW allocation while draws encoded
+     * NOW still read the old address through their table snapshot (garbage
+     * push block = exploded geometry). The law: no mutation of GPU-visible
+     * memory until completed_serial covers its last reader — enforced by
+     * construction: every referenced slice carries the CURRENT serial. */
+    if (b.pushExtent && (b.pushDirty || b.pushSerial != g->serial)) {
       RingSlice rs = ringAlloc(b.pushExtent, 256);
       if (rs.cpu) {
         std::memcpy(rs.cpu, b.pushData, b.pushExtent);
         b.pushGpuAddr = rs.gpu;
+        b.pushSerial = g->serial;
       }
       b.pushDirty = false;
     }

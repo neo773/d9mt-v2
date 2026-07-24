@@ -244,6 +244,15 @@ namespace dxvk {
     virtual void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice);
     virtual void uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                       const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size);
+    // (!) Direct-map write notice (contract 3a addendum): the app finished
+    // writing [offset, offset+length) of `storage` through its persistent
+    // mapping (D3D9 Lock/Unlock on a direct-mapped DEFAULT-pool buffer —
+    // dynamic VB/IB streams). Local rendering needs nothing: UMA map writes
+    // are already GPU-visible. A remoting backend overrides this to ship the
+    // bytes — without it the remote side keeps create-time snapshots of
+    // streamed geometry (the V13 constants gap, geometry edition).
+    virtual void noteBufferWrite(const Rc<MtlAllocation>& storage,
+                      MtlDeviceSize offset, MtlDeviceSize length);
     virtual bool ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage);   // realloc+blit if needed
 
     // --- queries (§1i, contract 3d) ----------------------------------------

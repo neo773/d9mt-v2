@@ -1267,3 +1267,107 @@ Honest flags:
 - The deferred-xfer queue is unbounded in records (bounded by slab memory);
   a pathological overlap flood degenerates to the old per-draw close via
   uplFlushUse, never to unbounded memory.
+
+## V16 — SHATTERED-GEOMETRY: dynamic VB/IB content never crossed the wire
+## (+ the completed-serial audit, a stale push-slice fix, the wrap-race gate)
+
+SYMPTOM (GTA live, V15 build): everything renders but geometry explodes
+into "million shards" + heavy flashing, ~30 fps.
+
+AUDIT RESULT — the V15 memcpy fast path is SOUND BY CONSTRUCTION (verified
+against the SDK headers, not vibes):
+- `MTL4CommandQueue signalEvent:value:` signals "after all GPU work prior
+  to this point is complete" (MTL4CommandQueue.h) — completedSerial()
+  (= event.signaledValue) IS the GPU-completion counter, the same one the
+  publish listener consumes. rangeLive already compares against it.
+- markBufRef stamps refSerial = g->serial (the not-yet-submitted serial);
+  refs accumulate into the {refMin,refMax} box and the box only resets when
+  the LATEST refSerial completed => completed >= refSerial implies every
+  marked reader completed. No off-by-one found.
+- Argument tables: "Metal takes a snapshot of the resources in the argument
+  table when you encode a draw" (MTL4RenderCommandEncoder.h) — the per-pass
+  pair rotation (retire-by-completed-serial) is spec-clean.
+- Staged-path ordering: every closePass/closeXfer emits the coarse producer
+  barrier (afterStages -> beforeQueueStages All), so parked blits order
+  AFTER passes that read the old bytes and BEFORE passes that read the new
+  ones. A 20x wrap gate now pins all of this (below).
+- A cube-stress reproducer (200 draws/frame, wrapping constant ring, no
+  completion waits) rendered a STABLE grid on the V15 build — the
+  constants path was exonerated as the shards cause.
+
+ONE REAL completed-serial violation found and fixed (executor.mm
+flushBindings): b.pushGpuAddr cached a slab ring slice across submissions.
+ringAlloc rewinds a slab once its serial completes, so a push block that
+stayed clean (pushDirty=false) for frames kept an address inside memory a
+rewound slab hands to NEW allocations — draws encoded NOW still read it
+through their table snapshot (garbage push block = exploded positions).
+Fix: re-slice whenever pushSerial != g->serial ("no mutation of
+GPU-visible memory until completed_serial covers its last reader" —
+enforced by construction: every referenced slice carries the current
+serial). One realloc per stage per frame, noise-level cost.
+
+THE ACTUAL SHARDS BUG — V13's uncovered honest flag, geometry edition:
+dynamic VB/IB bytes written through a DIRECT mapping never cross the wire.
+GTA streams world geometry + 2D quads via Lock(DISCARD/NOOVERWRITE) ->
+CPU writes through mapPtr -> Unlock -> draw. Local rendering is fine (UMA
+map writes are GPU-visible); the server drew from create-time zeros or the
+DISCARD-time snapshot that invalidateBuffer ships — which the CS can run
+BEFORE the app finishes writing (Lock returns first): stale/partial bytes,
+re-rolled every rename => shards + flashing. The stress cube was clean
+because its VB is static (Lock-written before first bind; the create
+snapshot covers it).
+
+FIX (client, V13's exact shape at the Unlock seam):
+- d3d9_device.cpp UnlockBuffer: for direct-mapped DEFAULT-pool buffers,
+  EmitCs the Lock-conjoined DirtyRange (LockBuffer already Conjoins it —
+  DISCARD locks the whole size, NOOVERWRITE locks the app's exact
+  offset/size) to a new context seam, then Clear() it. The lambda captures
+  the mapped ALLOCATION (GetMappedSlice), pinning the exact DISCARD
+  generation the app wrote — immune to later renames.
+- mtl_context.h + mtl_context_stub.cpp: `noteBufferWrite(storage, off,
+  len)` — SILENT no-op locally (UMA needs nothing), overridden by the wire.
+- mtl_wire_context.cpp noteBufferWrite: ensureStorageCreated (wasNew =>
+  the create snapshot just shipped the full content, skip) else
+  emitUploadBuffer of exactly [off, off+len). CS ordering does the rest:
+  the note runs after the app's writes and before any draw that consumes
+  them; server-side the upload lands ahead of the pass that draw
+  materializes (V15 direct-or-staged, both proven).
+
+GATES (scripts/build-server.sh, full test_feed PASS):
+- NEW v16 wrap-race gate: 512 B ring (two 256 B slices), 4 draws/frame x 3
+  frames emitted with NO completion wait between frames, offset wrapping
+  every 2nd draw, each draw's matrix targets its own grid cell; readback
+  asserts all 12 cells show their OWN draw (a draw observing a LATER
+  upload at its wrapped offset leaves its cell empty). Run 20x per gate
+  invocation (timing-race discipline). PASSES 20/20.
+- v15 flood gate still green: 500 fresh-slice uploading draws -> 1 render
+  pass (passes stay O(scene); the pushSerial re-slice did not regress it).
+- v13/v13.1/v14 (classic + AB + mid-pass), partial DS clear, present
+  timeline, watchdog, wedge: all green. Clean chain: rm -rf build/server +
+  build-server.sh; rm -rf build/driver + build-driver.sh (mingw client).
+
+Expected GTA signature after this build: world geometry SOLID (no shards),
+2D elements correctly placed, flashing gone (per-draw garbage was
+per-rename garbage). fps: up from ~30 — the shards build was also paying
+stale-geometry overdraw chaos; upload volume rises (dynamic ranges now
+ship: expect upl bytes/frame to grow, records +O(locks/frame)) so watch
+srv-stats upl{dir,stg,useFlush} — wrap-heavy dynamic buffers will lean
+stg/useFlush.
+
+Honest flags / debt:
+- Wrap-heavy STAGED uploads still force uplFlushUse pass closes when the
+  very next draw consumes the parked range (the v16 gate tolerates it;
+  the flood gate pins the common fresh-slice shape at O(scene)). If GTA
+  shows stg>>dir with fps capped, the next lever is CBV "redirects": bind
+  the slab slice address directly for exactly-covered cbv ranges and drop
+  the forced flush (same-serial slab slices are immutable by the ring
+  discipline).
+- noteBufferWrite ships whole-buffer ranges for DISCARD Lock(0,0) — a
+  4 MiB dynamic VB re-locked per frame is 4 MiB/frame on the heap; the
+  heap drops (never stalls) when full, leaving the server on previous
+  content (visible as brief geometry staleness, counted heap->dropped).
+  Range-splitting or write-window tracking is the diet if a title floods.
+- The client-side dynamic gate (stress cube DYNAMIC=1: per-frame
+  Lock(DISCARD) rewrite + NOOVERWRITE append variant, IB variant, shape
+  must track each frame) is the coordinator's verify vehicle — not in this
+  tree yet.

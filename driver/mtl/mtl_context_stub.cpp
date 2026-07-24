@@ -101,6 +101,9 @@ namespace dxvk {
   void MtlContext::initImage(const Rc<MtlTexture>&)                            { MTL_STUB("initImage"); }
   void MtlContext::invalidateBuffer(const Rc<MtlBuffer>&, Rc<MtlAllocation>&&) { MTL_STUB("invalidateBuffer"); }
   void MtlContext::uploadBuffer(const Rc<MtlBuffer>&, MtlDeviceSize, const Rc<MtlBuffer>&, MtlDeviceSize, MtlDeviceSize) { MTL_STUB("uploadBuffer"); }
+  // SILENT no-op (not MTL_STUB): the local path legitimately needs nothing —
+  // UMA direct-map writes are already GPU-visible; only remoting overrides.
+  void MtlContext::noteBufferWrite(const Rc<MtlAllocation>&, MtlDeviceSize, MtlDeviceSize) { }
   bool MtlContext::ensureTextureUsage(const Rc<MtlTexture>&, MtlTextureUsage)  { MTL_STUB("ensureTextureUsage"); return false; }
 
   // --- queries --------------------------------------------------------------

@@ -2564,6 +2564,164 @@ main(int argc, char **argv) {
       }
     }
 
+    /* --- V16 RING-WRAP RACE GATE: a tiny 512 B constant ring (two 256 B
+     * slices) wraps every second draw, 4 draws/frame x 3 frames emitted
+     * BACK-TO-BACK with NO completion wait between frames — the GPU runs
+     * 1-3 frames behind while later uploads land on offsets that
+     * still-executing draws read. Every draw's matrix places its triangle
+     * in its OWN grid cell (row=frame, col=draw); a draw that observes a
+     * LATER upload at its wrapped offset renders into the wrong cell and
+     * leaves its own cell clear. The law under test: no mutation of
+     * GPU-visible memory until completed_serial covers its last reader
+     * (executor.mm rangeLive/markBufRef + the parked-blit ordering).
+     * Run 20x — races are timing-shaped. --- */
+    {
+      uint8_t magentaW[4] = {255, 0, 255, 255}, dkblueW[4] = {40, 16, 16, 255};
+      struct d9mt_wire_rec_create_buffer cwb;
+      memset(&cwb, 0, sizeof(cwb));
+      cwb.hdr.opcode = d9mt_wire_op_create_buffer;
+      cwb.hdr.size = sizeof(cwb);
+      cwb.wire_id = 975;
+      cwb.client_handle = 0xC975;
+      cwb.size = 512;
+      emit(&cwb, sizeof(cwb));
+
+      /* cbv-cube pipeline (same PSO the v15 gates warmed) */
+      emit_bind_shader(0, 0xA00B);
+      emit_bind_shader(1, 0xA006);
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vlW = {{{d9mt_wire_op_set_vertex_layout, sizeof(vlW), 0}, 1, 1},
+               {0, 0, 900, 0},
+               {0, 12, 0, 0}};
+      emit(&vlW, sizeof(vlW));
+      struct d9mt_wire_rec_bind_vertex_buffer bvbW;
+      memset(&bvbW, 0, sizeof(bvbW));
+      bvbW.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+      bvbW.hdr.size = sizeof(bvbW);
+      bvbW.binding = 0;
+      bvbW.stride = 12;
+      bvbW.buf.buffer = 0xC950;
+      bvbW.buf.length = 36;
+      emit(&bvbW, sizeof(bvbW));
+      struct d9mt_wire_rec_bind_index_buffer bibW;
+      memset(&bibW, 0, sizeof(bibW));
+      bibW.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bibW.hdr.size = sizeof(bibW);
+      bibW.buf.buffer = 0xC951;
+      bibW.buf.length = 8;
+      bibW.index_type = 0;
+      emit(&bibW, sizeof(bibW));
+      struct d9mt_wire_rec_bind_uniform_buffer bubW;
+      memset(&bubW, 0, sizeof(bubW));
+      bubW.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+      bubW.hdr.size = sizeof(bubW);
+      bubW.stages = 0x1;
+      bubW.slot = 4;
+      bubW.buf.buffer = 0xC975;
+      bubW.buf.length = 512;
+      emit(&bubW, sizeof(bubW));
+
+      const float sW = 0.3f;
+      for (int iter = 0; iter < 20; iter++) {
+        for (int f = 0; f < 3; f++) {
+          struct d9mt_wire_rec_set_render_targets_by_id rtW2;
+          memset(&rtW2, 0, sizeof(rtW2));
+          rtW2.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+          rtW2.hdr.size = sizeof(rtW2);
+          rtW2.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+          rtW2.color[0].format = 80;
+          rtW2.color[0].width = 640;
+          rtW2.color[0].height = 480;
+          rtW2.color[0].sample_count = 1;
+          emit(&rtW2, sizeof(rtW2));
+          if (f == 0) /* frames 1/2 accumulate onto the persistent BB */
+            emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+          for (int d = 0; d < 4; d++) {
+            const int k = f * 4 + d;
+            const uint64_t off = (uint64_t)(k % 2) * 256u; /* THE WRAP */
+            const float tx = -0.75f + 0.5f * (float)d;
+            const float ty = 0.6f - 0.6f * (float)f;
+            float mW[16] = {sW, 0, 0, 0, 0, sW, 0, 0,
+                            0, 0, 1, 0, tx, ty, 0, 1};
+            struct d9mt_wire_rec_bind_uniform_buffer_range burW2;
+            memset(&burW2, 0, sizeof(burW2));
+            burW2.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+            burW2.hdr.size = sizeof(burW2);
+            burW2.stages = 0x1;
+            burW2.slot = 4;
+            burW2.offset = off;
+            burW2.length = 64;
+            emit(&burW2, sizeof(burW2));
+            uint64_t mg = 0;
+            uint64_t moff = heap_put(mW, 64, &mg);
+            struct d9mt_wire_rec_upload_buffer ubW2;
+            memset(&ubW2, 0, sizeof(ubW2));
+            ubW2.hdr.opcode = d9mt_wire_op_upload_buffer;
+            ubW2.hdr.size = sizeof(ubW2);
+            ubW2.wire_id = 975;
+            ubW2.client_handle = 0xC975;
+            ubW2.dst_offset = off;
+            ubW2.size = 64;
+            ubW2.heap_offset = moff;
+            ubW2.heap_generation = mg;
+            emit(&ubW2, sizeof(ubW2));
+            struct {
+              struct d9mt_wire_rec_draw_indexed rec;
+              struct d9mt_wire_draw_indexed_args args[1];
+            } dWr = {{{d9mt_wire_op_draw_indexed, sizeof(dWr), 0}, 1, 0},
+                     {{3, 1, 0, 0, 0, 0}}};
+            emit(&dWr, sizeof(dWr));
+          }
+          emit_present(++frame); /* NO wait — keep the GPU frames behind */
+        }
+        if (wait_u64(&status->frames, frame, 20000))
+          FAIL("v16 wrap race (iter %d): frames never presented", iter);
+        uint32_t sWr = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+        IOSurfaceRef sfW = IOSurfaceLookup(ids[sWr]);
+        if (!sfW)
+          FAIL("v16 wrap race (iter %d): IOSurfaceLookup failed", iter);
+        IOSurfaceLock(sfW, kIOSurfaceLockReadOnly, NULL);
+        const uint8_t *bW = IOSurfaceGetBaseAddress(sfW);
+        size_t rW = IOSurfaceGetBytesPerRow(sfW);
+        uint8_t bg[4];
+        memcpy(bg, bW + 5 * rW + 5 * 4, 4); /* outside every cell */
+        int badK = -1;
+        uint8_t badPix[4] = {0, 0, 0, 0};
+        for (int k = 0; k < 12 && badK < 0; k++) {
+          const float tx = -0.75f + 0.5f * (float)(k % 4);
+          const float ty = 0.6f - 0.6f * (float)(k / 4);
+          /* triangle centroid of scaled verts: (tx - s/6, ty - s/6) */
+          const int px = (int)((tx - sW / 6.f + 1.f) * 320.f);
+          const int py = (int)((1.f - (ty - sW / 6.f)) * 240.f);
+          uint8_t c[4];
+          memcpy(c, bW + py * rW + px * 4, 4);
+          if (memcmp(c, magentaW, 4)) {
+            badK = k;
+            memcpy(badPix, c, 4);
+          }
+        }
+        IOSurfaceUnlock(sfW, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(sfW);
+        if (badK >= 0)
+          FAIL("v16 wrap race (iter %d): frame %d draw %d cell empty "
+               "(%02x%02x%02x%02x, want magenta) — the draw read ANOTHER "
+               "draw's constants at its wrapped ring offset (memcpy/blit "
+               "raced encoded-but-incomplete GPU work)",
+               iter, badK / 4, badK % 4,
+               badPix[0], badPix[1], badPix[2], badPix[3]);
+        if (memcmp(bg, dkblueW, 4))
+          FAIL("v16 wrap race (iter %d): background %02x%02x%02x%02x not the "
+               "clear color — geometry landed outside its cell",
+               iter, bg[0], bg[1], bg[2], bg[3]);
+      }
+      printf("[test_feed] v16 wrap race: 20 iterations x 12 wrapping-offset "
+             "draws across 3 unwaited frames — every draw rendered its OWN "
+             "constants\n");
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the

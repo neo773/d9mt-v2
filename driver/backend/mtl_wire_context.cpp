@@ -2195,6 +2195,35 @@ namespace dxvk::backend {
     m_inner->uploadBuffer(dst, dstOff, staging, srcOff, size);
   }
 
+  void MtlWireContext::noteBufferWrite(const Rc<MtlAllocation>& storage,
+                                       MtlDeviceSize offset, MtlDeviceSize length) {
+    /* V16 THE SHATTERED-GEOMETRY FIX: dynamic VB/IB bytes written through a
+     * direct mapping (D3D9 Lock DISCARD/NOOVERWRITE streaming) never crossed
+     * the wire — the V13 constants gap, geometry edition. The server drew
+     * world/2D geometry from create-time zeros or the DISCARD-time partial
+     * snapshot (invalidateBuffer runs on the CS possibly BEFORE the app
+     * finishes writing), so remote geometry exploded into garbage "shards".
+     * Ship the exact Lock-conjoined dirty range at Unlock: the CS executes
+     * this AFTER the app's writes (Unlock ordering) and BEFORE any draw that
+     * consumes them (stream order) — server-side the upload lands ahead of
+     * the pass that draw materializes.
+     * DISCARD renames are safe by capture: the frontend captured the mapped
+     * ALLOCATION (generation), so a later rename cannot retarget this ship;
+     * the renamed backing gets its own create-snapshot + its own notes. */
+    if (!wired() || g_wt.heap == nullptr || storage == nullptr || length == 0u)
+      return;
+    if (storage->mapPtr == nullptr || storage->size == 0u || offset >= storage->size)
+      return;
+    const uint64_t len = std::min<uint64_t>(length, storage->size - offset);
+    const bool wasNew = storage->wireId == 0u;
+    if (!ensureStorageCreated(storage) || storage->wireId == 0u)
+      return;
+    if (wasNew)
+      return; /* creation just shipped the full content snapshot */
+    emitUploadBuffer(storage->wireId, storage->handle.buf, offset,
+                     reinterpret_cast<const uint8_t*>(storage->mapPtr) + offset, len);
+  }
+
   bool MtlWireContext::ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage) {
     return m_inner->ensureTextureUsage(image, usage);
   }
