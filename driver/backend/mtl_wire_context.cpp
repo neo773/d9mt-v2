@@ -179,17 +179,6 @@ namespace dxvk::backend {
     std::atomic<uint64_t> g_queryStubs    = { 0u };
     std::atomic<uint64_t> g_readbackStale = { 0u };
 
-    /* Consolidation C1 instrument (docs/RENDER_SERVER_SPEC + HANDOFF-
-     * CONSOLIDATION.md): the migration to server-only may only remove the
-     * local-render FALLBACK once it is proven never needed while the server
-     * is healthy. g_serverEverProduced latches on the first usable server
-     * frame; after that, any present that still falls back to local WHILE the
-     * wire is attached and the server is alive is a "healthy fallback" — it
-     * MUST read 0 over a soak before C3 removes the fallback. PE-side only, no
-     * wire-ABI change; surfaced in the PROF line as `fbHealthy=`. */
-    std::atomic<bool>     g_serverEverProduced = { false };
-    std::atomic<uint64_t> g_fallbackWhileHealthy = { 0u };
-
     /* --- S2 cold-record side channels (mtl_wire_emit.h) ------------------- */
 
     /* Monotonic wire identity (spec: client-assigned u64). 0 = "no wire
@@ -412,7 +401,7 @@ namespace dxvk::backend {
     if (g_wt.hasConsumer) {
       Logger::info(str::format("MtlWireContext: render server attached (claim #",
         claim, "), shm ring=", WireRingCapacity >> 20, " MiB, heap=",
-        g_wt.heap ? (WireHeapCapacity >> 20) : 0u, " MiB (dual execution)"));
+        g_wt.heap ? (WireHeapCapacity >> 20) : 0u, " MiB (thin recorder: server-only rendering)"));
     } else {
       Logger::warn(str::format("MtlWireContext: no render server (claim #", claim,
         "), local ring=", WireRingCapacity >> 20,
@@ -1869,9 +1858,10 @@ namespace dxvk::backend {
                                            const Rc<MtlBuffer>& src, MtlDeviceSize off, MtlDeviceSize rowAlign,
                                            MtlDeviceSize sliceAlign, MtlFormat format) {
     /* S3: THE texture-content seam (frontend Lock/UpdateTexture staging
-     * lands here). Additive: the staging bytes ALSO copy into a heap region
-     * and an upload_texture record names the subresource box — the local
-     * execution below is untouched. */
+     * lands here). The staging bytes copy into a heap region and an
+     * upload_texture record names the subresource box (server content);
+     * the KEPT local forward below maintains the client-side mirror that
+     * non-rendered readbacks and Lock reads still consume. */
     if (wired() && g_wt.heap && dst != nullptr && src != nullptr) {
       const uint64_t texId = ensureTextureCreated(dst);
       const void* bytes = src->mapPtr(off);
@@ -2295,7 +2285,6 @@ namespace dxvk::backend::wire {
 
     outImage = tex;
     outView  = view;
-    g_serverEverProduced.store(true, std::memory_order_relaxed);
     /* v13.1 black-screen attribution: name the FIRST present that switches
      * the on-screen source to the server frame — a regression that appears
      * with this line in the log is a cutover/present-path issue, one that
