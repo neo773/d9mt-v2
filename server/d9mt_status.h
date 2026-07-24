@@ -93,6 +93,11 @@
  *   offset 368  u64[16]  tl_consume_ns     t2: executor entered handlePresent (marker consumed)
  *   offset 496  u64[16]  tl_gpu_ns         t3: frame's GPU completion observed (listener entry)
  *   offset 624  u64[16]  tl_publish_ns     t4: immediately before the frame_serial release-store
+ *
+ * --- v5 (frame-credit flow control, ADDITIVE — first 752 bytes unchanged) --
+ *   offset 752  u64      upl_staged        uploads staged (dst range live)
+ *   offset 760  u64      upl_promoted      parked blits promoted to memcpy
+ *   offset 768  u64      upl_flush_use     consuming-draw pass closes (~0)
  */
 
 #ifdef __cplusplus
@@ -126,7 +131,7 @@ enum d9mt_status_error {
   d9mt_status_err_clear_verify = 5  /* GPU clear readback mismatch */
 };
 
-#define D9MT_STATUS_VERSION 4u
+#define D9MT_STATUS_VERSION 5u
 
 /* v4 timeline ring depth: power of two, deeper than any realistic
  * client/server frame lag (the present path runs lockstep depth 1). */
@@ -162,9 +167,21 @@ struct d9mt_status {
   d9mt_status_au64 tl_consume_ns[D9MT_STATUS_TL_SLOTS]; /* 368 */
   d9mt_status_au64 tl_gpu_ns[D9MT_STATUS_TL_SLOTS];     /* 496 */
   d9mt_status_au64 tl_publish_ns[D9MT_STATUS_TL_SLOTS]; /* 624 */
+  /* --- v5 (frame-credit flow control, ADDITIVE — first 752 bytes unchanged)
+   * Staged-upload discipline observability (executor.mm; the pass-
+   * preservation gates assert on these):
+   *   upl_staged     uploads staged into the slab (destination range live)
+   *   upl_promoted   parked slab blits promoted to a direct memcpy at a
+   *                  consuming draw (range retired by then — the credit-
+   *                  bounded common case)
+   *   upl_flush_use  consuming-draw pass closes (the old always-close
+   *                  behavior, now the never-fire backstop; target ~0) */
+  d9mt_status_au64 upl_staged;    /* 752 */
+  d9mt_status_au64 upl_promoted;  /* 760 */
+  d9mt_status_au64 upl_flush_use; /* 768 */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 752);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 776);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -191,5 +208,8 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_serial) == 240);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_consume_ns) == 368);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_gpu_ns) == 496);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_publish_ns) == 624);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_staged) == 752);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_promoted) == 760);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, upl_flush_use) == 768);
 
 #endif /* D9MT_SERVER_STATUS_H */

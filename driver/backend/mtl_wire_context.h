@@ -241,12 +241,13 @@ namespace dxvk::backend {
     /* S3 v2 lazy re-upload: texture content whose heap region could not be
      * allocated (heap full during a boot flood) is stashed here — the bytes
      * would otherwise be lost forever (staging recycles). Retried at the
-     * image's next bind_texture_by_id and once per present. V18: crossing
-     * the SOFT threshold (kMaxPendingUploadBytes) first engages a bounded
-     * ack-wait (heapAllocWait); exact same-box re-uploads replace their
-     * stashed predecessor; only the HARD cap drops — counted + named
-     * (PROF texDrop=), because a dropped upload is a permanently black
-     * server texture. */
+     * image's next bind_texture_by_id and once per present. FLOW-CONTROL:
+     * frame credits bound the server's lag, so the stash drains within a
+     * bounded number of presents (the V18 soft threshold + bounded ack-wait
+     * are gone); exact same-box re-uploads replace their stashed
+     * predecessor; only the HARD cap drops — counted + named (PROF
+     * texDrop=), because a dropped upload is a permanently black server
+     * texture. */
     struct PendingTexUpload {
       Rc<MtlTexture>              image;
       d9mt_wire_rec_upload_texture rec; /* heap fields refreshed at retry */
@@ -301,10 +302,6 @@ namespace dxvk::backend {
      * the server keeps its previous content for that resource. */
     uint64_t heapAlloc(const void* src, uint64_t bytes, uint64_t* genOut,
                        bool quiet = false);
-    /* V18: bounded ack-wait twin of heapAlloc — TEXTURE content only (one-
-     * shot bytes; a drop is a permanently black server texture). Engaged
-     * when the lazy stash would cross its soft threshold. */
-    uint64_t heapAllocWait(const void* src, uint64_t bytes, uint64_t* genOut);
     /* Returns true when the record actually shipped (false = full-heap drop
      * or unclaimed wire) — V15 re-ship dedup keys off this. */
     bool     emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,

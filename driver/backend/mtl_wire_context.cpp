@@ -48,23 +48,14 @@ namespace dxvk::backend {
     constexpr uint64_t WireHeapCapacity = 256ull << 20;
 
     /* S3 v2 lazy re-upload stash: texture bytes waiting for heap space.
-     * V18: this used to be a DROP-FOR-GOOD cap — a bulk texture-streaming
-     * burst (a game loading its world: hundreds of MiB through Lock/Unlock
-     * in seconds while the server drains creates) blew through it and every
-     * texture past the cap stayed PERMANENTLY BLACK server-side (the
-     * upload_texture record was simply never emitted, one-shot content).
-     * It is now the SOFT threshold that engages the bounded ack-wait below;
-     * content is only lost at the hard cap (counted + named, texDrop=). */
-    constexpr uint64_t kMaxPendingUploadBytes  = 96ull << 20;
+     * FLOW-CONTROL: frame credits bound the server's consumption lag to
+     * kFrameCredits presents, so heap acks arrive within a bounded number
+     * of presents and the stash breathes instead of accumulating — the V18
+     * soft threshold + bounded 50 ms ack-wait storms (heapAllocWait) that
+     * defended against an UNBOUNDED consumer lag are obsolete and removed.
+     * Only the hard cap remains, as a never-fire backstop: content is lost
+     * ONLY there (counted + named, texDrop= must stay 0). */
     constexpr uint64_t kHardPendingUploadBytes = 768ull << 20;
-
-    /* V18 bounded CS-thread wait for server heap acks, engaged only when a
-     * texture upload would otherwise cross the soft stash threshold. The
-     * server acks continuously while draining (heapAck after every consumed
-     * region), so under streaming backpressure this converts loss into a
-     * short stall; a dead server exhausts the budget and falls through to
-     * the stash/hard-cap path — never a hang. */
-    constexpr uint32_t kTexAckWaitBudgetMs = 50u;
 
     /* Stall watchdog (S3): one window is the old ~1 s spin bound; the
      * transport survives WireStallWindows consecutive full-ring windows
@@ -78,6 +69,36 @@ namespace dxvk::backend {
      * pre-wakeup behavior). Well under one uncapped frame; a lost wake costs
      * at most this, never a hang. */
     constexpr uint32_t kPublishWaitUs = 3000u;
+
+    /* FRAME-CREDIT FLOW CONTROL (HANDOFF-FLOWCONTROL.md): the client may run
+     * at most N frames ahead of the server's GPU-COMPLETED frame serial
+     * (status->frame_serial — its publication is completion-gated), enforced
+     * at the ONE choke point every present passes before its marker is
+     * emitted (acquireServerFrame). This is D3D9's own frame-latency
+     * contract applied across the wire: SyncFrameLatency paces the app
+     * thread against CS presents, credits pace CS presents against server
+     * completions — so the ring/heap can never accumulate seconds of
+     * backlog, and worst case the game runs at the server's rate.
+     * D9MT_FRAME_CREDITS overrides (0 = disable, bisection kill-switch). */
+    constexpr uint64_t kFrameCreditsDefault = 2u;
+    /* Credit-wait slice: re-check cadence while parked (the unix wait's own
+     * internal slices are <=100 ms as well). */
+    constexpr uint32_t kCreditSliceUs = 100000u;
+    /* Liveness bail: if the server publishes NO frame for this long while a
+     * present is credit-parked, the wait falls through to the pre-credit
+     * behavior (dead process / wedged GPU — the existing dead-server
+     * detection owns the endgame). A merely-slow server publishes every
+     * frame and never comes near this; the bail is counted and must be ~0. */
+    constexpr int64_t kCreditStallMs = 3000;
+
+    uint64_t frameCredits() {
+      static const uint64_t s_n = [] {
+        if (const char* v = std::getenv("D9MT_FRAME_CREDITS"))
+          return uint64_t(std::strtoull(v, nullptr, 10));
+        return kFrameCreditsDefault;
+      }();
+      return s_n;
+    }
 
     /* One ring at a time; a second LIVE context forwards without recording
      * (and retries the claim per present, S3 v5). The claiming context's
@@ -244,8 +265,6 @@ namespace dxvk::backend {
     /* V18 texture-content no-drop guarantee (the world-texture black fix).
      * Every client path that makes texture content GPU-visible must ship
      * the same bytes — or COUNT + NAME itself. PROF fields:
-     *  - texWait=   b2t uploads that bounded-blocked for server heap acks
-     *               (bulk-streaming backpressure) before shipping;
      *  - texStashB= current lazy re-upload stash occupancy (KiB);
      *  - texDrop=   uploads lost for good at the HARD stash cap — every
      *               drop is a permanently black server texture; must be 0;
@@ -255,17 +274,22 @@ namespace dxvk::backend {
      *  - texSess=   session-boundary create re-emissions whose previously
      *               shipped content the client no longer holds (the fresh
      *               server texture starts EMPTY — black until re-written). */
-    std::atomic<uint64_t> g_texAckWaits   = { 0u };
-    /* V19: TOTAL wall-clock ms the CS thread burned inside heapAllocWait
-     * (cumulative; PROF `hWaitMs=` reports the window delta). The V19 wedge
-     * trigger was a streaming burst whose ack-waits stalled the producer
-     * long enough to drain the ring — this names how many seconds a window
-     * lost to heap-ack backpressure. */
-    std::atomic<uint64_t> g_texAckWaitMs  = { 0u };
     std::atomic<uint64_t> g_texStashBytes = { 0u };
     std::atomic<uint64_t> g_texDrops      = { 0u };
     std::atomic<uint64_t> g_texConvSkips  = { 0u };
     std::atomic<uint64_t> g_texSessLoss   = { 0u };
+
+    /* Frame-credit instrumentation (PROF fields):
+     *  - credit= presents that had to park for a credit this window (in
+     *            steady state under an overloaded server this tracks the
+     *            present rate — the pacing IS the mechanism working);
+     *  - cwMs=   CS wall-clock ms spent credit-parked this window;
+     *  - cBail=  CUMULATIVE liveness bails (no publication for
+     *            kCreditStallMs while parked) — must stay ~0; nonzero
+     *            means a wedged-but-heartbeating server pipeline. */
+    std::atomic<uint64_t> g_creditWaits  = { 0u };
+    std::atomic<uint64_t> g_creditWaitMs = { 0u };
+    std::atomic<uint64_t> g_creditBails  = { 0u };
 
     /* ALL-IN steady-state proof: presents where acquireServerFrame returned a
      * usable frame (cumulative; PROF `srvAccepted=` reports the WINDOW delta).
@@ -907,41 +931,6 @@ namespace dxvk::backend {
     g_wt.heap->head.store(g_wt.heapHead, std::memory_order_release);
     *genOut = g_wt.heapHead;
     return start;
-  }
-
-  /* V18: bounded ack-wait twin of heapAlloc for TEXTURE content only.
-   * Texture uploads are one-shot (staging recycles, the frontend never
-   * re-writes an already-streamed texture) — losing one is a permanently
-   * black server texture, so a short CS-thread stall is the correct trade
-   * under bulk-streaming backpressure. Quiet probes: no double-counting. */
-  uint64_t MtlWireContext::heapAllocWait(const void* src, uint64_t bytes, uint64_t* genOut) {
-    /* V19 ack-path audit: the ack this poll waits for (heap->consumed) is
-     * published by the server AT RECORD EXECUTION (executor.mm heapAck —
-     * called from every upload handler the moment the slab copy detaches
-     * the GPU from the region), NOT batched to presents or deferred to
-     * future work. An idle server therefore holds no acks hostage: once
-     * the ring drains, `consumed` == the last shipped generation and this
-     * wait can only be pending on IN-FLIGHT consumption. The counters
-     * below (texWait= count, hWaitMs= time) prove per window how much CS
-     * time this backpressure costs — the V19 wedge trigger candidate. */
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto deadline = t0 + std::chrono::milliseconds(kTexAckWaitBudgetMs);
-    uint64_t off = UINT64_MAX;
-    for (;;) {
-      ::Sleep(1); /* server ack cadence is per-consumed-region; 1 ms poll */
-      off = heapAlloc(src, bytes, genOut, true /* quiet */);
-      if (off != UINT64_MAX) {
-        g_texAckWaits.fetch_add(1u, std::memory_order_relaxed);
-        break;
-      }
-      if (std::chrono::steady_clock::now() >= deadline)
-        break;
-    }
-    g_texAckWaitMs.fetch_add(uint64_t(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count()),
-      std::memory_order_relaxed);
-    return off;
   }
 
   bool MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
@@ -2190,15 +2179,14 @@ namespace dxvk::backend {
         }
         uint64_t gen = 0u;
         uint64_t heapOff = UINT64_MAX;
-        if (!stashPending) {
+        /* FLOW-CONTROL: a full heap goes straight to the stash — frame
+         * credits bound the server's lag, so acks arrive within a bounded
+         * number of presents and the stash drains at the next bind/present
+         * sweep. (The V18 soft-threshold + bounded 50 ms ack-wait storm
+         * this replaces defended against an UNBOUNDED lag; its invariant —
+         * content is never lost below the hard cap — is unchanged.) */
+        if (!stashPending)
           heapOff = heapAlloc(bytes, total, &gen);
-          /* V18: a full heap ABOVE the soft stash threshold used to be the
-           * drop-for-good edge (permanently black world textures under
-           * bulk streaming). Bounded-block for server acks instead. */
-          if (heapOff == UINT64_MAX &&
-              m_pendingTexBytes + total > kMaxPendingUploadBytes)
-            heapOff = heapAllocWait(bytes, total, &gen);
-        }
         if (heapOff != UINT64_MAX) {
           emitUploadTextureRecord(fields, heapOff, gen);
         } else {
@@ -2911,6 +2899,51 @@ namespace dxvk::backend::wire {
     if (device == nullptr)
       return false;
 
+    /* FRAME CREDITS — the ONE producer/consumer coupling (see the constants
+     * block + HANDOFF-FLOWCONTROL.md). Before this present's marker is
+     * emitted (synchronizeWsi, later in this same CS closure), require the
+     * server's GPU-COMPLETED frame serial to be within kFrameCredits of the
+     * NEXT marker serial. The MARKER counter (g_wt.presentSerial, CS-thread
+     * owned) is the domain status->frame_serial echoes — the local present
+     * counter can drift ahead of it (non-claimant contexts, wire-down
+     * presents), which would make a localSerial-based target unreachable.
+     * The wait is MANDATORY but liveness-safe: sliced kernel parks on the
+     * publish futex; bails when the dead-server latch trips or when NO
+     * publication lands for kCreditStallMs (counted, must stay ~0) — a
+     * merely-slow server publishes every frame and simply paces us. */
+    const uint64_t credits = frameCredits();
+    if (credits != 0u && g_wt.active && g_wt.presentSerial + 1u > credits) {
+      const uint64_t target = g_wt.presentSerial + 1u - credits;
+      /* zero-timeout probe: returns the current serial without parking */
+      uint64_t lastFs = WireRing_wait(WMTWireWaitFrameSerial, 0u, target, 0u);
+      if (lastFs != 0u && lastFs < target) { /* 0 = boot: never gate */
+        const int64_t t0 = monotonicMs();
+        int64_t lastProgressMs = t0;
+        g_creditWaits.fetch_add(1u, std::memory_order_relaxed);
+        for (;;) {
+          const uint64_t fs =
+            WireRing_wait(WMTWireWaitFrameSerial, kCreditSliceUs, target, 0u);
+          if (fs == 0u || fs >= target)
+            break; /* credit granted */
+          if (g_serverDead.load(std::memory_order_acquire))
+            break; /* the existing disable path stands */
+          const int64_t now = monotonicMs();
+          if (fs != lastFs) {
+            lastFs = fs;
+            lastProgressMs = now;
+          } else if (now - lastProgressMs > kCreditStallMs) {
+            /* no publication progress: dead or wedged pipeline — fall
+             * through to the pre-credit behavior; waitForSpace windows /
+             * the dead-server latch own the endgame. */
+            g_creditBails.fetch_add(1u, std::memory_order_relaxed);
+            break;
+          }
+        }
+        g_creditWaitMs.fetch_add(uint64_t(monotonicMs() - t0),
+                                 std::memory_order_relaxed);
+      }
+    }
+
     /* Kernel-wake publish notice (unixcall 217 WMTWireWaitFrameSerial): when
      * the server has not yet published the PREVIOUS present's frame, park on
      * status->frame_serial — the executor wakes the address right after its
@@ -3098,16 +3131,25 @@ namespace dxvk::backend::prof {
       " rej=", s.server_creates_rejected,
       " inel=", g_wireIneligible.load(std::memory_order_relaxed),
       " copySkip=", g_copySkips.load(std::memory_order_relaxed),
-      " texWait=", g_texAckWaits.load(std::memory_order_relaxed),
-      " hWaitMs=", [] {
-        /* V19 window delta: CS-thread ms burned in heapAllocWait this
-         * window (the load-then-lull wedge trigger instrument) */
-        static uint64_t prevWaitMs = 0u;
-        const uint64_t now = g_texAckWaitMs.load(std::memory_order_relaxed);
-        const uint64_t d = now - prevWaitMs;
-        prevWaitMs = now;
+      " credit=", [] {
+        /* window delta: presents that parked for a frame credit */
+        static uint64_t prevCw = 0u;
+        const uint64_t now = g_creditWaits.load(std::memory_order_relaxed);
+        const uint64_t d = now - prevCw;
+        prevCw = now;
         return d;
       }(),
+      " cwMs=", [] {
+        /* window delta: CS-thread ms spent credit-parked (the lockstep
+         * pacing cost — under an overloaded server this approaches the
+         * window wall-clock and that is the mechanism WORKING) */
+        static uint64_t prevCwMs = 0u;
+        const uint64_t now = g_creditWaitMs.load(std::memory_order_relaxed);
+        const uint64_t d = now - prevCwMs;
+        prevCwMs = now;
+        return d;
+      }(),
+      " cBail=", g_creditBails.load(std::memory_order_relaxed),
       " texStashB=", g_texStashBytes.load(std::memory_order_relaxed) >> 10,
       " texDrop=", g_texDrops.load(std::memory_order_relaxed),
       " texConv=", g_texConvSkips.load(std::memory_order_relaxed),

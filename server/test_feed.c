@@ -3100,6 +3100,210 @@ main(int argc, char **argv) {
              "constants\n");
     }
 
+    /* --- FLOW-CONTROL GATE (b): UPLOAD STORM IN A PASS (pass preservation)
+     * The GTA street failure: ~1,085 of ~1,170 passes/frame were staged-
+     * upload flush closes (useFlush) — every constant-ring wrap whose old
+     * readers had not GPU-completed forced a close at the consuming draw.
+     * With frame credits bounding the lag, those ranges retire by
+     * consumption time and prepareDraw PROMOTES the parked blit to a
+     * direct memcpy instead of closing the pass.
+     * Shape: frame A's draws REFERENCE 16 constant slices; frame B
+     * overwrites the SAME slices while A may still be in flight (the
+     * staged path), then — after A publishes, which is GPU-completion by
+     * definition — draws consume them. Whether an upload staged or went
+     * direct (a race the gate runs 10x to cover both), the invariant is
+     * identical: passes stay O(frames) and upl_flush_use stays 0. --- */
+    {
+      uint8_t magenta[4] = {255, 0, 255, 255}, dkblue[4] = {40, 16, 16, 255};
+      float mOff[16] = {0.1f, 0, 0, 0, 0, 0.1f, 0, 0, 0, 0, 1, 0, 5.f, 0, 0, 1};
+      float mVis[16] = {0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1};
+
+      /* rebind the cbv-cube pipeline (belt: independent of v16 leftovers) */
+      emit_bind_shader(0, 0xA00B);
+      emit_bind_shader(1, 0xA006);
+      struct {
+        struct d9mt_wire_rec_set_vertex_layout rec;
+        struct d9mt_wire_vertex_attr attr;
+        struct d9mt_wire_vertex_layout lay;
+      } vlP = {{{d9mt_wire_op_set_vertex_layout, sizeof(vlP), 0}, 1, 1},
+               {0, 0, 900 /* RGB32Float */, 0},
+               {0, 12, 0, 0}};
+      emit(&vlP, sizeof(vlP));
+      struct d9mt_wire_rec_bind_vertex_buffer bvbP;
+      memset(&bvbP, 0, sizeof(bvbP));
+      bvbP.hdr.opcode = d9mt_wire_op_bind_vertex_buffer;
+      bvbP.hdr.size = sizeof(bvbP);
+      bvbP.binding = 0;
+      bvbP.stride = 12;
+      bvbP.buf.buffer = 0xC950;
+      bvbP.buf.length = 36;
+      emit(&bvbP, sizeof(bvbP));
+      struct d9mt_wire_rec_bind_index_buffer bibP;
+      memset(&bibP, 0, sizeof(bibP));
+      bibP.hdr.opcode = d9mt_wire_op_bind_index_buffer;
+      bibP.hdr.size = sizeof(bibP);
+      bibP.buf.buffer = 0xC951;
+      bibP.buf.length = 8;
+      bibP.index_type = 0;
+      emit(&bibP, sizeof(bibP));
+      struct d9mt_wire_rec_bind_uniform_buffer bubP;
+      memset(&bubP, 0, sizeof(bubP));
+      bubP.hdr.opcode = d9mt_wire_op_bind_uniform_buffer;
+      bubP.hdr.size = sizeof(bubP);
+      bubP.stages = 0x1;
+      bubP.slot = 4;
+      bubP.buf.buffer = 0xC973;
+      bubP.buf.length = 131072;
+      emit(&bubP, sizeof(bubP));
+
+      struct d9mt_wire_rec_set_render_targets_by_id rtP;
+      memset(&rtP, 0, sizeof(rtP));
+      rtP.hdr.opcode = d9mt_wire_op_set_render_targets_by_id;
+      rtP.hdr.size = sizeof(rtP);
+      rtP.color[0].flags = D9MT_WIRE_RT_FLAG_BACKBUFFER;
+      rtP.color[0].format = 80;
+      rtP.color[0].width = 640;
+      rtP.color[0].height = 480;
+      rtP.color[0].sample_count = 1;
+
+      /* setup frame: all 16 slices known-offscreen (mOff) */
+      for (uint32_t i = 1; i <= 16; i++) {
+        uint64_t sg = 0;
+        uint64_t soff = heap_put(mOff, 64, &sg);
+        struct d9mt_wire_rec_upload_buffer sub;
+        memset(&sub, 0, sizeof(sub));
+        sub.hdr.opcode = d9mt_wire_op_upload_buffer;
+        sub.hdr.size = sizeof(sub);
+        sub.wire_id = 973;
+        sub.client_handle = 0xC973;
+        sub.dst_offset = 256ull * i;
+        sub.size = 64;
+        sub.heap_offset = soff;
+        sub.heap_generation = sg;
+        emit(&sub, sizeof(sub));
+      }
+      emit(&rtP, sizeof(rtP));
+      emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+      emit_present(++frame);
+      if (wait_u64(&status->frames, frame, 15000))
+        FAIL("flow-control storm: setup frame never presented");
+
+      uint64_t enc0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+      uint64_t drw0 = atomic_load_explicit(&status->draws_executed, memory_order_relaxed);
+      uint64_t upl0 = atomic_load_explicit(&status->uploads_executed, memory_order_relaxed);
+      uint64_t flu0 = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed);
+      uint64_t stg0 = atomic_load_explicit(&status->upl_staged, memory_order_relaxed);
+      uint64_t pro0 = atomic_load_explicit(&status->upl_promoted, memory_order_relaxed);
+
+      for (int it = 0; it < 10; it++) {
+        /* frame A: 16 draws REFERENCE the slices (no uploads) */
+        emit(&rtP, sizeof(rtP));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        for (uint32_t i = 1; i <= 16; i++) {
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 256ull * i;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dA = {{{d9mt_wire_op_draw_indexed, sizeof(dA), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dA, sizeof(dA));
+        }
+        emit_present(++frame); /* NO wait: A's completion races B's uploads */
+        uint64_t frameA = frame;
+
+        /* frame B: overwrite the SAME slices now (refs from A may be live
+         * -> staged), wait for A's publication (== GPU completion), then
+         * consume with draws — the promotion path. */
+        emit(&rtP, sizeof(rtP));
+        emit_clear(16.f / 255.f, 16.f / 255.f, 40.f / 255.f);
+        for (uint32_t i = 1; i <= 16; i++) {
+          const float *m = (it == 9 && i == 16) ? mVis : mOff;
+          uint64_t mg = 0;
+          uint64_t moff = heap_put(m, 64, &mg);
+          struct d9mt_wire_rec_upload_buffer ub;
+          memset(&ub, 0, sizeof(ub));
+          ub.hdr.opcode = d9mt_wire_op_upload_buffer;
+          ub.hdr.size = sizeof(ub);
+          ub.wire_id = 973;
+          ub.client_handle = 0xC973;
+          ub.dst_offset = 256ull * i;
+          ub.size = 64;
+          ub.heap_offset = moff;
+          ub.heap_generation = mg;
+          emit(&ub, sizeof(ub));
+        }
+        if (wait_u64(&status->frames, frameA, 15000))
+          FAIL("flow-control storm (iter %d): frame A never presented", it);
+        for (uint32_t i = 1; i <= 16; i++) {
+          struct d9mt_wire_rec_bind_uniform_buffer_range bur;
+          memset(&bur, 0, sizeof(bur));
+          bur.hdr.opcode = d9mt_wire_op_bind_uniform_buffer_range;
+          bur.hdr.size = sizeof(bur);
+          bur.stages = 0x1;
+          bur.slot = 4;
+          bur.offset = 256ull * i;
+          bur.length = 64;
+          emit(&bur, sizeof(bur));
+          struct {
+            struct d9mt_wire_rec_draw_indexed rec;
+            struct d9mt_wire_draw_indexed_args args[1];
+          } dB = {{{d9mt_wire_op_draw_indexed, sizeof(dB), 0}, 1, 0},
+                  {{3, 1, 0, 0, 0, 0}}};
+          emit(&dB, sizeof(dB));
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("flow-control storm (iter %d): frame B never presented", it);
+      }
+
+      uint64_t encD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - enc0;
+      uint64_t drwD = atomic_load_explicit(&status->draws_executed, memory_order_relaxed) - drw0;
+      uint64_t uplD = atomic_load_explicit(&status->uploads_executed, memory_order_relaxed) - upl0;
+      uint64_t fluD = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed) - flu0;
+      uint64_t stgD = atomic_load_explicit(&status->upl_staged, memory_order_relaxed) - stg0;
+      uint64_t proD = atomic_load_explicit(&status->upl_promoted, memory_order_relaxed) - pro0;
+      if (drwD != 320)
+        FAIL("flow-control storm: %" PRIu64 "/320 draws executed", drwD);
+      if (uplD != 160)
+        FAIL("flow-control storm: %" PRIu64 "/160 uploads executed", uplD);
+      if (fluD != 0)
+        FAIL("flow-control storm: %" PRIu64 " consuming-draw pass closes "
+             "(useFlush) — parked blits did not promote", fluD);
+      if (encD > 24) /* 20 frames x 1 pass + slack */
+        FAIL("flow-control storm: %" PRIu64 " render passes for 20 frames "
+             "(want O(frames) ~20 — staged uploads shattered passes)", encD);
+      uint32_t sP = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+      IOSurfaceRef sfP = IOSurfaceLookup(ids[sP]);
+      if (!sfP)
+        FAIL("flow-control storm: IOSurfaceLookup failed");
+      IOSurfaceLock(sfP, kIOSurfaceLockReadOnly, NULL);
+      const uint8_t *bP = IOSurfaceGetBaseAddress(sfP);
+      size_t rP = IOSurfaceGetBytesPerRow(sfP);
+      uint8_t lastP[4], offP[4];
+      memcpy(lastP, bP + 140 * rP + 453 * 4, 4); /* mVis centroid */
+      memcpy(offP, bP + 280 * rP + 266 * 4, 4);  /* offscreen spot */
+      IOSurfaceUnlock(sfP, kIOSurfaceLockReadOnly, NULL);
+      CFRelease(sfP);
+      if (memcmp(lastP, magenta, 4) || memcmp(offP, dkblue, 4))
+        FAIL("flow-control storm: last=%02x%02x%02x%02x (want magenta) "
+             "off=%02x%02x%02x%02x (want clear) — promoted bytes did not land "
+             "where the consuming draw reads",
+             lastP[0], lastP[1], lastP[2], lastP[3],
+             offP[0], offP[1], offP[2], offP[3]);
+      printf("[test_feed] flow-control storm: 10x overwrite-then-consume "
+             "frames -> %" PRIu64 " passes, useFlush=0 (stg=%" PRIu64
+             " promoted=%" PRIu64 "), all draws + final bytes correct\n",
+             encD, stgD, proD);
+    }
+
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce
      * reset the table, so this bind must resolve the 1x1 BLACK dummy. Red =
      * ALIASING (reset broken); blue (the clear) = draw skipped. Needs the
@@ -3913,6 +4117,190 @@ main(int argc, char **argv) {
     snprintf(p4, sizeof(p4), "%s/heap", ldir);
     unlink(p4);
     rmdir(ldir);
+  }
+
+  /* --- FLOW-CONTROL GATE (a): SUSTAINED OVERLOAD (frame-credit pacing).
+   * A producer that would run unthrottled feeds a consumer throttled to
+   * 4 ms/frame (D9MT_TEST_FRAME_DELAY_US — far slower than the feeder's
+   * unpaced ~µs/frame, i.e. >5x overload). The feeder mirrors the client's
+   * credit rule (acquireServerFrame): before emitting marker n, park on
+   * status->frame_serial until it reaches n - N (N = 2; frame_serial == 0
+   * exempt — boot). Asserts:
+   *   - the backlog (markers emitted - frames GPU-completed) never exceeds
+   *     N once publication starts (the credit bound);
+   *   - the emission loop itself is paced to the CONSUMER's rate (wall
+   *     clock >= ~frames x delay — an unpaced feeder finishes in ms);
+   *   - no stall: every credit park resolves well inside the liveness
+   *     budget; every frame publishes (no deadlock);
+   *   - frames render correctly: the final frame's clear color lands. --- */
+  {
+    const uint64_t kCredits = 2;
+    const uint32_t kDelayUs = 4000;
+    const uint64_t kFrames = 150;
+    char odir[900];
+    snprintf(odir, sizeof(odir), "%s/d9mt-test-XXXXXX", tmp ? tmp : "/tmp");
+    if (!mkdtemp(odir))
+      FAIL("overload mkdtemp: %s", strerror(errno));
+    void *r5, *s5, *h5;
+    if (create_file(odir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP, &r5) ||
+        create_file(odir, "status", sizeof(struct d9mt_status), &s5) ||
+        create_file(odir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + (1u << 20), &h5))
+      return 1;
+    struct d9mt_wire_ring *orr = r5;
+    orr->capacity = RING_CAP;
+    orr->data_offset = sizeof(struct d9mt_wire_ring);
+    orr->magic = D9MT_WIRE_RING_MAGIC;
+    struct d9mt_wire_heap *oh = h5;
+    oh->capacity = 1u << 20;
+    oh->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+    oh->magic = D9MT_WIRE_HEAP_MAGIC;
+    struct d9mt_status *os = s5;
+
+    /* rebase the producer globals onto this scenario's ring */
+    g_ring = orr;
+    g_data = (uint8_t *)r5 + sizeof(struct d9mt_wire_ring);
+    g_head = 0;
+
+    /* spawn with the throttle hook armed */
+    int envc = 0;
+    while (environ[envc])
+      envc++;
+    char **oenv = malloc(sizeof(char *) * (envc + 2));
+    for (int i = 0; i < envc; i++)
+      oenv[i] = environ[i];
+    oenv[envc] = "D9MT_TEST_FRAME_DELAY_US=4000";
+    oenv[envc + 1] = NULL;
+    pid_t opid;
+    char *oargv[] = {(char *)server_bin, odir, "64", "64", NULL};
+    if (posix_spawn(&opid, server_bin, NULL, NULL, oargv, oenv))
+      FAIL("overload posix_spawn failed");
+    free(oenv);
+    for (int i = 0;; i++) {
+      if (atomic_load_explicit(&os->epoch, memory_order_acquire) == 1)
+        break;
+      int ost;
+      if (waitpid(opid, &ost, WNOHANG) == opid)
+        FAIL("overload server died before ready (0x%x)", ost);
+      if (i >= 1000)
+        FAIL("overload server not ready");
+      usleep(10000);
+    }
+
+    emit_backbuffer_rt();
+    /* prime the pump: the fs == 0 exemption is a BOOT window (the client
+     * behaves identically — nothing is ever gated on a server that has not
+     * published once). Emit frame 1 and wait for its publication so the
+     * paced loop below measures pure steady state. */
+    emit_clear(1.f, 0.f, 0.f);
+    emit_present(1);
+    if (wait_u64(&os->frames, 1, 15000))
+      FAIL("overload: first frame never published (throttled server dead?)");
+    struct timespec ot0, ot1;
+    clock_gettime(CLOCK_MONOTONIC, &ot0);
+    uint64_t maxBacklog = 0, creditParks = 0;
+    for (uint64_t n = 2; n <= kFrames; n++) {
+      if (n > kCredits) {
+        /* the client's credit rule, mirrored (mtl_wire_context.cpp
+         * acquireServerFrame): park until frame_serial >= n - N */
+        const uint64_t target = n - kCredits;
+        int parked = 0, waitedMs = 0;
+        for (;;) {
+          uint64_t fs =
+              atomic_load_explicit(&os->frame_serial, memory_order_acquire);
+          if (fs == 0 || fs >= target)
+            break;
+          if (!parked) {
+            parked = 1;
+            creditParks++;
+          }
+          if (waitedMs >= 5000)
+            FAIL("overload: credit park for frame %" PRIu64 " stalled >5 s "
+                 "(fs=%" PRIu64 ") — pacing wedged", n, fs);
+          d9mt_futex_wait(&os->frame_serial, fs, 100ull * 1000000ull);
+          waitedMs += 100; /* upper bound; a wake returns early */
+        }
+      }
+      /* per-frame color; the FINAL frame is pure blue for the readback */
+      if (n == kFrames)
+        emit_clear(0.f, 0.f, 1.f);
+      else
+        emit_clear((n & 1) ? 1.f : 0.f, (n & 1) ? 0.f : 1.f, 0.f);
+      emit_present(n);
+      uint64_t fs2 =
+          atomic_load_explicit(&os->frame_serial, memory_order_acquire);
+      /* fs2 == 0: boot window (the rule exempts it, exactly like the
+       * client) — the bound claim is for steady state */
+      if (fs2 != 0 && n - fs2 > maxBacklog)
+        maxBacklog = n - fs2;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ot1);
+    uint64_t emitMs = (uint64_t)((int64_t)(ot1.tv_sec - ot0.tv_sec) * 1000ll +
+                      ((int64_t)ot1.tv_nsec - (int64_t)ot0.tv_nsec) / 1000000ll);
+    /* no deadlock: every frame publishes */
+    if (wait_u64(&os->frames, kFrames, 30000))
+      FAIL("overload: only %" PRIu64 "/%" PRIu64 " frames published",
+           (uint64_t)atomic_load_explicit(&os->frames, memory_order_relaxed),
+           kFrames);
+    if (maxBacklog > kCredits)
+      FAIL("overload: backlog reached %" PRIu64 " frames (credit bound %" PRIu64
+           ") — the producer outran the completed serial", maxBacklog, kCredits);
+    /* pacing: >=75%% of the throttled consumer's wall clock (unpaced
+     * emission of 150 markers takes ms) */
+    if (emitMs < (kFrames * kDelayUs / 1000u) * 3u / 4u)
+      FAIL("overload: emission loop took %" PRIu64 " ms for %" PRIu64
+           " frames x %u us consumer — pacing did not engage", emitMs,
+           kFrames, kDelayUs);
+    /* the final frame's pixels: publication is completion-gated, so the
+     * published slot must hold the LAST clear color (pure blue) */
+    {
+      uint32_t oslot =
+          atomic_load_explicit(&os->present_slot, memory_order_acquire);
+      uint32_t oid =
+          atomic_load_explicit(&os->iosurface_id[oslot], memory_order_acquire);
+      IOSurfaceRef osf = IOSurfaceLookup(oid);
+      if (!osf)
+        FAIL("overload: IOSurfaceLookup(%u) failed", oid);
+      IOSurfaceLock(osf, kIOSurfaceLockReadOnly, NULL);
+      uint8_t opx[4];
+      memcpy(opx, (const uint8_t *)IOSurfaceGetBaseAddress(osf) +
+                      16 * IOSurfaceGetBytesPerRow(osf) + 16 * 4, 4);
+      IOSurfaceUnlock(osf, kIOSurfaceLockReadOnly, NULL);
+      CFRelease(osf);
+      if (!(opx[0] == 255 && opx[1] == 0 && opx[2] == 0 && opx[3] == 255))
+        FAIL("overload: final frame %02x%02x%02x%02x want pure blue (BGRA "
+             "ff0000ff) — a paced stream must still render every frame",
+             opx[0], opx[1], opx[2], opx[3]);
+    }
+    printf("[test_feed] overload pacing: %" PRIu64 " frames vs a %u us/frame "
+           "consumer -> %" PRIu64 " ms emission (%" PRIu64 " credit parks), "
+           "max backlog %" PRIu64 " (bound %" PRIu64 "), final frame correct\n",
+           kFrames, kDelayUs, emitMs, creditParks, maxBacklog, kCredits);
+
+    /* clean detach + reap */
+    struct d9mt_wire_rec_nul odetach = {{d9mt_wire_op_detach, 8, 0}};
+    emit(&odetach, sizeof(odetach));
+    int ost = -1, oexited = 0;
+    for (int i = 0; i < 800; i++) {
+      if (waitpid(opid, &ost, WNOHANG) == opid) {
+        oexited = 1;
+        break;
+      }
+      usleep(10000);
+    }
+    if (!oexited) {
+      kill(opid, SIGKILL);
+      FAIL("overload server did not exit after detach");
+    }
+    if (!WIFEXITED(ost) || WEXITSTATUS(ost) != 0)
+      FAIL("overload server exit status 0x%x", ost);
+    char p5[1024];
+    snprintf(p5, sizeof(p5), "%s/ring", odir);
+    unlink(p5);
+    snprintf(p5, sizeof(p5), "%s/status", odir);
+    unlink(p5);
+    snprintf(p5, sizeof(p5), "%s/heap", odir);
+    unlink(p5);
+    rmdir(odir);
   }
 
   /* teardown */
