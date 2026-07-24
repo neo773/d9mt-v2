@@ -510,6 +510,11 @@ struct Exec {
 
   uint32_t presentSlot = 0;
   uint64_t backbufferWireId = 0;
+  /* persistent-backbuffer present model: ONE render texture substitutes for
+   * every backbuffer-routed bind — content survives presents (the client's
+   * BLIT/COPY contract, d3d9_swapchain.cpp); presentFrame COPIES it into the
+   * rotating pool slot at publish. */
+  id<MTLTexture> persistentBB = nil;
 
   /* S3 v11 skip-reason buckets + periodic render-stats (the 'drawing-and-
    * black vs skipping-everything' discriminator). Logged every 256 presents
@@ -2413,6 +2418,45 @@ static void handleBlit(const d9mt_wire_rec_blit_texture_view* r) {
 }
 
 
+/* The client's present contract (d3d9_swapchain.cpp "BLIT/COPY present
+ * model"): buffer 0 is the app's PERSISTENT back buffer — present COPIES it
+ * to the drawable and the swap-chain buffers never rotate, because D3D9 apps
+ * may compose a frame INCREMENTALLY (a few pretransformed tiles per present)
+ * and rely on back-buffer content SURVIVING Present regardless of DISCARD.
+ * The server must honor the same contract: all backbuffer-routed rendering
+ * lands in this ONE persistent texture (passes Load existing content unless
+ * the stream clears it); handlePresent COPIES it into the next IOSurface
+ * pool slot before the completion-gated publication. The pool keeps rotating
+ * for cross-process buffering — the RENDER TARGET does not. Rendering into
+ * the rotating slot directly spreads an incremental composition across
+ * D9MT_SERVER_SURFACES surfaces (one slice of the artwork per published
+ * frame — the "CRT scan" failure). */
+static id<MTLTexture> persistentBackbuffer() {
+  const uint32_t w = d9mt_pool_width(), h = d9mt_pool_height();
+  if (g->persistentBB && g->persistentBB.width == w &&
+      g->persistentBB.height == h)
+    return g->persistentBB;
+  if (g->persistentBB) { /* pool resized: retire the old backing by serial */
+    g->retire.emplace_back(g->lastSubmitted, g->persistentBB);
+    g->persistentBB = nil;
+  }
+  MTLTextureDescriptor* d = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                   width:w
+                                  height:h
+                               mipmapped:NO];
+  d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  d.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> t = [g->device newTextureWithDescriptor:d];
+  if (!t) {
+    execError("persistent backbuffer alloc failed");
+    return nil;
+  }
+  residencyAdd(t);
+  g->persistentBB = t;
+  return t;
+}
+
 static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id* r) {
   if (g->pass.active)
     closePass();
@@ -2430,8 +2474,14 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
       submitFrame();
       if (!waitSerial(g->lastSubmitted, 5000))
         execError("resize drain timed out");
+      /* swap pool-texture residency across the resize (publish-copy dst) */
+      for (int s = 0; s < D9MT_SERVER_SURFACES; s++)
+        if (id<MTLTexture> old = d9mt_pool_texture(s))
+          [g->residency removeAllocation:old];
       if (d9mt_iosurface_pool_resize(g->status, ref.width, ref.height))
         execError("pool resize failed");
+      for (int s = 0; s < D9MT_SERVER_SURFACES; s++)
+        residencyAdd(d9mt_pool_texture(s));
       break;
     }
   }
@@ -2452,7 +2502,7 @@ static void handleSetRenderTargets(const d9mt_wire_rec_set_render_targets_by_id*
     if ((ref.flags & D9MT_WIRE_RT_FLAG_BACKBUFFER) ||
         (ref.image_wire_id && ref.image_wire_id == g->backbufferWireId)) {
       out.backbuffer = true;
-      out.tex = d9mt_pool_texture((int)g->presentSlot);
+      out.tex = persistentBackbuffer();
       out.format = MTLPixelFormatBGRA8Unorm; /* IOSurface pool format */
       out.baseMip = out.baseLayer = 0;
       return;
@@ -2533,7 +2583,7 @@ static void handleClearById(const d9mt_wire_rec_clear_render_target_by_id* r) {
   /* standalone clear: dedicated mini-pass (port of clearRenderTarget) */
   RtAttachment target;
   if (r->flags & D9MT_WIRE_RT_FLAG_BACKBUFFER) {
-    target.tex = d9mt_pool_texture((int)g->presentSlot);
+    target.tex = persistentBackbuffer();
     target.format = MTLPixelFormatBGRA8Unorm;
     target.named = true;
     target.backbuffer = true;
@@ -2711,6 +2761,10 @@ static void handleSession(const d9mt_wire_rec_session* r) {
   g->lastPso = nil;
   g->dynValid = false;
   g->backbufferWireId = 0;
+  if (g->persistentBB) { /* fresh session gets a fresh persistent backbuffer */
+    g->retire.emplace_back(after, g->persistentBB);
+    g->persistentBB = nil;
+  }
 
   const uint64_t epoch =
       atomic_fetch_add_explicit(&g->status->epoch, 1, memory_order_release) + 1;
@@ -2775,6 +2829,45 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   sweepAsyncCreates();
   drainPendingBlits();
   const uint32_t slot = g->presentSlot;
+
+  /* Persistent-backbuffer publish copy: the frame's rendering lives in the
+   * ONE persistent texture (content survives presents — the client's
+   * BLIT/COPY contract); ship a full-texture GPU copy into this present's
+   * pool slot, ordered AFTER all frame rendering (folded clears materialize
+   * first; closePass's producer barrier orders the fragment writes ahead of
+   * this compute-encoder copy) and BEFORE the completion-gated publication
+   * below — frame_serial == N still means "slot pixels done". */
+  if (g->persistentBB) {
+    if (g->pass.active)
+      closePass();
+    else
+      flushPendingClears();
+    id<MTLTexture> dst = d9mt_pool_texture((int)slot);
+    id<MTL4ComputeCommandEncoder> enc = dst ? ensureXfer() : nil;
+    if (enc) {
+      /* CONSUMER barrier (§4c pairs with closePass's producer barrier): this
+       * copy is the stream's one render->compute READ of an attachment —
+       * without an incoming-encoder barrier the copy can be scheduled before
+       * the pass's fragment writes flush (published slot = stale previous
+       * frame; caught by the repeated quadrant gate). */
+      [enc barrierAfterQueueStages:(MTLStages)kStageFragment
+                      beforeStages:(MTLStages)(kStageBlit | kStageDispatch)
+                 visibilityOptions:(MTL4VisibilityOptions)kVisibilityDevice];
+      MTLSize sz = MTLSizeMake(
+          g->persistentBB.width < dst.width ? g->persistentBB.width : dst.width,
+          g->persistentBB.height < dst.height ? g->persistentBB.height : dst.height,
+          1);
+      [enc copyFromTexture:g->persistentBB
+               sourceSlice:0
+               sourceLevel:0
+              sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:sz
+                 toTexture:dst
+          destinationSlice:0
+          destinationLevel:0
+         destinationOrigin:MTLOriginMake(0, 0, 0)];
+    }
+  }
   submitFrame();
   g->backbufferWireId = r->backbuffer_wire_id;
   { static int n = 0;
@@ -2895,14 +2988,9 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
   }
 
   g->presentSlot = (g->presentSlot + 1) % D9MT_SERVER_SURFACES;
-  /* fresh frame: the pending pass carries the OLD slot's backbuffer texture;
-   * re-point flagged attachments at the new slot on the next bind (the client
-   * re-binds render targets every frame — until then, drop backbuffer draws) */
-  for (auto& c : g->pass.color)
-    if (c.backbuffer)
-      c.tex = nil;
-  if (g->pass.ds.backbuffer)
-    g->pass.ds.tex = nil;
+  /* The render target is the PERSISTENT texture, not the rotated slot — the
+   * pending pass's backbuffer attachments stay valid across the present
+   * (content survives; the next pass Loads it unless the stream clears). */
 }
 
 /* --- draws ------------------------------------------------------------------- */
@@ -3232,6 +3320,13 @@ d9mt_executor_init(struct d9mt_status* status, struct d9mt_wire_heap* heap,
   }
   residencyAdd(g->dummyBuffer);
   residencyAdd(g->dummyTexture);
+  /* pool IOSurface textures: as render-pass ATTACHMENTS they are resident
+   * via the pass descriptor, but the persistent-backbuffer publish COPY
+   * writes them from a COMPUTE encoder — which requires explicit residency
+   * (a non-resident copy dst is silently dropped: published slots freeze on
+   * stale content while draws keep landing). */
+  for (int i = 0; i < D9MT_SERVER_SURFACES; i++)
+    residencyAdd(d9mt_pool_texture(i));
 
   g->argTables.push_back(makeArgTablePair());
 

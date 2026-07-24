@@ -582,8 +582,21 @@ namespace dxvk::backend {
   }
 
   void* MtlWireContext::reserveBytes(uint16_t op, uint32_t bytes) {
-    if (!m_claimed || !g_wt.active)
+    if (!m_claimed || !g_wt.active) {
+      /* Emission-stop instrument: every OTHER stop path logs at its trip
+       * site (ring-full permanent disable, no-consumer disable, dead-server
+       * latch). The one silent path is a context recording without the wire
+       * claim — normal for a few frames during device overlap (the claim
+       * retry runs at each present), fatal if it persists. Name it ONCE. */
+      if (!m_claimed && m_wantClaim) {
+        static std::atomic<bool> warned = { false };
+        if (!warned.exchange(true, std::memory_order_relaxed))
+          Logger::warn(str::format("MtlWireContext: recording WITHOUT the "
+            "wire claim (op ", op, ") — records dropped until the per-present "
+            "claim retry succeeds (predecessor context still holds it)"));
+      }
       return nullptr;
+    }
 
     /* S3 v11 structural guard: NESTED emission (reserving while a record is
      * still pending) writes the inner record over the outer one's bytes —
@@ -1088,8 +1101,14 @@ namespace dxvk::backend {
   void MtlWireContext::synchronizeWsi(MtlPresenterSync sync) {
     /* S3 v5: once-per-present claim retry for contexts born while the claim
      * was held (overlapping device lifetimes). One bool test in the
-     * steady/permanently-disabled state. */
-    if (!g_wt.active && m_wantClaim)
+     * steady/claimed state. This must gate on m_wantClaim ALONE: g_wt is the
+     * PROCESS-lifetime transport, so g_wt.active stays true after the first
+     * successful attach even once the claiming context dies — gating the
+     * retry on !g_wt.active meant a successor context (device churn: the
+     * real device created before the throwaway one died) NEVER reclaimed,
+     * and the producer went silent for the rest of the run (rec=0 while the
+     * server heartbeat stayed alive). */
+    if (m_wantClaim)
       tryLateClaim();
 
     /* S2: THE present marker. One presentFrame per present, carrying the

@@ -209,3 +209,96 @@ run.
 - Local texture mirrors still exist (uploads forward) — the single-copy
   memory win (dropping the mirror entirely) is a later slice, after
   readback transport removes the last local readers.
+
+## GTA first-run fixes — the two server-only rendering-model bugs
+
+First real GTA IV server-only run (5c8ce74) surfaced two model violations.
+Both fixed; separate commits (A then B on top of 5c8ce74).
+
+### A — persistent-backbuffer present model (server)
+
+Symptom: intro/legal artwork rendered "CRT-scan" style — one slice of the
+composition per displayed frame, sweeping. The client fixed this EXACT bug
+long ago (d3d9_swapchain.cpp ~line 946, the BLIT/COPY present-model
+contract): present COPIES back buffer 0 into the drawable and the buffers
+NEVER rotate, because apps compose incrementally (a few pretransformed
+tiles per present, no clears) and rely on back-buffer content SURVIVING
+Present. The server violated that contract: backbuffer-routed RT binds
+substituted the CURRENT IOSurface pool slot (`d9mt_pool_texture(
+presentSlot)`), which rotates at every present — each published surface
+held only its own frame's tiles.
+
+Fix (executor.mm): ONE persistent BGRA8 render texture
+(`Exec::persistentBB`, `persistentBackbuffer()`) now substitutes for every
+backbuffer-routed bind — set_rt and standalone clear_by_id both route to
+it; pass loadActions were already Load-unless-cleared, so content survives
+presents naturally. `handlePresent` ships a full-texture GPU copy
+(compute-encoder `copyFromTexture`) into the NEXT pool slot before the
+completion-gated publication — the pool keeps rotating for cross-process
+buffering, the RENDER TARGET does not. `frame_serial == N` still means
+"slot pixels done". The texture is retired on session reset and lazily
+recreated on pool resize; the old "drop backbuffer draws until next
+set_rt" rotation workaround in handlePresent is deleted.
+
+TWO TRAPS the first draft hit (v14 rotating-offset gates failed
+timing-dependently, published slot = STALE content; which scenario failed
+varied per run):
+
+1. RESIDENCY (the actual root cause): the pool IOSurface textures were
+   NEVER in the residency set — as render-pass ATTACHMENTS (old model)
+   the pass descriptor covers them, but as the publish copy's COMPUTE
+   destination they need explicit residency. A non-resident copy dst is
+   SILENTLY dropped: draws keep landing (diag showed correct per-wave CBV
+   offsets flushing) while every published slot freezes on stale content
+   — reproduced even with a full CPU-side drain between rendering and
+   copy, which is what ruled out ordering and named residency. Pool
+   textures are now residencyAdd'ed at executor init and swapped across
+   pool resize. Rule: ANY resource an executor compute/blit op touches
+   must be in the residency set; attachments-only residency is a trap.
+
+2. ORDERING (hardening, kept): the publish copy is the stream's one
+   render->compute READ of an attachment. Metal 4 wants the barrier PAIR
+   for attachment consumption: closePass's §4c PRODUCER barrier
+   (fragment -> all queue stages) plus a CONSUMER barrier on the incoming
+   copy encoder (`barrierAfterQueueStages:Fragment
+   beforeStages:Blit|Dispatch, visibility Device`). If another
+   render->compute attachment read ever appears, it needs the same
+   incoming barrier.
+
+Gate: test_feed "persistent-backbuffer contract" — three frames draw a
+DIFFERENT viewport quadrant each into the backbuffer with NO clears after
+frame 1; the THIRD published surface must contain ALL THREE quadrants plus
+the frame-1 clear in the untouched corner. Fails against rotating-RT
+behavior by construction.
+
+### B — successor context never reclaimed the wire (client)
+
+Symptom: mid-run (GTA's device churn: real device created BEFORE the
+throwaway boot device died), wire stats flatlined — rec=0 bytes=0
+srvFrames=0 for whole windows while the server heartbeat stayed alive and
+the client kept re-presenting the last published server frame
+(srvAccepted=256/window, inel/copySkip still climbing).
+
+Root cause (mtl_wire_context.cpp synchronizeWsi): the per-present late-
+claim retry was gated `if (!g_wt.active && m_wantClaim)`. `g_wt` is the
+PROCESS-lifetime transport — after the first successful attach,
+`g_wt.active` stays true forever (the claiming context's dtor quiesces the
+server but never clears it), so the successor context born claim-held
+NEVER ran `tryLateClaim()` and the producer went silent for the rest of
+the run. Fix: gate on `m_wantClaim` alone (still one bool test steady-
+state).
+
+Emission-stop instrumentation (audit of every producer-disable path):
+ring-full permanent disable, no-consumer disable, and the dead-server
+heartbeat latch all already log loudly at their trip sites. The one SILENT
+path was a context recording without the claim — `reserveBytes` now warns
+ONCE, named ("recording WITHOUT the wire claim — records dropped until the
+per-present claim retry succeeds"). The ctor's "wire claim held
+(overlapping device) — will retry at present" and tryLateClaim's "released
+by predecessor — late connect" logs bracket the recovery.
+
+Expected GTA signature after A+B: legal art composes fully (no scan
+sweep); at device churn a claim-held log, then the late-connect log within
+one present, rec/bytes sustained nonzero for the rest of the run; 3D world
+renders (draws reach the server again). 2D misplacement was not chased —
+re-evaluate only if it survives A+B.

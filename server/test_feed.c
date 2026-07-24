@@ -1144,6 +1144,70 @@ main(int argc, char **argv) {
              "1 id-learned) all published correctly\n");
     }
 
+    /* --- persistent-backbuffer contract: the client's BLIT/COPY present
+     * model (d3d9_swapchain.cpp) guarantees back-buffer content SURVIVES
+     * presents — apps compose incrementally (a few tiles per frame) with no
+     * clears between. Three frames each draw a DIFFERENT viewport quadrant
+     * into the backbuffer, clear only before frame 1; the THIRD published
+     * surface must contain ALL THREE quadrants. Fails against rotating-RT
+     * behavior (each pool slot would hold only its own frame's quadrant). */
+    {
+      static const float quad[3][2] = {{0.f, 0.f}, {320.f, 0.f}, {0.f, 240.f}};
+      emit_bind_shader(0, 0xA001); /* vsMain/fsMain: solid red triangle */
+      emit_bind_shader(1, 0xA002);
+      for (int i = 0; i < 3; i++) {
+        emit_backbuffer_rt();
+        if (i == 0)
+          emit_clear(0.f, 0.f, 1.f); /* frame 1 ONLY: blue background */
+        struct {
+          struct d9mt_wire_rec_set_viewports rec;
+          struct d9mt_wire_viewport vp;
+        } qvp = {{{d9mt_wire_op_set_viewports, sizeof(qvp), 0}, 1, 0},
+                 {quad[i][0], quad[i][1], 320.f, 240.f, 0.f, 1.f, 0, 0, 0, 0}};
+        emit(&qvp, sizeof(qvp));
+        emit_draws(1);
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("persistent-bb: frame %d never presented", i);
+      }
+      uint32_t ps = atomic_load_explicit(&status->present_slot, memory_order_acquire);
+      IOSurfaceRef psf = IOSurfaceLookup(ids[ps]);
+      if (!psf)
+        FAIL("persistent-bb: IOSurfaceLookup failed");
+      IOSurfaceLock(psf, kIOSurfaceLockReadOnly, NULL);
+      const uint8_t *pbase = IOSurfaceGetBaseAddress(psf);
+      size_t pbpr = IOSurfaceGetBytesPerRow(psf);
+      uint8_t tl[4], tr[4], bl[4], br[4];
+      memcpy(tl, pbase + 120 * pbpr + 160 * 4, 4); /* frame-1 quadrant */
+      memcpy(tr, pbase + 120 * pbpr + 480 * 4, 4); /* frame-2 quadrant */
+      memcpy(bl, pbase + 360 * pbpr + 160 * 4, 4); /* frame-3 quadrant */
+      memcpy(br, pbase + 360 * pbpr + 480 * 4, 4); /* untouched background */
+      IOSurfaceUnlock(psf, kIOSurfaceLockReadOnly, NULL);
+      CFRelease(psf);
+      uint8_t redq[4] = {0, 0, 255, 255}, blueq[4] = {255, 0, 0, 255};
+      if (memcmp(bl, redq, 4) != 0)
+        FAIL("persistent-bb: frame-3's OWN quadrant missing "
+             "(%02x%02x%02x%02x) — draw/publish broken outright", bl[0],
+             bl[1], bl[2], bl[3]);
+      if (memcmp(tl, redq, 4) != 0 || memcmp(tr, redq, 4) != 0)
+        FAIL("persistent-bb: earlier quadrants LOST (tl=%02x%02x%02x%02x "
+             "tr=%02x%02x%02x%02x) — backbuffer content did not survive "
+             "presents (rotating render target)", tl[0], tl[1], tl[2], tl[3],
+             tr[0], tr[1], tr[2], tr[3]);
+      if (memcmp(br, blueq, 4) != 0)
+        FAIL("persistent-bb: background clobbered (%02x%02x%02x%02x) — "
+             "frame-1 clear did not survive", br[0], br[1], br[2], br[3]);
+      /* restore the full viewport for the scenarios below */
+      struct {
+        struct d9mt_wire_rec_set_viewports rec;
+        struct d9mt_wire_viewport vp;
+      } fvp = {{{d9mt_wire_op_set_viewports, sizeof(fvp), 0}, 1, 0},
+               {0.f, 0.f, 640.f, 480.f, 0.f, 1.f, 0, 0, 0, 0}};
+      emit(&fvp, sizeof(fvp));
+      printf("[test_feed] persistent-backbuffer contract: 3 incremental "
+             "quadrants all present in the third published surface\n");
+    }
+
     /* --- v11 MINIMAL CUBE: the reproducer's failure shape. Wire vertex
      * buffer (real fetched bytes) + wire index buffer + a constant matrix
      * through the push block + one indexed draw. A missing input (VB/IB
