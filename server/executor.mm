@@ -1186,6 +1186,22 @@ static void materializePass() {
     }
   }
 
+  /* TBDR load-action tripwire: a pass materialization NEVER carries
+   * MTLLoadActionDontCare — mid-frame reopens (pass splits around flushes/
+   * blits) must LOAD surviving attachment content, and even a first open is
+   * Clear or Load here. DontCare on a reopened attachment reads back
+   * uninitialized tile memory on Apple GPUs (flickering tile-grid garbage).
+   * By construction the assignments above only produce Clear/Load; this
+   * guards the invariant against future load-action optimizations and
+   * counts into exec_errors (asserted zero by the test gates). */
+  for (uint32_t i = 0; i < 4; i++)
+    if (g->pass.color[i].tex &&
+        desc.colorAttachments[i].loadAction == MTLLoadActionDontCare)
+      execError("pass materialization: color DontCare load action");
+  if (g->pass.ds.tex &&
+      desc.depthAttachment.loadAction == MTLLoadActionDontCare)
+    execError("pass materialization: depth DontCare load action");
+
   /* occlusion transport: every pass can carry visibility counters (port of
    * the client's pass-creation binding, mtl_context_record.cpp). */
   desc.visibilityResultBuffer = g->visBuf;

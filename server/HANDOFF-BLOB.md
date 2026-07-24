@@ -154,9 +154,18 @@ Root causes, all in the pool, all fixed + soak-gated:
    failure still degrades to the legacy pow2 layout, then ring-only.
 2. **Freelist cap leaked the region**: mass scene-transition retires
    (6.8k at once) overflowed the 1024-entry freelist; overflow entries were
-   DROPPED = region bytes lost for the session. Cap now 8192
-   (`D9MT_BLOB_MAX_FREE`), and `blobFlDrop=` in PROF is the never-fire
-   tripwire.
+   DROPPED = region bytes lost for the session. First fix bumped the cap to
+   8192 — and the next live street run overflowed THAT too (12.6k
+   blobFlDrop/window during transitions, same bug one size up: blobFb=2.5k
+   residual fallbacks, useFlush=38k pass closes, srvGpu 19 ms). The cap is
+   now GONE: freelist storage is heap-owned and realloc-doubles on demand
+   (`D9MT_BLOB_FREE_INITIAL` = 1024 entries, `d9mt_blob_free_reserve`) —
+   entry drops are impossible by construction, not just rarer. The OOM last
+   resort (realloc failure) merges the slice into an ADJACENT freelist entry
+   at max serial: bytes preserved, only the neighbor's reuse delayed (the
+   retire-merge hazard, deliberately confined to the unreachable path).
+   `freelist_drops` / PROF `blobFlDrop=` can fire only on OOM AND an
+   isolated slice — the never-fire tripwire, kept.
 3. **Exact-size-only reuse stranded free bytes**: after a scene transition
    the next scene's sizes stop matching retired sizes — every alloc missed
    despite free bytes. Now: exact-size pass, then bump, then SPLIT-FIT of
@@ -174,8 +183,40 @@ Root causes, all in the pool, all fixed + soak-gated:
 Gate: test_feed **BLOB GATE 0b** (production-shaped soak) — 1000 frames at
 3x the measured street rate, completion throttled 3 frames behind, two 6.8k
 scene bursts with a size shift (16K->32K), per-16KiB-slot shadow asserting
-zero misses, zero freelist drops, zero premature/aliased grants. It FAILS on
-every one of the four bugs above individually.
+zero misses, zero freelist drops, zero premature/aliased grants, PLUS the
+scene-transition STORM: 10 waves each mass-retiring 8500+ slices in a
+SINGLE frame (past the old 8192 cap) with a 16K<->32K size-class shift per
+wave, re-allocating 4 frames later, churn running throughout. Every storm
+frame asserts BYTE CONSERVATION (liveBytes + freelistBytes == bump — one
+dropped entry breaks the equality that same frame) and the final frames
+assert utilization returns to baseline. Mutation-verified: reintroducing an
+8192 drop cap fails the gate at the first mass retire ("LEAK at frame 1001
+— a freelist entry was lost"). It FAILS on every one of the four bugs above
+individually.
+
+### Street-artifact audit (the 30fps flood build), verified this round
+- **Flickering black tile-grid**: NOT a DontCare reopen — `closePass`
+  resets all clear flags, so every mid-frame reopen materializes with
+  `MTLLoadActionLoad` (store is always Store; DontCare appears nowhere in
+  pass setup). A load-action tripwire now guards this by construction in
+  `materializePass` (DontCare on any attachment -> exec_errors, asserted 0
+  in the flow-control storm gate + the mid-pass pixel gates). The grid is
+  pass-shaped fallout of the flood itself: 149 pass closes/frame plus
+  create-worker starvation (noRt=2.7k/window, dsUnres late-resolves) put
+  never-rendered attachments on screen; collapses with useFlush -> 0.
+- **Random geometry stretching**: NOT pool premature reuse — all three
+  reuse gates compare in the conservative direction (stale completed
+  mirror = LATER grants; retire stamp `markerMirror+1` is emitted by the
+  same CS thread that emits uses, and the Rc refcount acq/rel edge makes a
+  racing destructor read a stamp >= the last-use frame). NOT the V15
+  rangeLive race — the fallback snapshots bytes at emission (`heapAlloc`
+  memcpy) into ack-gated staging. The actual mechanism: under the
+  fallback flood the 128 MiB staging heap goes FULL and `heapAlloc` DROPS
+  V16 dirty-range buffer re-ships (`heap->dropped`, "shared heap full"
+  warn) — the server then draws that range from the previous generation's
+  bytes = mixed-frame vertices. Traffic on this path exists only while
+  blobFb > 0; with the pool leak gone the path is residual-only and the
+  heap cannot fill.
 
 ### qWire=0 (the "dead bracket emission") — NOT a transport break
 Forensics: `dbbe412..a0e24c3` did not touch beginQuery/endQuery/createGpuQuery

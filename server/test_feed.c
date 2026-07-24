@@ -3121,7 +3121,7 @@ main(int argc, char **argv) {
      * completed the frame that used it reproduced the production
      * corruption). --- */
     {
-      static struct d9mt_blob_pool pool; /* ~24 KiB — keep off the stack */
+      static struct d9mt_blob_pool pool; /* zero-init required (static) */
       d9mt_blob_init(&pool, HEAP_CAP, BLOB_CAP);
       uint64_t a = d9mt_blob_alloc(&pool, 100, 0);
       uint64_t b = d9mt_blob_alloc(&pool, 100, 0);
@@ -3144,6 +3144,7 @@ main(int argc, char **argv) {
       d9mt_blob_retire(&pool, b, 100, 0);
       if (d9mt_blob_alloc(&pool, 100, 0) != b)
         FAIL("blob pool: serial-0 retire not immediately reusable");
+      d9mt_blob_destroy(&pool);
       printf("[test_feed] blob pool: premature reuse BLOCKED at "
              "completed<retire, granted at completed>=retire\n");
     }
@@ -3159,23 +3160,34 @@ main(int argc, char **argv) {
      *     region) and re-allocates with DIFFERENT sizes (the old exact-size-
      *     only reuse stranded every retired byte);
      *   - steady churn: 81 allocs/frame (3x street ~27), held 2 frames.
+     * Then the SCENE-TRANSITION STORM (the live 12.6k/window flDrop
+     * signature that leaked the region through the 8192 fixed cap): 10
+     * waves, each mass-retiring 8500+ slices in a SINGLE frame with a
+     * 16K<->32K size-class shift per wave, churn running throughout.
      * Asserts: zero pool drops (blobFb==0 equivalent), zero freelist drops
-     * (no leak), and NO premature reuse (every granted slot is FREE or
-     * cooling with serial <= completed) — checked per 16 KiB slot. --- */
+     * (drops are impossible by construction now — the tripwire), NO
+     * premature reuse (every granted slot is FREE or cooling with serial
+     * <= completed, per 16 KiB slot), and BYTE CONSERVATION every storm
+     * frame: liveBytes + freelistBytes == bump — a single dropped entry
+     * breaks the equality instantly, so utilization provably returns to
+     * baseline after every wave. --- */
     {
       enum { SOAK_SLOTS = 32768 };            /* 512 MiB / 16 KiB */
-      static struct d9mt_blob_pool spool;     /* ~192 KiB, off the stack */
+      static struct d9mt_blob_pool spool;     /* zero-init required (static) */
       static uint8_t  slotLive[SOAK_SLOTS];   /* 0=free 1=live 2=cooling */
       static uint64_t slotSerial[SOAK_SLOTS];
       static uint64_t burstOff[6800];
       static uint64_t churnOff[2][81], churnSz[2][81];
+      static uint64_t waveOff[8500];          /* the storm's live wave */
       const uint64_t soakBase = 128ull << 20;
       const uint64_t soakCap  = 512ull << 20;
       d9mt_blob_init(&spool, soakBase, soakCap);
       memset(slotLive, 0, sizeof(slotLive));
       uint64_t burstSz = 16384u; /* first scene: 16 KiB slices */
       int burstLive = 0;
-      for (uint64_t f = 1; f <= 1000; f++) {
+      uint64_t waveSz = 0;
+      int waveLive = 0, stormRetireWaves = 0;
+      for (uint64_t f = 1; f <= 1086; f++) {
         const uint64_t completed = f > 3 ? f - 3 : 0; /* throttled consumer */
         /* helper-free alloc+assert (C: inline the checks) */
         #define SOAK_ALLOC(szv, outoff) do {                                   \
@@ -3219,6 +3231,34 @@ main(int argc, char **argv) {
             SOAK_ALLOC(burstSz, burstOff[i]);
           burstLive = 1;
         }
+        /* --- scene-transition STORM (f>1000): mass retires in SINGLE
+         * frames. Cadence per 8-frame wave: retire everything live at
+         * s%8==0 (8500+81 retires in one frame — past the old 8192 cap,
+         * which silently dropped and leaked); re-allocate 4 frames later
+         * (completion throttle now covers the retire stamp — a scene load
+         * follows the unload, it doesn't overlap it) with the size class
+         * SHIFTED 16K<->32K each wave. --- */
+        if (f > 1000) {
+          const uint64_t s = f - 1001;
+          if (s % 8u == 0u) {
+            const uint64_t k = s / 8u;
+            if (k == 0u && burstLive) { /* the base scene leaves the stage */
+              for (int i = 0; i < 6800; i++)
+                SOAK_RETIRE(burstOff[i], burstSz);
+              burstLive = 0;
+            } else if (k >= 1u && k <= 10u && waveLive) {
+              for (int i = 0; i < 8500; i++) /* single-frame mass retire */
+                SOAK_RETIRE(waveOff[i], waveSz);
+              waveLive = 0;
+              stormRetireWaves++;
+            }
+          } else if (s % 8u == 4u && s / 8u <= 9u) {
+            waveSz = ((s / 8u) & 1u) ? 32768u : 16384u; /* class shift */
+            for (int i = 0; i < 8500; i++)
+              SOAK_ALLOC(waveSz, waveOff[i]);
+            waveLive = 1;
+          }
+        }
         /* steady churn: retire the batch held 2 frames, allocate this one */
         const int slotIdx = (int)(f & 1u);
         if (f > 2) {
@@ -3232,14 +3272,52 @@ main(int argc, char **argv) {
         }
         #undef SOAK_ALLOC
         #undef SOAK_RETIRE
+        /* BYTE CONSERVATION (the no-leak law): every byte below the bump
+         * cursor is either LIVE (granted, unretired) or in a freelist
+         * entry. A dropped retire breaks the equality the same frame.
+         * Checked every storm frame + every 100th base frame. */
+        if (f > 1000 || (f % 100u) == 0u) {
+          uint64_t flBytes = 0, liveBytes = 0;
+          for (uint32_t fi = 0; fi < spool.nfree; fi++)
+            flBytes += spool.freelist[fi].size;
+          for (int si = 0; si < SOAK_SLOTS; si++)
+            if (slotLive[si] == 1)
+              liveBytes += D9MT_BLOB_ALIGN;
+          if (liveBytes + flBytes != spool.bump)
+            FAIL("blob soak: LEAK at frame %llu — live=%llu + free=%llu != "
+                 "bump=%llu (a freelist entry was lost)",
+                 (unsigned long long)f, (unsigned long long)liveBytes,
+                 (unsigned long long)flBytes, (unsigned long long)spool.bump);
+        }
       }
       if (spool.drops != 0 || spool.freelist_drops != 0)
         FAIL("blob soak: drops=%llu flDrops=%llu after clean run",
              (unsigned long long)spool.drops,
              (unsigned long long)spool.freelist_drops);
+      if (stormRetireWaves != 10)
+        FAIL("blob soak: storm shape wrong (%d mass-retire waves, want 10)",
+             stormRetireWaves);
+      /* baseline recovery: after the last wave retires and completion
+       * covers it, only churn slices remain live — total FREE bytes
+       * (never-bumped + freelist) must equal capacity minus churn. */
+      {
+        uint64_t flBytes = 0, liveBytes = 0;
+        for (uint32_t fi = 0; fi < spool.nfree; fi++)
+          flBytes += spool.freelist[fi].size;
+        for (int si = 0; si < SOAK_SLOTS; si++)
+          if (slotLive[si] == 1)
+            liveBytes += D9MT_BLOB_ALIGN;
+        const uint64_t freeBytes = (soakCap - spool.bump) + flBytes;
+        if (freeBytes != soakCap - liveBytes)
+          FAIL("blob soak: utilization did NOT return to baseline "
+               "(free=%llu want=%llu)", (unsigned long long)freeBytes,
+               (unsigned long long)(soakCap - liveBytes));
+      }
+      d9mt_blob_destroy(&spool);
       printf("[test_feed] blob soak: 1000 frames @3x street rate + 2 scene "
-             "bursts (6800 slices, size shift 16K->32K), throttled "
-             "completion — 0 misses, 0 freelist drops, 0 premature grants\n");
+             "bursts + 10-wave storm (8.5k single-frame mass retires, "
+             "16K<->32K class shifts), throttled completion — 0 misses, "
+             "0 freelist drops, 0 premature grants, bytes conserved\n");
     }
 
     /* --- P1 BLOB GATE A: the PoC scenario through the REAL server
@@ -3727,6 +3805,15 @@ main(int argc, char **argv) {
       if (encD > 24) /* 20 frames x 1 pass + slack */
         FAIL("flow-control storm: %" PRIu64 " render passes for 20 frames "
              "(want O(frames) ~20 — staged uploads shattered passes)", encD);
+      /* load-action tripwire: every pass materialization in the storm
+       * (including any mid-frame reopen) must be Clear/Load — a DontCare
+       * reads back uninitialized tile memory on TBDR (flickering tile-grid).
+       * The executor counts violations into exec_errors. */
+      if (atomic_load_explicit(&status->exec_errors, memory_order_relaxed))
+        FAIL("flow-control storm: exec_errors=%" PRIu64 " (load-action "
+             "tripwire or exec fault fired)",
+             (uint64_t)atomic_load_explicit(&status->exec_errors,
+                                            memory_order_relaxed));
       uint32_t sP = atomic_load_explicit(&status->present_slot, memory_order_acquire);
       IOSurfaceRef sfP = IOSurfaceLookup(ids[sP]);
       if (!sfP)

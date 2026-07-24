@@ -22,9 +22,10 @@
  * frame-credit mechanism (HANDOFF-FLOWCONTROL.md, N=2) bounds how far the
  * stamp can run ahead, so the freelist breathes within ~N presents.
  *
- * Pure logic, no OS deps, C11 + C++17, byte-identical behavior x86_64/arm64:
- * the client (mingw C++) and test_feed (clang C11) compile the SAME code, so
- * the premature-reuse gate in test_feed asserts the exact logic the driver
+ * Pure logic, no OS deps beyond libc realloc/free (freelist storage — see
+ * below), C11 + C++17, byte-identical behavior x86_64/arm64: the client
+ * (mingw C++) and test_feed (clang C11) compile the SAME code, so the
+ * premature-reuse gate in test_feed asserts the exact logic the driver
  * runs. Caller provides locking (single mutex in mtl_wire_context.cpp).
  *
  * Offsets are DATA-AREA-RELATIVE (like upload regions); the caller passes a
@@ -33,6 +34,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h> /* realloc/free: growable freelist storage */
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,15 +45,17 @@ extern "C" {
  * one granularity serves the client wrap, the server wrap and the pool. */
 #define D9MT_BLOB_ALIGN 16384ull
 
-/* Retired slices awaiting their completion serial. 8192 x 24 B (~192 KiB).
- * Sized for the measured worst case, which is NOT steady-state DISCARD churn
- * but the scene-load burst: a street scene allocates ~6.8k one-shot
- * staging-class slices in one window and retires them together — a smaller
- * cap silently DROPPED the overflow and leaked the region for the session
- * (the exact exhaustion signature: blob= plateaus, blobFb= climbs forever).
- * Overflow is still counted and dropped (never corrupted), but at this size
- * it means a leak-class bug, not a load burst. */
-#define D9MT_BLOB_MAX_FREE 8192u
+/* Initial freelist storage (entries). Storage DOUBLES on demand — there is
+ * NO fixed cap. History of this number: two fixed caps (1024, then 8192)
+ * were each "sized for the measured worst case" and each was then exceeded
+ * by a live scene-transition mass retire (6.8k, then 12.6k/window street
+ * retires) — overflow entries were silently DROPPED, permanently leaking
+ * their region bytes for the session (the exhaustion signature: blob=
+ * plateaus, blobFb= climbs forever, useFlush pass-close flood returns).
+ * Entry drops are now IMPOSSIBLE by construction: retire grows the storage
+ * instead of discarding, and the OOM last resort merges into an adjacent
+ * entry (bytes preserved). freelist_drops stays as the never-fire tripwire. */
+#define D9MT_BLOB_FREE_INITIAL 1024u
 
 struct d9mt_blob_free {
   uint64_t off;
@@ -64,16 +68,20 @@ struct d9mt_blob_pool {
   uint64_t capacity; /* blob region bytes */
   uint64_t bump;     /* next never-used byte (relative to base) */
   uint32_t nfree;
-  uint32_t _pad;
+  uint32_t fcap;           /* freelist storage capacity (grows, never caps) */
   uint64_t drops;          /* failed allocs (region exhausted) */
-  uint64_t freelist_drops; /* retires lost to a full freelist */
-  struct d9mt_blob_free freelist[D9MT_BLOB_MAX_FREE];
+  uint64_t freelist_drops; /* never-fire: OOM + isolated slice only */
+  struct d9mt_blob_free* freelist; /* heap-owned, realloc-doubled */
 };
 
 static inline uint64_t d9mt_blob_round(uint64_t size) {
   return (size + D9MT_BLOB_ALIGN - 1ull) & ~(D9MT_BLOB_ALIGN - 1ull);
 }
 
+/* Init/reset. The struct must be ZERO-INITIALIZED before the first call
+ * (every user is a static/global — the driver's g_blobPool, test_feed's
+ * static pools); re-init keeps already-grown freelist storage (no leak,
+ * no shrink) and only resets the accounting. */
 static inline void d9mt_blob_init(struct d9mt_blob_pool* p, uint64_t base,
                                   uint64_t capacity) {
   p->base = base;
@@ -82,6 +90,33 @@ static inline void d9mt_blob_init(struct d9mt_blob_pool* p, uint64_t base,
   p->nfree = 0;
   p->drops = 0;
   p->freelist_drops = 0;
+}
+
+/* Release freelist storage (tests / teardown; the driver's pool lives for
+ * the process). Safe on a zero-initialized never-used pool. */
+static inline void d9mt_blob_destroy(struct d9mt_blob_pool* p) {
+  free(p->freelist);
+  p->freelist = 0;
+  p->fcap = 0;
+  p->nfree = 0;
+}
+
+/* Ensure room for one more freelist entry: double the storage when full.
+ * Returns 0 only on realloc failure (OOM) — the existing entries are
+ * untouched in that case (realloc contract). */
+static inline int d9mt_blob_free_reserve(struct d9mt_blob_pool* p) {
+  if (p->nfree < p->fcap)
+    return 1;
+  {
+    const uint32_t ncap = p->fcap ? p->fcap * 2u : D9MT_BLOB_FREE_INITIAL;
+    void* n = realloc(p->freelist,
+                      (size_t)ncap * sizeof(struct d9mt_blob_free));
+    if (!n)
+      return 0;
+    p->freelist = (struct d9mt_blob_free*)n;
+    p->fcap = ncap;
+  }
+  return 1;
 }
 
 /* Allocate a slice for `size` bytes. `completed_serial` is the server's
@@ -155,14 +190,42 @@ static inline uint64_t d9mt_blob_alloc(struct d9mt_blob_pool* p, uint64_t size,
  * (d9mt_blob_coalesce_covered). A top-of-bump block also must NOT return to
  * the bump cursor here — bump allocs are ungated and the serial may be
  * uncovered (the PoC's premature-reuse class); the covered-coalesce pass
- * reclaims the frontier safely instead. */
+ * reclaims the frontier safely instead.
+ *
+ * ENTRY DROPS ARE IMPOSSIBLE BY CONSTRUCTION: the freelist storage grows
+ * (doubling realloc) instead of overflowing — two successive fixed caps
+ * (1024, 8192) were each exceeded by live scene-transition mass retires and
+ * each leaked the dropped regions for the session. On realloc failure (OOM
+ * — the only path with no storage), the slice merges into an ADJACENT
+ * entry, taking the max serial: bytes are preserved, only the neighbor's
+ * reuse is delayed. That IS the retire-merge hazard the soak prohibited as
+ * a normal path (an uncovered fresh serial dragging older bytes behind it),
+ * which is why it is the OOM-only last resort, never the steady state.
+ * freelist_drops can fire only on OOM AND a slice with no neighbor on
+ * either side — the never-fire tripwire (PROF blobFlDrop=). */
 static inline void d9mt_blob_retire(struct d9mt_blob_pool* p, uint64_t off,
                                     uint64_t size, uint64_t serial) {
   const uint64_t need = d9mt_blob_round(size);
   if (need == 0 || off < p->base || off + need > p->base + p->capacity)
     return;
-  if (p->nfree >= D9MT_BLOB_MAX_FREE) {
-    p->freelist_drops++;
+  if (!d9mt_blob_free_reserve(p)) {
+    /* OOM last resort: coalesce-into-neighbor (never discard). */
+    for (uint32_t i = 0; i < p->nfree; i++) {
+      if (p->freelist[i].off + p->freelist[i].size == off) {
+        p->freelist[i].size += need; /* neighbor below: extend upward */
+        if (serial > p->freelist[i].serial)
+          p->freelist[i].serial = serial;
+        return;
+      }
+      if (off + need == p->freelist[i].off) {
+        p->freelist[i].off = off; /* neighbor above: extend downward */
+        p->freelist[i].size += need;
+        if (serial > p->freelist[i].serial)
+          p->freelist[i].serial = serial;
+        return;
+      }
+    }
+    p->freelist_drops++; /* OOM + isolated slice: unreachable in practice */
     return;
   }
   p->freelist[p->nfree].off = off;
