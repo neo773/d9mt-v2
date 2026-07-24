@@ -1,0 +1,21 @@
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_1cbe8e76ff48ba 404,1861-1864
+server/HANDOFF-ALLIN.md
+  s_9dc0f2092159a8::t_fb3471013f7fed 1-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3c82e1e54c0fd609e4b557bb7dd02ecb6b33a4d8",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
