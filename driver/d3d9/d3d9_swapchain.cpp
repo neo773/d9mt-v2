@@ -970,7 +970,9 @@ namespace dxvk {
     desc.imageExtent = m_swapchainExtent;
     desc.imageFormat = GetSurfaceFormat();
     desc.imageCount  = m_presentParams.BackBufferCount + 1u;
-    desc.vsync       = true;
+    // D3DPRESENT_INTERVAL_IMMEDIATE = unthrottled (no vsync); everything else
+    // display-synced. Flows to CAMetalLayer.displaySyncEnabled via the bridge.
+    desc.vsync       = m_presentParams.PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE;
     desc.hwnd        = reinterpret_cast<intptr_t>(Window);
 
     return createMtlPresenter(m_device, desc);
@@ -1359,7 +1361,7 @@ namespace dxvk {
         desc.imageExtent = m_swapchainExtent;
         desc.imageFormat = GetSurfaceFormat();
         desc.imageCount  = m_presentParams.BackBufferCount + 1u;
-        desc.vsync       = true;
+        desc.vsync       = m_presentParams.PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE;
         m_wctx->presenter->recreate(desc);
       }
     }
