@@ -640,6 +640,12 @@ struct unixcall_wire_server_frame {
                               * blit SAMPLES the wrap through an MTL4 argument
                               * table, which binds by resource id, not handle.
                               * 0 = unusable (a 0 id samples nothing: black). */
+  /* Present-timeline instrumentation (status v4 tl ring, d9mt_status.h):
+   * server hop timestamps for out_frame_serial in mach ns; 0 when the server
+   * predates v4 or the ring slot was recycled before this acquire. */
+  uint64_t out_tl_consume_ns; /* out: t2 marker consumed */
+  uint64_t out_tl_gpu_ns;     /* out: t3 GPU completion observed */
+  uint64_t out_tl_publish_ns; /* out: t4 just before the frame_serial store */
 };
 
 /* Layout parity proof, compiled into BOTH sides (PE thunks + unix .so) from
@@ -649,11 +655,13 @@ struct unixcall_wire_server_frame {
  * sizeof for exactly that comparison (72 = current, 64 = pre-resource-id). */
 #ifdef __cplusplus
 static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) == 64
-           && sizeof(struct unixcall_wire_server_frame) == 72,
+           && offsetof(struct unixcall_wire_server_frame, out_tl_consume_ns) == 72
+           && sizeof(struct unixcall_wire_server_frame) == 96,
            "unixcall_wire_server_frame layout drifted");
 #else
 _Static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) == 64
-            && sizeof(struct unixcall_wire_server_frame) == 72,
+            && offsetof(struct unixcall_wire_server_frame, out_tl_consume_ns) == 72
+            && sizeof(struct unixcall_wire_server_frame) == 96,
             "unixcall_wire_server_frame layout drifted");
 #endif
 

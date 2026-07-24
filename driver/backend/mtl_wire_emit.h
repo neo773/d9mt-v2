@@ -67,4 +67,20 @@ namespace dxvk::backend::wire {
    * feeds the PROF `srvFrames`/`srvPace` fields. Cheap (one unixcall). */
   void presentObserved();
 
+  /* --- present-pipeline timeline (instrumentation ONLY — never gate
+   * behavior on it) ---------------------------------------------------------
+   * Per-frame hop timestamps across client -> server -> client, decoded into
+   * ONE line every 256 completed presents (D9MT_PROFILE gate, same cadence
+   * as the PROF line). Client marks are QPC, converted into the machine-
+   * global mach-ns domain via the WMTWireWaitTimeTap calibration; the server
+   * hops arrive through WMTServerFrame (status v4 tl ring). All four marks
+   * run on the CS thread inside the present closure (d3d9_swapchain.cpp);
+   * the t1/t5 hops are recorded internally by the wire producer. When
+   * D9MT_PROFILE is unset each call is a single branch. Reading the line:
+   * HANDOFF-TIMELINE.md. */
+  void timelinePresentStart(uint64_t localSerial); /* t0: present closure entry */
+  void timelineDrawableAcquired();                 /* t6: acquireNextImage returned */
+  void timelineCommitDone();                       /* t7: synchronizeWsi returned (blit encoded + committed + presented) */
+  void timelinePresentEnd();                       /* t8: presenter->present returned; may flush the window */
+
 }

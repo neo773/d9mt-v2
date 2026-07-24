@@ -30,6 +30,10 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+/* present-pipeline timeline, defined with the rest of the instrumentation at
+ * the bottom of this file; synchronizeWsi (earlier in the TU) marks t1. */
+namespace dxvk::backend::wire { void timelineMarkerNote(uint64_t serial); }
+
 namespace dxvk::backend {
 
   namespace {
@@ -1103,6 +1107,8 @@ namespace dxvk::backend {
         r->backbuffer_wire_id = bbId;
         endRecord();
       }
+      /* timeline t1: the present marker is on the wire (kicked). */
+      wire::timelineMarkerNote(g_wt.presentSerial);
     }
     /* ALL-IN skip-present: a null drawable means the swapchain presents
      * nothing this frame (no server frame yet / occluded). The frame MARKER
@@ -2232,6 +2238,246 @@ namespace dxvk::backend::wire {
     }
   }
 
+  /* ==== present-pipeline timeline (instrumentation ONLY) ====================
+   *
+   * Measures every hop of a presented frame, per LOCAL present serial N:
+   *   t0 present-closure entry (CS thread)          [timelinePresentStart]
+   *   t5 server frame observed/accepted             [inside acquireServerFrame:
+   *      the bounded futex park for publish(N-1) ended]
+   *   t6 drawable acquired                          [timelineDrawableAcquired]
+   *   t1 present records emitted (frame marker on the wire — the marker is
+   *      emitted in synchronizeWsi, AFTER the present copy is encoded, so
+   *      chronologically t1 follows t6)             [internal, synchronizeWsi]
+   *   t7 blit committed + Metal4 present handshake done [timelineCommitDone]
+   *   t8 presenter->present returned                [timelinePresentEnd]
+   * plus the SERVER hops for serial N (status v4 tl ring, shipped back
+   * through WMTServerFrame at the present that accepts N — i.e. present N+1):
+   *   t2 marker consumed, t3 GPU completion observed, t4 published.
+   *
+   * Segments printed (us, avg/p95 over a 256-completed-present window):
+   *   wait    = t5-t0  park in acquireServerFrame (lockstep stall: waiting
+   *                    for the PREVIOUS frame's publication + acquire thunk)
+   *   acquire = t6-t5  drawable acquire (CAMetalLayer pool pacing)
+   *   emit    = t1-t6  present-copy encode + marker emission
+   *   commit  = t7-t1  commit + waitForDrawable/signal/present handshake
+   *   present = t8-t7  presenter bookkeeping
+   *   consume = t2-t1  marker cross-process latency + consumer dispatch
+   *   srvGpu  = t3-t2  server encode tail + commit + GPU + listener dispatch
+   *   publish = t4-t3  publication store latency (~0 by construction)
+   *   notice  = t5'-t4 publish -> the ACCEPTING present observed it (t5' is
+   *                    the t5 of present N+1 — the cross-frame wake)
+   *   total   = t8-t0, frame = t0[N]-t0[N-1] (the pacing period)
+   *
+   * CLOCK DOMAIN: client marks are QPC (Wine: 10 MHz on mach_absolute_time's
+   * timebase), server hops are mach ns. mach_absolute_time is machine-global,
+   * so ONE offset maps QPC-ns -> mach-ns: measured by bracketing the
+   * WMTWireWaitTimeTap unixcall between two QPC reads (error <= half the
+   * thunk round trip, us-class), recalibrated once per window.
+   * Everything below runs on the CS thread; no atomics needed. Gated on
+   * D9MT_PROFILE (the PROF cadence); one branch per mark when off. */
+  namespace {
+
+    inline bool tlEnabled() {
+      static const bool s = std::getenv("D9MT_PROFILE") != nullptr;
+      return s;
+    }
+
+    inline int64_t tlQpcNs() {
+      LARGE_INTEGER c;
+      QueryPerformanceCounter(&c);
+      static const int64_t freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return int64_t(f.QuadPart);
+      }();
+      return freq == 10000000ll
+        ? c.QuadPart * 100ll
+        : int64_t(double(c.QuadPart) * (1e9 / double(freq)));
+    }
+
+    constexpr uint32_t kTlRing = 64u;  /* > any realistic accept lag (lockstep = 1) */
+    constexpr uint32_t kTlWin  = 256u; /* PROF cadence */
+
+    struct TlEntry {
+      uint64_t serial = 0u;
+      int64_t  t0 = 0, t1 = 0, t5 = 0, t6 = 0, t7 = 0, t8 = 0; /* QPC ns */
+      bool     clientDone = false;
+    };
+
+    enum TlSeg : uint32_t {
+      TlWait = 0, TlAcquire, TlEmit, TlCommit, TlPresent,
+      TlConsume, TlSrvGpu, TlPublish, TlNotice,
+      TlFrame, TlTotal, TlSegCount
+    };
+    constexpr const char* kTlSegNames[TlSegCount] = {
+      "wait", "acquire", "emit", "commit", "present",
+      "consume", "srvGpu", "publish", "notice",
+      "frame", "total"
+    };
+
+    TlEntry  g_tlRingBuf[kTlRing];
+    uint64_t g_tlCur       = 0u;   /* serial of the in-flight present */
+    int64_t  g_tlPrevT0    = 0;
+    int64_t  g_tlOffsetNs  = 0;    /* mach_ns = qpc_ns + offset */
+    bool     g_tlCalibrated = false;
+    uint32_t g_tlSamples[TlSegCount][kTlWin];
+    uint32_t g_tlCount[TlSegCount] = { };
+    uint32_t g_tlDone     = 0u;    /* completed presents this window */
+    uint32_t g_tlSkipped  = 0u;    /* presents that never reached t8 */
+    uint64_t g_tlWindows  = 0u;
+
+    inline TlEntry& tlEntry(uint64_t serial) {
+      return g_tlRingBuf[serial % kTlRing];
+    }
+
+    inline void tlPush(TlSeg s, int64_t ns) {
+      if (ns < 0)
+        ns = 0; /* calibration error / clamped */
+      uint64_t us = uint64_t(ns) / 1000u;
+      if (us > 0xFFFFFFFFull)
+        us = 0xFFFFFFFFull;
+      uint32_t& n = g_tlCount[s];
+      if (n < kTlWin)
+        g_tlSamples[s][n++] = uint32_t(us);
+    }
+
+    void tlCalibrate() {
+      const int64_t  q0 = tlQpcNs();
+      const uint64_t m  = WireRing_wait(WMTWireWaitTimeTap, 0u, 0u, 0u);
+      const int64_t  q1 = tlQpcNs();
+      if (m == 0u)
+        return; /* pre-TimeTap unix side: leave uncalibrated (srv segs skipped) */
+      g_tlOffsetNs   = int64_t(m) - (q0 + (q1 - q0) / 2);
+      g_tlCalibrated = true;
+    }
+
+    void tlFlushWindow() {
+      std::string line = str::format("PROF timeline win=", g_tlDone,
+        " skip=", g_tlSkipped, " us(avg/p95):");
+      for (uint32_t s = 0u; s < TlSegCount; s++) {
+        const uint32_t n = g_tlCount[s];
+        if (s == TlConsume)
+          line += " | srv:";
+        if (s == TlFrame)
+          line += " |";
+        if (n == 0u) {
+          line += str::format(" ", kTlSegNames[s], "=-");
+          continue;
+        }
+        uint64_t sum = 0u;
+        for (uint32_t i = 0u; i < n; i++)
+          sum += g_tlSamples[s][i];
+        std::sort(g_tlSamples[s], g_tlSamples[s] + n);
+        const uint32_t p95 = g_tlSamples[s][(uint64_t(n) * 95u) / 100u >= n
+                                            ? n - 1u : (uint64_t(n) * 95u) / 100u];
+        line += str::format(" ", kTlSegNames[s], "=", sum / n, "/", p95);
+        if (n != g_tlDone && s >= TlConsume && s <= TlNotice)
+          line += str::format("(n=", n, ")");
+      }
+      Logger::info(line);
+      for (uint32_t s = 0u; s < TlSegCount; s++)
+        g_tlCount[s] = 0u;
+      g_tlDone    = 0u;
+      g_tlSkipped = 0u;
+      g_tlWindows++;
+      tlCalibrate(); /* re-anchor the QPC->mach offset once per window */
+    }
+
+    /* t5: the acquireServerFrame park (publish notice) ended. */
+    void tlNoticeWaitDone(uint64_t localSerial) {
+      if (!tlEnabled())
+        return;
+      TlEntry& e = tlEntry(localSerial);
+      if (e.serial == localSerial)
+        e.t5 = tlQpcNs();
+    }
+
+    /* A server frame was accepted: server hops for f.frame_serial arrived. */
+    void tlAccepted(uint64_t localSerial, const WMTServerFrame& f) {
+      if (!tlEnabled())
+        return;
+      if (!g_tlCalibrated)
+        tlCalibrate();
+      if (!g_tlCalibrated || f.tl_publish_ns == 0u)
+        return; /* pre-v4 server / recycled tl slot: srv segs skipped */
+      /* notice: publish(S) -> THIS present observed it (cross-frame wake). */
+      TlEntry& cur = tlEntry(localSerial);
+      if (cur.serial == localSerial && cur.t5 != 0)
+        tlPush(TlNotice, (cur.t5 + g_tlOffsetNs) - int64_t(f.tl_publish_ns));
+      /* consume/srvGpu/publish for the ACCEPTED serial S (its client entry
+       * finished at its own t8, one present ago in lockstep). */
+      TlEntry& es = tlEntry(f.frame_serial);
+      if (es.serial == f.frame_serial && es.clientDone && es.t1 != 0
+          && f.tl_consume_ns != 0u && f.tl_gpu_ns != 0u) {
+        tlPush(TlConsume, int64_t(f.tl_consume_ns) - (es.t1 + g_tlOffsetNs));
+        tlPush(TlSrvGpu,  int64_t(f.tl_gpu_ns)     - int64_t(f.tl_consume_ns));
+        tlPush(TlPublish, int64_t(f.tl_publish_ns) - int64_t(f.tl_gpu_ns));
+      }
+    }
+
+  }
+
+  /* t1: the frame marker for `serial` hit the wire (called from
+   * MtlWireContext::synchronizeWsi right after the marker record + kick). */
+  void timelineMarkerNote(uint64_t serial) {
+    if (!tlEnabled())
+      return;
+    TlEntry& e = tlEntry(serial);
+    if (e.serial == serial)
+      e.t1 = tlQpcNs();
+  }
+
+  void timelinePresentStart(uint64_t localSerial) {
+    if (!tlEnabled())
+      return;
+    TlEntry& e = tlEntry(localSerial);
+    e = TlEntry();
+    e.serial = localSerial;
+    e.t0     = tlQpcNs();
+    if (g_tlPrevT0 != 0)
+      tlPush(TlFrame, e.t0 - g_tlPrevT0);
+    g_tlPrevT0 = e.t0;
+    g_tlCur    = localSerial;
+  }
+
+  void timelineDrawableAcquired() {
+    if (!tlEnabled())
+      return;
+    TlEntry& e = tlEntry(g_tlCur);
+    if (e.serial == g_tlCur)
+      e.t6 = tlQpcNs();
+  }
+
+  void timelineCommitDone() {
+    if (!tlEnabled())
+      return;
+    TlEntry& e = tlEntry(g_tlCur);
+    if (e.serial == g_tlCur)
+      e.t7 = tlQpcNs();
+  }
+
+  void timelinePresentEnd() {
+    if (!tlEnabled())
+      return;
+    TlEntry& e = tlEntry(g_tlCur);
+    if (e.serial != g_tlCur)
+      return;
+    e.t8 = tlQpcNs();
+    if (e.t5 != 0 && e.t6 != 0 && e.t1 != 0 && e.t7 != 0) {
+      tlPush(TlWait,    e.t5 - e.t0);
+      tlPush(TlAcquire, e.t6 - e.t5);
+      tlPush(TlEmit,    e.t1 - e.t6);
+      tlPush(TlCommit,  e.t7 - e.t1);
+      tlPush(TlPresent, e.t8 - e.t7);
+      tlPush(TlTotal,   e.t8 - e.t0);
+      e.clientDone = true;
+      if (++g_tlDone >= kTlWin)
+        tlFlushWindow();
+    } else {
+      g_tlSkipped++;
+    }
+  }
+
   uint64_t nextPresentSerial() {
     return g_localPresents.load(std::memory_order_relaxed) + 1u;
   }
@@ -2264,6 +2510,9 @@ namespace dxvk::backend::wire {
     if (localSerial > 1u)
       WireRing_wait(WMTWireWaitFrameSerial, kPublishWaitUs,
                     localSerial - 1u, 0u);
+    /* timeline t5: the publish-notice park ended (or was skipped) — the
+     * freshest published frame is about to be acquired. */
+    tlNoticeWaitDone(localSerial);
 
     /* ALL-IN: the pace gate is GONE — pass an unbounded lag budget so the
      * freshest PUBLISHED frame is always accepted, however far behind the
@@ -2369,6 +2618,8 @@ namespace dxvk::backend::wire {
     outImage = tex;
     outView  = view;
     g_srvAccepted.fetch_add(1u, std::memory_order_relaxed);
+    /* timeline: the server hops for the ACCEPTED serial arrived with f. */
+    tlAccepted(localSerial, f);
     /* v13.1 black-screen attribution: name the FIRST present that switches
      * the on-screen source to the server frame — a regression that appears
      * with this line in the log is a cutover/present-path issue, one that

@@ -68,6 +68,23 @@
  *                                          the sanity clamps (absurd extent/
  *                                          mips/layers/format/size); the
  *                                          wire id dummy-resolves forever
+ *
+ * --- v4 (present-timeline instrumentation, ADDITIVE — first 240 bytes
+ *     unchanged) ------------------------------------------------------------
+ * Per-frame server-side hop timestamps, a 16-slot ring indexed by
+ * (frame_serial & 15). All values are mach_absolute_time converted to
+ * NANOSECONDS (machine-global clock — valid across processes AND across the
+ * Rosetta/native ISA boundary; the PE client converts its QPC readings into
+ * this domain via the WMTWireWaitTimeTap calibration, see winemetal.h).
+ * Write protocol (server): consumer thread invalidates tl_serial[i]=0 and
+ * stores tl_consume_ns at the frame marker; the publish site (listener block
+ * or inline) stores tl_gpu_ns/tl_publish_ns, THEN tl_serial[i] (release),
+ * THEN frame_serial — a reader that observes frame_serial >= S and
+ * tl_serial[i] == S may read the other two fields.
+ *   offset 240  u64[16]  tl_serial         frame serial the slot describes (0 = invalid)
+ *   offset 368  u64[16]  tl_consume_ns     t2: executor entered handlePresent (marker consumed)
+ *   offset 496  u64[16]  tl_gpu_ns         t3: frame's GPU completion observed (listener entry)
+ *   offset 624  u64[16]  tl_publish_ns     t4: immediately before the frame_serial release-store
  */
 
 #ifdef __cplusplus
@@ -101,7 +118,11 @@ enum d9mt_status_error {
   d9mt_status_err_clear_verify = 5  /* GPU clear readback mismatch */
 };
 
-#define D9MT_STATUS_VERSION 3u
+#define D9MT_STATUS_VERSION 4u
+
+/* v4 timeline ring depth: power of two, deeper than any realistic
+ * client/server frame lag (the present path runs lockstep depth 1). */
+#define D9MT_STATUS_TL_SLOTS 16
 
 struct d9mt_status {
   d9mt_status_au64 epoch;            /*   0 */
@@ -128,9 +149,14 @@ struct d9mt_status {
   d9mt_status_au64 uploads_executed;          /* 216 */
   d9mt_status_au64 heap_consumed;             /* 224 */
   d9mt_status_au64 creates_rejected;          /* 232 (v7) */
+  /* --- v4 (present-timeline instrumentation) --- */
+  d9mt_status_au64 tl_serial[D9MT_STATUS_TL_SLOTS];     /* 240 */
+  d9mt_status_au64 tl_consume_ns[D9MT_STATUS_TL_SLOTS]; /* 368 */
+  d9mt_status_au64 tl_gpu_ns[D9MT_STATUS_TL_SLOTS];     /* 496 */
+  d9mt_status_au64 tl_publish_ns[D9MT_STATUS_TL_SLOTS]; /* 624 */
 };
 
-D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 240);
+D9MT_STATUS_ASSERT(sizeof(struct d9mt_status) == 752);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, epoch) == 0);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heartbeat) == 8);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, progress) == 16);
@@ -153,5 +179,9 @@ D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, psos_pending) == 208);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, uploads_executed) == 216);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, heap_consumed) == 224);
 D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, creates_rejected) == 232);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_serial) == 240);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_consume_ns) == 368);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_gpu_ns) == 496);
+D9MT_STATUS_ASSERT(offsetof(struct d9mt_status, tl_publish_ns) == 624);
 
 #endif /* D9MT_SERVER_STATUS_H */

@@ -73,8 +73,10 @@
 #import <Metal/MTL4LibraryFunctionDescriptor.h>
 #import <Metal/MTLResidencySet.h>
 
+#include <mach/mach_time.h>
 #include <pthread/qos.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -2716,7 +2718,58 @@ static void handleSession(const d9mt_wire_rec_session* r) {
           r->kind ? "BEGIN" : "QUIESCE", r->session, (unsigned long long)epoch);
 }
 
+/* --- present-timeline instrumentation (status v4 tl ring + srv-timeline) ----
+ * Machine-global clock: mach_absolute_time scaled to ns — the SAME domain the
+ * client's QPC marks are calibrated into (WMTWireWaitTimeTap), so the hops
+ * compose across the process boundary. Hops per frame serial N:
+ *   t2 (tl_consume_ns) handlePresent entry — the frame marker is consumed,
+ *   t3 (tl_gpu_ns)     the publish site observed GPU completion (listener
+ *                      block entry; includes the listener dispatch latency),
+ *   t4 (tl_publish_ns) immediately before the frame_serial release-store.
+ * Written into the status v4 tl ring for the client line, and aggregated
+ * below into the srv-timeline stderr line on the srv-stats cadence (one line
+ * per 256 frames). Sample arrays are indexed (serial & 255): gap on the
+ * consumer thread, gpu/publish on the serial listener queue — the printer
+ * reads whatever completed (instrumentation-grade, not a snapshot). */
+static uint64_t exec_now_ns(void) {
+  static mach_timebase_info_data_t tb; /* {0,0} until first call */
+  if (tb.denom == 0)
+    mach_timebase_info(&tb);
+  return mach_absolute_time() * tb.numer / tb.denom;
+}
+
+static uint32_t g_tlMarkGapUs[256]; /* t2[N] - t2[N-1]: marker arrival period */
+static uint32_t g_tlSrvGpuUs[256];  /* t3 - t2 */
+static uint32_t g_tlPublishUs[256]; /* t4 - t3 */
+static uint64_t g_tlPrevConsumeNs;
+
+static void tlAvgP95(const uint32_t* smp, uint32_t* avg, uint32_t* p95) {
+  uint32_t tmp[256];
+  memcpy(tmp, smp, sizeof(tmp));
+  std::sort(tmp, tmp + 256);
+  uint64_t sum = 0;
+  for (int i = 0; i < 256; i++)
+    sum += tmp[i];
+  *avg = (uint32_t)(sum / 256u);
+  *p95 = tmp[243]; /* floor(256 * 0.95) */
+}
+
 static void handlePresent(const d9mt_wire_rec_present_frame* r) {
+  /* timeline t2: the frame marker is consumed HERE. Invalidate the tl slot
+   * first — the publish site completes it and release-stores tl_serial LAST,
+   * so a reader matching tl_serial == N sees fully-written hops. */
+  const uint64_t tlConsumeNs = exec_now_ns();
+  {
+    const uint32_t ti = (uint32_t)(r->frame_serial & (D9MT_STATUS_TL_SLOTS - 1u));
+    atomic_store_explicit(&g->status->tl_serial[ti], 0, memory_order_relaxed);
+    atomic_store_explicit(&g->status->tl_consume_ns[ti], tlConsumeNs,
+                          memory_order_relaxed);
+    if (g_tlPrevConsumeNs)
+      g_tlMarkGapUs[r->frame_serial & 255u] =
+          (uint32_t)((tlConsumeNs - g_tlPrevConsumeNs) / 1000u);
+    g_tlPrevConsumeNs = tlConsumeNs;
+  }
+
   /* v7: drain worker-built resources (residency + stashed content) into
    * THIS frame before it closes; v9: retry blits whose PSO just landed */
   sweepAsyncCreates();
@@ -2768,6 +2821,19 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
               (unsigned long long)(now.dsUnres - p.dsUnres),
               (unsigned long long)(now.dssoDef - p.dssoDef));
       g->statsSnap = now;
+
+      /* srv-timeline: server-side hops of the present pipeline over the last
+       * 256 frames (us, avg/p95). markGap = frame-marker arrival period (the
+       * pacing as the SERVER sees it); srvGpu = t3-t2 (final-copy encode +
+       * commit + GPU + listener dispatch); publish = t4-t3 (~0 by
+       * construction — a fat publish would mean store-side trouble). */
+      uint32_t aGap, pGap, aGpu, pGpu, aPub, pPub;
+      tlAvgP95(g_tlMarkGapUs, &aGap, &pGap);
+      tlAvgP95(g_tlSrvGpuUs, &aGpu, &pGpu);
+      tlAvgP95(g_tlPublishUs, &aPub, &pPub);
+      fprintf(stderr, "[serverd] srv-timeline: markGap=%u/%u srvGpu=%u/%u "
+                      "publish=%u/%u us (avg/p95, win=256)\n",
+              aGap, pGap, aGpu, pGpu, aPub, pPub);
     }
   }
 
@@ -2785,8 +2851,22 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
                      atValue:submitted
                        block:^(id<MTLSharedEvent> ev, uint64_t value) {
       (void)ev;
+      /* timeline t3: GPU completion observed (block entry — includes the
+       * listener dispatch latency, which is exactly what the client pays). */
+      const uint64_t tlGpuNs = exec_now_ns();
       atomic_store_explicit(&status->present_slot, slot, memory_order_relaxed);
       atomic_store_explicit(&status->completed_serial, value, memory_order_relaxed);
+      /* timeline t4 + tl-slot completion BEFORE the frame_serial store: a
+       * client that observes frame_serial == N must find the finished slot. */
+      const uint64_t tlPubNs = exec_now_ns();
+      {
+        const uint32_t ti = (uint32_t)(frameSerial & (D9MT_STATUS_TL_SLOTS - 1u));
+        atomic_store_explicit(&status->tl_gpu_ns[ti], tlGpuNs, memory_order_relaxed);
+        atomic_store_explicit(&status->tl_publish_ns[ti], tlPubNs, memory_order_relaxed);
+        atomic_store_explicit(&status->tl_serial[ti], frameSerial, memory_order_release);
+        g_tlSrvGpuUs[frameSerial & 255u]  = (uint32_t)((tlGpuNs - tlConsumeNs) / 1000u);
+        g_tlPublishUs[frameSerial & 255u] = (uint32_t)((tlPubNs - tlGpuNs) / 1000u);
+      }
       atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
       atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
       /* Publish notice: wake any client parked on frame_serial (unixcall
@@ -2799,6 +2879,16 @@ static void handlePresent(const d9mt_wire_rec_present_frame* r) {
     atomic_store_explicit(&status->present_slot, slot, memory_order_relaxed);
     atomic_store_explicit(&status->completed_serial, completedSerial(),
                           memory_order_relaxed);
+    /* timeline t3 == t4 (no GPU wait — nothing was in flight) */
+    {
+      const uint64_t tlNowNs = exec_now_ns();
+      const uint32_t ti = (uint32_t)(frameSerial & (D9MT_STATUS_TL_SLOTS - 1u));
+      atomic_store_explicit(&status->tl_gpu_ns[ti], tlNowNs, memory_order_relaxed);
+      atomic_store_explicit(&status->tl_publish_ns[ti], tlNowNs, memory_order_relaxed);
+      atomic_store_explicit(&status->tl_serial[ti], frameSerial, memory_order_release);
+      g_tlSrvGpuUs[frameSerial & 255u]  = (uint32_t)((tlNowNs - tlConsumeNs) / 1000u);
+      g_tlPublishUs[frameSerial & 255u] = 0u;
+    }
     atomic_store_explicit(&status->frame_serial, frameSerial, memory_order_release);
     atomic_fetch_add_explicit(&status->frames, 1, memory_order_release);
     d9mt_futex_wake_all(&status->frame_serial); /* store (release) THEN wake */

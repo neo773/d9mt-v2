@@ -6439,6 +6439,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach_time.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdlib.h>
@@ -6841,6 +6842,17 @@ wire_now_us(void) {
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+/* Present-timeline instrumentation: mach_absolute_time in NANOSECONDS — the
+ * machine-global clock every timeline hop (server + client via the TimeTap
+ * calibration) is expressed in. Timebase cached on first use. */
+static uint64_t
+wire_mach_ns(void) {
+  static mach_timebase_info_data_t tb; /* {0,0} until first call */
+  if (tb.denom == 0)
+    mach_timebase_info(&tb);
+  return mach_absolute_time() * tb.numer / tb.denom;
+}
+
 static NTSTATUS
 _WireRing_wait(void *obj) {
   struct unixcall_wire_wait *p = obj;
@@ -6895,6 +6907,10 @@ _WireRing_wait(void *obj) {
         slice_us = 100000u;
       d9mt_futex_wait(&wire_status->frame_serial, fs, slice_us * 1000u);
     }
+    return STATUS_SUCCESS;
+  }
+  case 2: { /* WMTWireWaitTimeTap: no wait — mach ns for clock calibration */
+    p->out_value = wire_mach_ns();
     return STATUS_SUCCESS;
   }
   default:
@@ -7152,6 +7168,9 @@ _WireServerFrame_acquire(void *obj) {
   p->out_texture = 0;
   p->out_minted = 0;
   p->out_gpu_resource_id = 0;
+  p->out_tl_consume_ns = 0;
+  p->out_tl_gpu_ns = 0;
+  p->out_tl_publish_ns = 0;
   if (!wire_status)
     return STATUS_SUCCESS;
 
@@ -7206,6 +7225,22 @@ _WireServerFrame_acquire(void *obj) {
    * tables are not validated). Ship the id read at mint (cache-carried, so
    * cache HITS return it too); the PE side refuses to present without one. */
   p->out_gpu_resource_id = gpu_resource_id;
+  /* Present-timeline (status v4): ship the server's hop timestamps for fs.
+   * tl_serial is release-stored BEFORE frame_serial server-side, so a slot
+   * matching fs here is fully written; a mismatch (recycled slot / pre-v4
+   * server) leaves the fields 0 and the client skips those segments. */
+  if (version >= 4u) {
+    uint32_t ti = (uint32_t)(fs & (D9MT_STATUS_TL_SLOTS - 1u));
+    if (atomic_load_explicit(&wire_status->tl_serial[ti],
+                             memory_order_acquire) == fs) {
+      p->out_tl_consume_ns = atomic_load_explicit(
+          &wire_status->tl_consume_ns[ti], memory_order_relaxed);
+      p->out_tl_gpu_ns = atomic_load_explicit(
+          &wire_status->tl_gpu_ns[ti], memory_order_relaxed);
+      p->out_tl_publish_ns = atomic_load_explicit(
+          &wire_status->tl_publish_ns[ti], memory_order_relaxed);
+    }
+  }
   p->out_usable       = 1;
   return STATUS_SUCCESS;
 }

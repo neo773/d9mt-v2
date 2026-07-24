@@ -2664,6 +2664,14 @@ struct WMTServerFrame {
                           * argument table — argument tables bind by resource
                           * id, not object handle, and a 0 id samples nothing
                           * (legal-but-black). Never 0 when usable. */
+  /* Present-timeline instrumentation (status v4): the server's per-frame hop
+   * timestamps for `frame_serial`, in mach_absolute_time NANOSECONDS (the
+   * machine-global clock; convert client QPC readings into this domain via
+   * WMTWireWaitTimeTap). All 0 when the server predates status v4 or the
+   * timeline slot was already recycled. */
+  uint64_t tl_consume_ns; /* t2: executor consumed the frame marker */
+  uint64_t tl_gpu_ns;     /* t3: GPU completion observed (listener entry) */
+  uint64_t tl_publish_ns; /* t4: immediately before the frame_serial store */
 };
 WINEMETAL_API uint32_t WireServerFrame_acquire(obj_handle_t device,
                                                uint64_t local_serial,
@@ -2683,6 +2691,14 @@ enum WMTWireWaitOp {
                                * waits on ring tail; returns tail */
   WMTWireWaitFrameSerial = 1, /* a = target serial; waits on status
                                * frame_serial; returns frame_serial */
+  WMTWireWaitTimeTap = 2,     /* no wait: returns mach_absolute_time
+                               * converted to NANOSECONDS. Cross-process
+                               * clock calibration for the present-timeline
+                               * instrumentation: mach_absolute_time is
+                               * machine-global, so bracketing this call with
+                               * two QPC reads yields the QPC->mach-ns offset
+                               * (thunk round trip is µs-class; recalibrated
+                               * once per 256-frame window, never per frame). */
 };
 WINEMETAL_API uint64_t WireRing_wait(uint32_t op, uint32_t timeout_us,
                                      uint64_t a, uint64_t b);

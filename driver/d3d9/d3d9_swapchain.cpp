@@ -806,6 +806,10 @@ namespace dxvk {
       cSignal       = m_wctx->frameLatencySignal,
       cLocalSerial  = localSerial
     ] (MtlContext* ctx) {
+      // timeline t0: present-closure entry (CS thread). One branch when
+      // D9MT_PROFILE is off; see mtl_wire_emit.h / HANDOFF-TIMELINE.md.
+      backend::wire::timelinePresentStart(cLocalSerial);
+
       // MSAA backbuffer resolve — RECORD-ONLY (the wire wrapper serializes,
       // the server executes; the client no longer renders the backbuffer so
       // there is nothing to resolve locally).
@@ -877,6 +881,8 @@ namespace dxvk {
           cSignal->signal(cFrameId);
         return;
       }
+      // timeline t6: drawable in hand.
+      backend::wire::timelineDrawableAcquired();
 
       // Copy the server frame into the acquired drawable before presenting
       // (D3D9 Present = source -> drawable).
@@ -923,7 +929,11 @@ namespace dxvk {
       // (mtl_context_record.cpp synchronizeWsi; the pre-commit waitForDrawable
       // was restored in b610c22 to fix tearing/jitter).
       ctx->synchronizeWsi(cDrawable.sync);
+      // timeline t7: blit encoded + committed + Metal4 present handshake done.
+      backend::wire::timelineCommitDone();
       cPresenter->present(cDrawable);
+      // timeline t8: present returned — completes this frame's client hops.
+      backend::wire::timelinePresentEnd();
       Logger::debug("D3D9: frame presented");
 
       cPresenter->signalFrameLatency(cFrameId);

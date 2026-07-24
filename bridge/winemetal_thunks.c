@@ -1943,6 +1943,9 @@ WireServerFrame_acquire(obj_handle_t device, uint64_t local_serial,
   out->slot         = params.out_slot;
   out->minted       = params.out_minted;
   out->gpu_resource_id = params.out_gpu_resource_id;
+  out->tl_consume_ns = params.out_tl_consume_ns;
+  out->tl_gpu_ns     = params.out_tl_gpu_ns;
+  out->tl_publish_ns = params.out_tl_publish_ns;
   return 1;
 }
 

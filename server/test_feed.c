@@ -2445,6 +2445,100 @@ main(int argc, char **argv) {
     }
   }
 
+  /* --- PRESENT-TIMELINE GATE (instrumentation proof, headless) ------------
+   * Drives the present pipeline in the production LOCKSTEP loop (present ->
+   * park on status->frame_serial until THIS frame publishes — the same
+   * pacing model the client's acquireServerFrame implements, one serial
+   * tighter: production waits for N-1, this waits for N) and decodes the
+   * status v4 tl ring into the same segment line the live client prints.
+   * All timestamps are mach ns in ONE process — no clock calibration and no
+   * wine/PE emit path (emit= here is the raw ring write + kick, not a
+   * thunk), so these numbers are the wine-free floor of the pipeline.
+   * Segments per frame serial N:
+   *   emit    = t1-t0  clear+marker record write (+kick)
+   *   consume = t2-t1  marker cross-process latency + consumer dispatch
+   *   srvGpu  = t3-t2  final-copy encode + commit + GPU + listener dispatch
+   *   publish = t4-t3  publication store (~0 by construction)
+   *   notice  = t5-t4  publish -> this process observed frame_serial >= N
+   * Asserts: every frame publishes; tl slots match their serial (lockstep
+   * cannot recycle a 16-deep ring); t2<=t3<=t4 monotonic. */
+  {
+    mach_timebase_info_data_t tb2;
+    mach_timebase_info(&tb2);
+    enum { TLN = 512, TLW = 256 };
+    static uint64_t tlseg[5][TLW];
+    static const char *tlname[5] =
+        {"emit", "consume", "srvGpu", "publish", "notice"};
+    uint64_t tserial =
+        atomic_load_explicit(&status->frame_serial, memory_order_acquire);
+    uint32_t missed_tl = 0, nwin = 0;
+    for (int i = 0; i < TLN; i++) {
+      const uint64_t target = ++tserial;
+      const uint64_t t0 = mach_absolute_time() * tb2.numer / tb2.denom;
+      emit_clear(0.1f, 0.2f, 0.3f);
+      emit_present(target);
+      const uint64_t t1 = mach_absolute_time() * tb2.numer / tb2.denom;
+      uint64_t t5 = 0;
+      for (;;) {
+        uint64_t fs = atomic_load_explicit(&status->frame_serial,
+                                           memory_order_acquire);
+        if (fs >= target) {
+          t5 = mach_absolute_time() * tb2.numer / tb2.denom;
+          break;
+        }
+        if (mach_absolute_time() * tb2.numer / tb2.denom - t0 > 5000000000ull)
+          FAIL("timeline gate: frame %" PRIu64 " never published", target);
+        d9mt_futex_wait(&status->frame_serial, fs,
+                        100ull * 1000u * 1000u /* 100 ms backstop slice */);
+      }
+      const uint32_t ti = (uint32_t)(target & (D9MT_STATUS_TL_SLOTS - 1u));
+      if (atomic_load_explicit(&status->tl_serial[ti],
+                               memory_order_acquire) != target) {
+        missed_tl++;
+        continue;
+      }
+      const uint64_t t2 = atomic_load_explicit(&status->tl_consume_ns[ti],
+                                               memory_order_relaxed);
+      const uint64_t t3 = atomic_load_explicit(&status->tl_gpu_ns[ti],
+                                               memory_order_relaxed);
+      const uint64_t t4 = atomic_load_explicit(&status->tl_publish_ns[ti],
+                                               memory_order_relaxed);
+      if (t2 == 0 || t3 < t2 || t4 < t3)
+        FAIL("timeline gate: non-monotonic hops t2=%" PRIu64 " t3=%" PRIu64
+             " t4=%" PRIu64 " (frame %" PRIu64 ")", t2, t3, t4, target);
+      const uint32_t w = (uint32_t)(i % TLW);
+      tlseg[0][w] = (t1 - t0) / 1000u;
+      tlseg[1][w] = t2 > t1 ? (t2 - t1) / 1000u : 0u;
+      tlseg[2][w] = (t3 - t2) / 1000u;
+      tlseg[3][w] = (t4 - t3) / 1000u;
+      tlseg[4][w] = t5 > t4 ? (t5 - t4) / 1000u : 0u;
+      if (w == TLW - 1u) { /* one decoded line per 256 frames, live-format */
+        char line[512];
+        size_t off = 0;
+        for (int s = 0; s < 5; s++) {
+          uint64_t tmp[TLW], sum = 0;
+          memcpy(tmp, tlseg[s], sizeof(tmp));
+          qsort(tmp, TLW, sizeof(tmp[0]), cmp_u64);
+          for (int k = 0; k < TLW; k++)
+            sum += tmp[k];
+          off += (size_t)snprintf(line + off, sizeof(line) - off,
+                                  " %s=%" PRIu64 "/%" PRIu64, tlname[s],
+                                  sum / TLW, tmp[(TLW * 95) / 100]);
+        }
+        printf("[test_feed] timeline win=%d us(avg/p95):%s\n", TLW, line);
+        nwin++;
+      }
+    }
+    if (missed_tl)
+      FAIL("timeline gate: %u/%d tl slots mismatched their serial (lockstep "
+           "cannot recycle a 16-deep ring — write protocol broken)",
+           missed_tl, TLN);
+    if (nwin != TLN / TLW)
+      FAIL("timeline gate: %u windows printed, want %d", nwin, TLN / TLW);
+    printf("[test_feed] present-timeline gate: %d lockstep presents, all tl "
+           "slots matched, hops monotonic\n", TLN);
+  }
+
   /* 5. detach => server consumes it and exits 0 */
   struct d9mt_wire_rec_nul detach = {{d9mt_wire_op_detach, 8, 0}};
   emit(&detach, sizeof(detach));
