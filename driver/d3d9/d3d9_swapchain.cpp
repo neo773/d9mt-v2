@@ -98,9 +98,13 @@ namespace dxvk {
       " (", imageBytes, " bytes) fmt=", uint32_t(image->format)));
   }
 
-  // Legacy single-backbuffer verifier: dump the local backbuffer to
-  // C:/d9mt-test/rt_dump.bin when the trigger file C:/d9mt-test/DUMP exists.
-  static void DumpBackbufferIfRequested(
+  // Legacy verifier trigger, retargeted for the ALL-IN cutover: dump the
+  // PRESENTED frame — the server's IOSurface — to C:/d9mt-test/rt_dump.bin when
+  // the trigger file C:/d9mt-test/DUMP exists. There is no locally-rendered
+  // backbuffer anymore; if no server frame exists yet the trigger is LEFT in
+  // place and retried at the next present (so a too-early touch still yields a
+  // dump instead of silently eating the trigger).
+  static void DumpPresentedIfRequested(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
     const Rc<MtlTexture>&      image,
@@ -110,41 +114,47 @@ namespace dxvk {
     if (trig == nullptr)
       return;
     std::fclose(trig);
+    if (image == nullptr) {
+      static bool s_warned = false;
+      if (!std::exchange(s_warned, true))
+        Logger::warn("D3D9 dump: requested but no server frame presented yet — retrying");
+      return;
+    }
     std::remove("C:/d9mt-test/DUMP");   // one-shot
     DumpTextureToFile(ctx, device, image, paramsW, paramsH, "C:/d9mt-test/rt_dump.bin");
   }
 
-  // --- S3 cutover autonomous correctness harness -----------------------------
-  // Replaces human eyes: dump BOTH the local backbuffer AND the server's
-  // IOSurface for the SAME present serial, so scripts/compare_frames.py can
-  // decide PASS/FAIL offline. Gated by env D9MT_CUTOVER_VERIFY=1 AND either the
-  // one-shot trigger file C:/d9mt-test/CUTOVER_DUMP, or an auto every-N-frames
-  // cadence (D9MT_CUTOVER_VERIFY_EVERY, default 600) into a 3-deep file ring.
-  // Both surfaces are the SAME logical frame rendered two ways (client Metal vs
-  // server Metal); a near-match (modulo the documented S3 stubs) proves the
-  // cutover. No-op unless BOTH images are present.
+  // --- S3 cutover autonomous correctness harness (server-only) ---------------
+  // The dual-execution dump PAIR is gone with the local renderer; this dumps
+  // the single PRESENTED server frame so offline scripts can inspect it.
+  // Trigger mechanics kept: env D9MT_CUTOVER_VERIFY=1 AND either the one-shot
+  // trigger file C:/d9mt-test/CUTOVER_DUMP, or an auto every-N-frames cadence
+  // (D9MT_CUTOVER_VERIFY_EVERY, default 600) into a 3-deep file ring of
+  // rt_dump_server{,_N}.bin. The one-shot trigger is left in place until a
+  // server frame actually exists.
   static bool CutoverVerifyEnabled() {
     static const bool s_on = (env::getEnvVar("D9MT_CUTOVER_VERIFY") == "1");
     return s_on;
   }
 
-  static void CutoverVerifyDumpPair(
+  static void CutoverServerDump(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
-    const Rc<MtlTexture>&      localImage,
     const Rc<MtlTexture>&      serverImage,
           uint32_t             paramsW,
           uint32_t             paramsH,
           uint64_t             frameCount) {
-    if (!CutoverVerifyEnabled() || localImage == nullptr || serverImage == nullptr)
+    if (!CutoverVerifyEnabled())
       return;
 
-    // Trigger 1: one-shot trigger file.
+    // Trigger 1: one-shot trigger file (kept until a server frame exists).
     bool trigger = false;
     int  ring    = -1;
     FILE* trig = std::fopen("C:/d9mt-test/CUTOVER_DUMP", "rb");
     if (trig != nullptr) {
       std::fclose(trig);
+      if (serverImage == nullptr)
+        return;
       std::remove("C:/d9mt-test/CUTOVER_DUMP");
       trigger = true;
     }
@@ -161,19 +171,14 @@ namespace dxvk {
         ring    = int((frameCount / every) % 3u);
       }
     }
-    if (!trigger)
+    if (!trigger || serverImage == nullptr)
       return;
 
-    char localPath[64];
     char srvPath[64];
-    if (ring < 0) {
-      std::snprintf(localPath, sizeof(localPath), "C:/d9mt-test/rt_dump_local.bin");
-      std::snprintf(srvPath,   sizeof(srvPath),   "C:/d9mt-test/rt_dump_server.bin");
-    } else {
-      std::snprintf(localPath, sizeof(localPath), "C:/d9mt-test/rt_dump_local_%d.bin", ring);
-      std::snprintf(srvPath,   sizeof(srvPath),   "C:/d9mt-test/rt_dump_server_%d.bin", ring);
-    }
-    DumpTextureToFile(ctx, device, localImage,  paramsW, paramsH, localPath);
+    if (ring < 0)
+      std::snprintf(srvPath, sizeof(srvPath), "C:/d9mt-test/rt_dump_server.bin");
+    else
+      std::snprintf(srvPath, sizeof(srvPath), "C:/d9mt-test/rt_dump_server_%d.bin", ring);
     DumpTextureToFile(ctx, device, serverImage, paramsW, paramsH, srvPath);
   }
 
@@ -745,9 +750,10 @@ namespace dxvk {
     m_parent->EndFrame(m_latencyTracker);
     m_parent->Flush();
 
-    // Retrieve the back buffer to present (source of the present blit).
-    Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
-    Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
+    // The D3D9 back buffer — the SERVER renders it; client-side it only names
+    // the wire identity (presentFrame records / RT flagging) and feeds the
+    // record-only MSAA resolve below. It is never a present source anymore.
+    Rc<MtlTexture> swapImage = m_backBuffers[0]->GetCommonTexture()->GetImage();
 
     // render-server S2: name the backbuffer for the wire producer (the CS
     // thread flags matching render targets + stamps presentFrame records).
@@ -768,15 +774,13 @@ namespace dxvk {
         uint32_t(swapImages.size()));
     }
 
-    // MSAA backbuffer: resolve into the single-sample surface and present
-    // from THAT (D3D9 allows a multisampled swapchain; a raw MSAA -> drawable
-    // copy is invalid in Metal and displays scrambled sample blocks).
-    Rc<MtlTexture>     resolveImage;
-    Rc<MtlTextureView> resolveView;
-    if (m_resolveBuffer != nullptr) {
+    // MSAA backbuffer: the resolve is RECORD-ONLY under the thin recorder —
+    // the wire wrapper serializes it and the SERVER executes it against its
+    // copies (keeping the server's single-sample surface fresh before the
+    // frame marker). The client present never reads the resolve surface.
+    Rc<MtlTexture> resolveImage;
+    if (m_resolveBuffer != nullptr)
       resolveImage = m_resolveBuffer->GetCommonTexture()->GetImage();
-      resolveView  = m_resolveBuffer->GetCommonTexture()->GetSampleView(false);
-    }
 
     // Bump frame ID for the acquire below.
     m_wctx->frameId += 1;
@@ -793,9 +797,7 @@ namespace dxvk {
     // exactly 3 frames. dxmt acquires late, on the encode thread; so do we.
     m_parent->EmitCs([
       cPresenter    = m_wctx->presenter,
-      cSrcView      = swapImageView,
       cSrcImage     = swapImage,
-      cResolveView  = resolveView,
       cResolveImage = resolveImage,
       cDevice       = m_device,
       cFrameId      = m_wctx->frameId,
@@ -804,8 +806,9 @@ namespace dxvk {
       cSignal       = m_wctx->frameLatencySignal,
       cLocalSerial  = localSerial
     ] (MtlContext* ctx) {
-      // MSAA backbuffer -> single-sample resolve surface; everything below
-      // (dump, copy, blit) consumes the resolved image.
+      // MSAA backbuffer resolve — RECORD-ONLY (the wire wrapper serializes,
+      // the server executes; the client no longer renders the backbuffer so
+      // there is nothing to resolve locally).
       if (cResolveImage != nullptr && cSrcImage != nullptr) {
         MtlResolveRegion region = { };
         region.dstSubresource = { MtlAspectColor, 0u, 0u, 1u };
@@ -814,71 +817,78 @@ namespace dxvk {
         ctx->resolveTexture(cResolveImage, cSrcImage, region,
           cSrcImage->info().format, MtlResolveMode::Average, MtlResolveMode::SampleZero);
       }
-      const Rc<MtlTexture>&     cLocalImage = cResolveImage != nullptr ? cResolveImage : cSrcImage;
-      const Rc<MtlTextureView>& cLocalView  = cResolveView  != nullptr ? cResolveView  : cSrcView;
 
-      // render-server S3 VISUAL CUTOVER: when the server has published a
-      // completed frame within the pace budget for this present serial, present
-      // ITS IOSurface instead of our locally-rendered backbuffer. Per-present
-      // fallback to the local backbuffer (wire disabled, server dead, frame too
-      // stale, or IOSurface lookup failure) is silent and seamless — dual
-      // execution keeps the local frame always ready. This is the ONLY present-
-      // source change; git revert of this commit restores dual-execution +
-      // unused server frames.
+      // ALL-IN: the present blits the SERVER's IOSurface, PERIOD. No local
+      // backbuffer fallback and no pace-gate source flip exist anymore;
+      // acquireServerFrame returns the freshest PUBLISHED server frame (a
+      // repeat of the last one when the server is behind). False only when
+      // nothing was ever published (boot) or the wire is dead (loudly logged
+      // elsewhere) — then this present is SKIPPED below.
       Rc<MtlTexture>     cServerImage;
       Rc<MtlTextureView> cServerView;
-      bool cUseServer = backend::wire::acquireServerFrame(
+      bool cHaveFrame = backend::wire::acquireServerFrame(
         cDevice, cLocalSerial, cServerImage, cServerView);
 
       // Belt-and-suspenders: a GPU-hazardous present copy must be impossible by
       // construction. Only present the server frame when it is fully formed —
       // a valid view, a backing image, and a NONZERO extent (a zero/garbage
       // extent drives an out-of-bounds copy that faults the GPU and wedges the
-      // present-completion wait). Any doubt -> local backbuffer.
-      if (cUseServer && (cServerImage == nullptr || cServerView == nullptr
+      // present-completion wait). Any doubt -> skip the present.
+      if (cHaveFrame && (cServerImage == nullptr || cServerView == nullptr
                       || cServerView->image == nullptr
                       || cServerImage->extent.width == 0
                       || cServerImage->extent.height == 0)) {
-        cUseServer = false;
+        cHaveFrame = false;
       }
 
-      const Rc<MtlTexture>&     cPresentImage = cUseServer ? cServerImage : cLocalImage;
-      const Rc<MtlTextureView>& cPresentView  = cUseServer ? cServerView  : cLocalView;
+      // Verification harness (server-only): both the legacy DUMP trigger and
+      // the CUTOVER_DUMP / auto-cadence dump read the PRESENTED server frame —
+      // there is no locally-rendered image left to compare against.
+      DumpPresentedIfRequested(ctx, cDevice,
+        cHaveFrame ? cServerImage : nullptr, cParamsW, cParamsH);
+      CutoverServerDump(ctx, cDevice,
+        cHaveFrame ? cServerImage : nullptr, cParamsW, cParamsH, cFrameId);
 
-      // Gated backbuffer readback (legacy verifier) — always on the LOCAL
-      // backbuffer. No-op unless the trigger exists.
-      DumpBackbufferIfRequested(ctx, cDevice, cLocalImage, cParamsW, cParamsH);
-
-      // S3 cutover autonomous correctness: dump the LOCAL backbuffer AND the
-      // server IOSurface for this SAME present serial so the comparator can
-      // decide PASS/FAIL offline (no human eyes). No-op unless gated + a server
-      // frame exists this present.
-      CutoverVerifyDumpPair(ctx, cDevice, cLocalImage, cServerImage,
-        cParamsW, cParamsH, cFrameId);
-
-      // Acquire the drawable HERE (CS thread) — one thread owns the whole
-      // acquire/present/release cycle.
-      MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
-      if (!cDrawable.valid) {
-        // Occluded / no drawable this frame — still advance the frame fences so
-        // the limiter and any waiter don't stall.
+      if (!cHaveFrame) {
+        // SKIP-PRESENT: no server frame yet (boot) or the wire is dead. The
+        // screen keeps the last presented frame (black before the first one)
+        // — the honest failure mode; presenting a never-rendered local image
+        // would be a lie. The frame MARKER must still cross the wire (the
+        // server closes frame N only at its marker — without it the first
+        // frame could never publish and every present would skip forever),
+        // and the latency fences must still advance.
+        ctx->synchronizeWsi(MtlPresenterSync());
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
           cSignal->signal(cFrameId);
         return;
       }
 
-      // Copy the chosen source (server frame or local back buffer) into the
-      // acquired drawable before presenting (D3D9 Present = source -> drawable).
-      if (cPresentView != nullptr && cPresentView->image != nullptr && cDrawable.texture != nullptr) {
-        const MtlSize src = cPresentView->image->extent;
+      // Acquire the drawable HERE (CS thread) — one thread owns the whole
+      // acquire/present/release cycle.
+      MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
+      if (!cDrawable.valid) {
+        // Occluded / no drawable this frame — the frame marker still crosses
+        // the wire (server cadence) and the frame fences still advance so the
+        // limiter and any waiter don't stall.
+        ctx->synchronizeWsi(MtlPresenterSync());
+        cPresenter->signalFrameLatency(cFrameId);
+        if (cSignal != nullptr)
+          cSignal->signal(cFrameId);
+        return;
+      }
+
+      // Copy the server frame into the acquired drawable before presenting
+      // (D3D9 Present = source -> drawable).
+      if (cDrawable.texture != nullptr) {
+        const MtlSize src = cServerImage->extent;
         const MtlSize dst = cDrawable.texture->extent;
         if (src.width == dst.width && src.height == dst.height) {
           // 1:1 — native texel copy.
           MtlSize extent = { src.width, src.height, 1u };
           ctx->copyTexture(
-            cDrawable.texture,     MtlSubresourceLayers{ }, MtlOrigin{ },
-            cPresentView->image,   MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+            cDrawable.texture,   MtlSubresourceLayers{ }, MtlOrigin{ },
+            cServerImage,        MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
         } else if (cDrawable.view != nullptr) {
           /* Sizes differ: CoreAnimation window layout re-sizes drawables to
            * the window behind our pinned drawableSize, so a raw copy would
@@ -886,12 +896,12 @@ namespace dxvk {
            * when opted in (D9MT_METALFX=1) — a lower render resolution then
            * presents near-native; otherwise the scaled meta-blit fills the
            * drawable regardless of its size. */
-          if (!ctx->presentUpscale(cDrawable.texture, cPresentImage)) {
+          if (!ctx->presentUpscale(cDrawable.texture, cServerImage)) {
             MtlOffset3D dstBox[2] = { { 0, 0, 0 },
               { int32_t(dst.width), int32_t(dst.height), 1 } };
             MtlOffset3D srcBox[2] = { { 0, 0, 0 },
               { int32_t(src.width), int32_t(src.height), 1 } };
-            ctx->blitTextureView(cDrawable.view, dstBox, cPresentView, srcBox,
+            ctx->blitTextureView(cDrawable.view, dstBox, cServerView, srcBox,
               MtlSamplerFilter::Linear);
           }
         } else {
@@ -903,8 +913,8 @@ namespace dxvk {
             1u };
           if (extent.width && extent.height) {
             ctx->copyTexture(
-              cDrawable.texture,     MtlSubresourceLayers{ }, MtlOrigin{ },
-              cPresentView->image,   MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
+              cDrawable.texture,   MtlSubresourceLayers{ }, MtlOrigin{ },
+              cServerImage,        MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
           }
         }
       }

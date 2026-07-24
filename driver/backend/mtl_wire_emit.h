@@ -32,15 +32,16 @@ namespace dxvk::backend::wire {
    * for like. */
   uint64_t nextPresentSerial();
 
-  /* CS thread (inside the present closure): the S3 VISUAL CUTOVER source
-   * switch. When the wire is live, the server is not dead, and it has published
-   * a completed frame within the lag budget for `localSerial` in a valid slot
-   * with a nonzero IOSurface id, wraps that IOSurface (unix-cached per
-   * {id,generation}) as a borrowed MtlTexture + full-image view and returns
-   * true — the caller blits THOSE into the drawable instead of the local
-   * backbuffer. Returns false for a per-present fallback to the local
-   * backbuffer (wire disabled, server dead, frame too stale, or lookup
-   * failure); dual execution keeps the local frame always ready. */
+  /* CS thread (inside the present closure): THE present source, server-only
+   * (ALL-IN cutover). When the wire is live and the server has EVER published
+   * a completed frame, wraps the freshest published IOSurface (unix-cached per
+   * {id,generation}; no staleness/pace gate — a repeat of the last frame is
+   * the correct behavior when the server is behind) as a borrowed MtlTexture +
+   * full-image view and returns true — the caller blits THOSE into the
+   * drawable. Returns false ONLY when nothing was ever published (boot), the
+   * wire is dead, or the lookup/wrap failed; the caller then SKIPS the
+   * present (screen keeps the last frame / stays black). There is no local
+   * fallback image — the client does not render. */
   bool acquireServerFrame(const Rc<MtlDevice>& device, uint64_t localSerial,
                           Rc<MtlTexture>& outImage, Rc<MtlTextureView>& outView);
 

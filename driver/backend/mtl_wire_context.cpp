@@ -1072,7 +1072,13 @@ namespace dxvk::backend {
         endRecord();
       }
     }
-    m_inner->synchronizeWsi(sync);
+    /* ALL-IN skip-present: a null drawable means the swapchain presents
+     * nothing this frame (no server frame yet / occluded). The frame MARKER
+     * above still crossed the wire — the server closes its frame at the
+     * marker, drawable or not — but the inner Metal 4 present handshake
+     * needs a real drawable, so it is skipped. */
+    if (sync.drawable != MtlNullHandle)
+      m_inner->synchronizeWsi(sync);
   }
 
   void MtlWireContext::beginLatencyTracking(const Rc<MtlLatencyTracker>& tracker, uint64_t frameId) {
@@ -2142,18 +2148,13 @@ namespace dxvk::backend::wire {
     return g_localPresents.load(std::memory_order_relaxed) + 1u;
   }
 
-  /* S3 cutover pace budget: present the server frame while it is at most this
-   * many presents behind the client. 2 tolerates one in-flight frame plus the
-   * completion-gate latency without ever showing a stale frame; larger values
-   * trade freshness for fewer fallbacks. */
-  static constexpr uint64_t kServerLagFrames = 2u;
-
   bool acquireServerFrame(const Rc<MtlDevice>& device, uint64_t localSerial,
                           Rc<MtlTexture>& outImage, Rc<MtlTextureView>& outView) {
     outImage = nullptr;
     outView  = nullptr;
 
-    /* Fallback gates paid before any unixcall. */
+    /* Server-only gates: false = the swapchain SKIPS this present (there is
+     * no local image to fall back to). Paid before any unixcall. */
     if (!g_wireAttached.load(std::memory_order_acquire))
       return false;
     if (g_serverDead.load(std::memory_order_acquire))
@@ -2161,32 +2162,29 @@ namespace dxvk::backend::wire {
     if (device == nullptr)
       return false;
 
-    /* C1: past the attached+alive gates now. A false return from here on, once
-     * the server has EVER produced a usable frame, is a fallback-while-healthy
-     * (the metric C3 must see at 0 before it may drop the local fallback). */
-    auto healthyFallback = []() -> bool {
-      if (g_serverEverProduced.load(std::memory_order_relaxed))
-        g_fallbackWhileHealthy.fetch_add(1u, std::memory_order_relaxed);
-      return false;
-    };
-
+    /* ALL-IN: the pace gate is GONE — pass an unbounded lag budget so the
+     * freshest PUBLISHED frame is always accepted, however far behind the
+     * client's present counter it runs (present-the-LAST-server-frame
+     * semantics: a repeat of the previous frame beats any non-server image).
+     * The only remaining false paths are nothing-published-yet (boot) and
+     * lookup/wrap failure. */
     auto* dev = static_cast<MtlDeviceImpl*>(device.ptr());
     WMTServerFrame f = { };
     if (!WireServerFrame_acquire(dev->wmtDevice(), localSerial,
-                                 kServerLagFrames, &f))
-      return healthyFallback();
+                                 UINT64_MAX, &f))
+      return false;
     /* Hard extent guard (run-11 hang): a zero-extent source drives a
      * zero/out-of-bounds present copy -> GPU fault -> the present's completion
      * event never signals -> the CS thread parks forever. Never present such a
-     * frame; fall back to the always-ready local backbuffer. */
+     * frame — the caller skips the present. */
     if (f.texture == 0u || f.width == 0u || f.height == 0u) {
       static bool s_warned = false;
       if (f.texture != 0u && !s_warned) {
         s_warned = true;
         Logger::warn(str::format("acquireServerFrame: server texture has zero "
-          "extent (", f.width, "x", f.height, ") — falling back to local"));
+          "extent (", f.width, "x", f.height, ") — skipping present"));
       }
-      return healthyFallback();
+      return false;
     }
 
     /* Residency (THE run-11 hang fix): a copy/blit SOURCE must be resident on
