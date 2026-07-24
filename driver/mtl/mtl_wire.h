@@ -545,7 +545,14 @@ D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_draw_indexed) == 16);
 /* client_handle = the obj_handle_t of the backing id<MTLBuffer> — the value
  * d9mt_wire_buffer_ref.buffer carries. One record per PHYSICAL backing
  * (Discard renames mint a new backing = a new record).
- * heap_offset: S3 shared-heap placement; always 0 in S2 (reserved). */
+ * heap_offset (P1 blob model, VENUS_CONTRACT_DIFF.md): nonzero = the backing
+ * is a BLOB SLICE of the shared heap's blob region (data-area-relative
+ * offset, always >= the upload capacity so 0 stays "no blob"). The server
+ * allocates NOTHING for these: the resource is {heap wrap buffer, offset} —
+ * binds add the base, draws read the client-written pages directly, and NO
+ * upload_buffer records are ever emitted for them (Venus law: mapped-write
+ * content never rides the command stream). 0 = private/host backing, content
+ * via upload_buffer as before. */
 struct d9mt_wire_rec_create_buffer {
   struct d9mt_wire_rec_hdr hdr;
   uint64_t wire_id;
@@ -714,10 +721,34 @@ D9MT_WIRE_ASSERT(sizeof(struct d9mt_wire_rec_clear_render_target_by_id) == 56);
  *
  * FULL HEAP NEVER STALLS: the producer drops the upload (dropped++) and the
  * server keeps its previous content for that resource — visual staleness on
- * the server side only, the client's local execution is untouched. */
+ * the server side only, the client's local execution is untouched.
+ *
+ * P1 BLOB REGION (VENUS_CONTRACT_DIFF.md P1 — the Venus mapped-memory model):
+ * the heap file may extend PAST the upload data area:
+ *   [ hdr ][ pad to 16 KiB ][ upload data: capacity ][ blob region: rest ]
+ * Both sides derive the blob region from file size vs header capacity —
+ * blob bytes = file_size - data_offset - capacity (0 = legacy layout).
+ * CPU-visible buffer backings (dynamic VB/IB, the constant ring, staging-
+ * class) are carved from it (mtl_blob_pool.h); their pages are the buffer
+ * on BOTH sides:
+ *   - the creator (unix attach / test_feed) PRE-FAULTS the blob region
+ *     (memset + msync) BEFORE the server boots — newBufferWithBytesNoCopy
+ *     wires pages at wrap time, and pages faulted in later are invisible to
+ *     the GPU (the S1 sparse-file finding; the PoC's proven precondition);
+ *   - the server wraps the WHOLE mapping ONCE with newBufferWithBytesNoCopy
+ *     and represents each blob resource as {heap buffer, base offset};
+ *   - blob offsets are data-area-relative and >= capacity, so upload-region
+ *     wrap masking and blob addressing can never alias.
+ * Reuse of a blob slice is gated by the credit law (mtl_blob_pool.h): never
+ * before status frame_serial covers the slice's last referencing frame. */
 
 #define D9MT_WIRE_HEAP_MAGIC 0x30315048544D3944ull /* "D9MTHP10" LE */
 #define D9MT_WIRE_HEAP_DATA_OFFSET 16384u
+
+/* Blob region size the client requests at attach (the unix side recognizes
+ * the enlarged file: upload capacity = total - this when the remainder is a
+ * power of two and the total is not — legacy 256 MiB files stay legacy). */
+#define D9MT_WIRE_HEAP_BLOB_CAPACITY (128ull << 20)
 
 struct d9mt_wire_heap {
   /* line 0: immutable after attach */
