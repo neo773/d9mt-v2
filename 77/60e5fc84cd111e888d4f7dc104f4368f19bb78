@@ -1,0 +1,32 @@
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_8f4256a2c3830c 1765-1770,1775
+  s_9dc0f2092159a8::t_a83dfa23445a1c 1378-1387
+  s_9dc0f2092159a8::t_fb4872d9d23708 1260-1262
+  s_9dc0f2092159a8::t_f3796b6d87323d 2000-2002,2006,2016-2017,2021-2023
+  s_9dc0f2092159a8::t_169a713296dc25 1933-1934
+  s_9dc0f2092159a8::t_c997cf3e11fcef 1491-1494
+  s_9dc0f2092159a8::t_1109bea9b3f9d5 1991-1992
+  s_9dc0f2092159a8::t_bc1844bf20a2ff 1910-1912,1917
+  s_9dc0f2092159a8::t_fb5256b12978eb 1794-1795
+  s_9dc0f2092159a8::t_4e0400c0d11327 1111-1114
+  s_9dc0f2092159a8::t_20967ff61c2043 1942-1947,1953
+driver/backend/mtl_wire_context.h
+  s_9dc0f2092159a8::t_52434f78fdb124 67,76,92,103,108,112,118-120,140-141,149-150,155,159,162
+  s_9dc0f2092159a8::t_f11ac6265317c2 3-4,6-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7760e5fc84cd111e888d4f7dc104f4368f19bb78",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
