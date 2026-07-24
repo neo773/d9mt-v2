@@ -1,0 +1,24 @@
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_7a48b9f74e22a7 161-165,168-180
+  s_9dc0f2092159a8::t_ab0462780dd683 2352-2353
+  s_9dc0f2092159a8::t_79c44d5e19b355 1849-1864
+  s_9dc0f2092159a8::t_6a4a47381a4e47 2107-2113,2118-2130
+  s_9dc0f2092159a8::t_83b640004e091a 23
+  s_9dc0f2092159a8::t_3e7c602328d0c1 181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ac4615901f278b62dc271fb34ff65cc208b77ce2",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
