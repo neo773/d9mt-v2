@@ -1,0 +1,54 @@
+driver/backend/mtl_device_impl.cpp
+  s_9dc0f2092159a8::t_766e2ca5f2a358 163-172
+  s_9dc0f2092159a8::t_4c9a917cd9d5a9 194-218,223-229,234-235,252-253
+  s_9dc0f2092159a8::t_20fefd1226d53a 431-441,446-447,458-459
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_ba09aab2dce138 3067-3068
+  s_9dc0f2092159a8::t_bf4a40e2917b75 2452-2466
+  s_9dc0f2092159a8::t_4a8329feb5e5b5 936-940,945-949
+  s_9dc0f2092159a8::t_76ceac67b57da0 153-176
+  s_9dc0f2092159a8::t_76ddab582f59d7 1336-1338
+  s_9dc0f2092159a8::t_1ccae57a5941c0 2496,2604-2661
+  s_9dc0f2092159a8::t_c90899fd101b11 2746-2749
+  s_9dc0f2092159a8::t_7c02053488b314 1784-1789
+  s_9dc0f2092159a8::t_9f309c135dda08 2429-2437
+  s_9dc0f2092159a8::t_70cc433c662e75 52-59
+  s_9dc0f2092159a8::t_782c50fef3fe2a 3058-3059
+  s_9dc0f2092159a8::t_23c3b9e6ff95f4 3304-3309
+  s_9dc0f2092159a8::t_dea9e9cae2836b 545-552
+  s_9dc0f2092159a8::t_0165801968d412 1817-1820
+  s_9dc0f2092159a8::t_2a276d1ce1749f 509-513,516-521,524-525
+  s_9dc0f2092159a8::t_13015bc1069fd8 27-28
+  s_9dc0f2092159a8::t_83b91dfd579ac7 1839,1868-1870
+  s_9dc0f2092159a8::t_78ea7e19338e66 2490-2495
+  s_9dc0f2092159a8::t_68defedbb09b8c 177
+  s_9dc0f2092159a8::t_965067c986f1dd 1821
+  s_9dc0f2092159a8::t_89f569a6e9f3db 2662
+driver/backend/mtl_wire_context.h
+  s_9dc0f2092159a8::t_76e8eb094caaf2 201-203
+driver/mtl/mtl_resource.h
+  s_9dc0f2092159a8::t_77367a212b8c43 236-245
+driver/backend/mtl_wire_emit.h
+  s_9dc0f2092159a8::t_e61cc2911f5e47 86-110
+driver/backend/mtl_device_impl.h
+  s_9dc0f2092159a8::t_14e0de997a907f 66-71,80-85,87-92
+  s_9dc0f2092159a8::t_61cb7799f30c2f 72,86
+bridge/unix/winemetal_unix.c
+  s_9dc0f2092159a8::t_def72711d62570 6695-6705,6709-6719,6721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7f37ed7b7fc2eec9941c4499a0e17cb4179f64cc",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
