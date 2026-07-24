@@ -1,0 +1,29 @@
+bridge/winemetal_thunks.h
+  s_9dc0f2092159a8::t_bf75fe8167b1d3 645-659
+  s_9dc0f2092159a8::t_58431b0bbf0d15 6
+bridge/unix/winemetal_unix.c
+  s_9dc0f2092159a8::t_5a208da5a4c1ed 7126-7128
+  s_9dc0f2092159a8::t_fd3ab08389732a 7104-7105
+  s_9dc0f2092159a8::t_69c28c7292c17d 7041-7054,7062,7064
+  s_9dc0f2092159a8::t_afd8e677bbf8e7 6986-6990,6995-6997,7000,7002,7005-7006,7008
+server/HANDOFF-ALLIN.md
+  s_9dc0f2092159a8::t_c9dbd5e5ce5d39 145-177
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_9f0c4f7ccd390d 2249-2275,2282-2289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "dcbc0ccffa7ababd0ba606a776e33cb9f7c7078a",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
