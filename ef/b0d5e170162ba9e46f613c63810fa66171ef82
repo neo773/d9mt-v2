@@ -1,0 +1,25 @@
+driver/mtl/mtl_blob_pool.h
+  s_9dc0f2092159a8::t_64c9b347bd73e7 1-132
+docs/VENUS_CONTRACT_DIFF.md
+  s_9dc0f2092159a8::t_57716b4f30845d 1-90
+driver/mtl/mtl_wire.h
+  s_9dc0f2092159a8::t_ce3551105ed83c 724-743,748-751
+  s_9dc0f2092159a8::t_3331f21e43e99e 548-555
+  s_9dc0f2092159a8::t_715663c1b83657 752
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "efb0d5e170162ba9e46f613c63810fa66171ef82",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
