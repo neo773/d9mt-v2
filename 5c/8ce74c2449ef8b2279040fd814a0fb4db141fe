@@ -1,0 +1,29 @@
+driver/d3d9/d3d9_swapchain.cpp
+  s_9dc0f2092159a8::t_bb58b32153dfbb 1364
+  s_9dc0f2092159a8::t_08eae11f260219 973-975
+test/code_perf.c
+  s_9dc0f2092159a8::t_0941011c4c82dc 1-107
+test/code_tri.c
+  s_9dc0f2092159a8::t_4d4aff78d1c8fd 97
+  s_9dc0f2092159a8::t_aff5a38dfb5830 84
+  s_9dc0f2092159a8::t_96c097dc56a31c 1-83,85-96,98-108
+test/code_cubespin.c
+  s_9dc0f2092159a8::t_cc2f64f28dca27 203-205
+  s_9dc0f2092159a8::t_403ad62a66bb48 1-202,206-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5c8ce74c2449ef8b2279040fd814a0fb4db141fe",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
