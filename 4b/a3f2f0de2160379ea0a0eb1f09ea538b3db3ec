@@ -1,0 +1,40 @@
+server/test_feed.c
+  s_9dc0f2092159a8::t_a0df73e41f2b99 1528-1728
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_8704925ed74615 957-959
+  s_9dc0f2092159a8::t_0a794c2d4503fa 1010-1012
+  s_9dc0f2092159a8::t_d1ce33fd3f73d8 1073-1075,1080-1082
+  s_9dc0f2092159a8::t_db82a94db7b013 738-744,757-761
+server/HANDOFF-S3.md
+  s_9dc0f2092159a8::t_b9c0c129547b2f 1374-1465
+driver/mtl/mtl_resource.h
+  s_9dc0f2092159a8::t_ee61e0002518a4 348-350
+  s_9dc0f2092159a8::t_dd8b75fd113c3e 229-235
+  s_9dc0f2092159a8::t_b6b9fbd1b384f4 393-394
+server/executor.mm
+  s_9dc0f2092159a8::t_92950bf4353948 890-912,920-922
+  s_9dc0f2092159a8::t_a42874591a59cb 573
+  s_9dc0f2092159a8::t_e6612e4c2a054d 2964-2968,2971-2982
+  s_9dc0f2092159a8::t_08041eaa795c52 3377-3378
+  s_9dc0f2092159a8::t_ed70d6c01676cb 3352
+  s_9dc0f2092159a8::t_df6f9ee3166bca 3361
+  s_9dc0f2092159a8::t_f6b1c88867f229 923
+server/test_stub.metal
+  s_9dc0f2092159a8::t_ac4f1331bbe11c 52-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4ba3f2f0de2160379ea0a0eb1f09ea538b3db3ec",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
