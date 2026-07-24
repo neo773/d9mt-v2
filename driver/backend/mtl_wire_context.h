@@ -1,17 +1,42 @@
 #pragma once
 /*
- * MtlWireContext — Phase 1 (echo mode) of the native-backend transport
- * (docs/NATIVE_BACKEND_PLAN.md).
+ * MtlWireContext — THIN RECORDER (ALL-IN cutover; docs/NATIVE_BACKEND_PLAN.md
+ * phase 2, server/HANDOFF-ALLIN.md).
  *
- * Wraps the real MtlContextImpl and implements the full MtlContext seam by
- * forwarding EVERY call to the inner context (behavior unchanged) and, for
- * the HOT-LOOP subset (binds / state setters / clears / draws — see
- * driver/mtl/mtl_wire.h), ALSO serializing the call as a POD record into a
- * PE-allocated SPSC ring drained by the unix-side consumer thread
- * (bridge/unix/winemetal_unix.c), which decodes/validates/counts and
- * discards. This proves ring/atomics/kick-park under a real game at full
- * draw rate with zero behavioral risk. Cold calls (creates, copies, blits,
- * queries, init/upload, frame lifecycle) forward only — no records.
+ * The SERVER is the sole renderer. Hot-loop calls (binds / state setters /
+ * draws / clears / eligible copies-blits-resolves-mips) SERIALIZE ONLY as POD
+ * records into a PE-allocated SPSC ring drained by the render server — they
+ * no longer forward to the inner MtlContextImpl. Dual execution is dead;
+ * rollback is git revert (pre-ALL-IN commits), not a flag.
+ *
+ * m_inner survives as a RESOURCE-AND-PRESENT provider. The kept forwards,
+ * each with its one-line WHY:
+ *  - beginRecording/endFrame/flushCommandList/synchronizeWsi(+latency):
+ *    frame lifecycle — the CS loop, allocator pacing, submission spine and
+ *    the Metal 4 present handshake still run client-side (synchronizeWsi
+ *    forwards only with a real drawable; a null drawable = skip-present,
+ *    marker-only).
+ *  - beginExternalRendering: external-overlay seam rides the local queue.
+ *  - copyTexture/blitTextureView (pseudo-resource sides only) +
+ *    presentUpscale: THE present blit — drawable dst / server-IOSurface src
+ *    cannot cross the wire; eligible<->eligible ops serialize only.
+ *  - resolveTexture/generateMipmaps (pseudo-resource sides only): same rule.
+ *  - copyTextureToBuffer: the READBACK executor (dump harness reads the
+ *    wrapped server IOSurface through it); rendered-RT sources are stale
+ *    client-side and are counted+named (rbStale, HANDOFF debt).
+ *  - copyBuffer/copyBufferToTexture/uploadBuffer: upload machinery — staging
+ *    bytes must still land in the local backings/mirrors that the heap
+ *    snapshots, shadow re-binds and Lock reads consume.
+ *  - initBuffer/initImage/invalidateBuffer/ensureTextureUsage: resource
+ *    allocation — backing creation/rename/usage promotion must happen at the
+ *    CS position (wire-id assignment + mapPtr staging + info mirroring hang
+ *    off the same objects).
+ *  - writeTimestamp/signal/signalGpuEvent/track: completion spine — the
+ *    frontend's staging/submission fences and EVENT queries ride LOCAL
+ *    submission serials; a signal that never fires deadlocks the frontend.
+ *    (beginQuery/endQuery do NOT forward: occlusion is stubbed all-passed —
+ *    the draws it would count execute on the server; see HANDOFF-ALLIN.)
+ *  - debug labels: annotate the residual local command buffers; free.
  *
  * The wrapper is ALWAYS installed (MtlDeviceImpl::createContext) — the
  * transport is default behavior of this branch, not env-gated; a broken
@@ -23,10 +48,6 @@
  * the D3D9 boot pattern — throwaway caps device destroyed before the real
  * device — re-attaches with a fresh server instead of killing the wire for
  * the process (S3 v3).
- *
- * Phase 2 recompiles the hot-loop state machine natively against these
- * records; the Metal objects are already unix-side behind obj_handle_t, so
- * no resource-ownership migration is needed.
  */
 
 #include <vector>
@@ -43,7 +64,7 @@ namespace dxvk::backend {
     MtlWireContext(const Rc<MtlDevice>& device, Rc<MtlContext>&& inner);
     ~MtlWireContext();
 
-    /* --- lifecycle / submission (cold: forward only) ----------------------- */
+    /* --- lifecycle / submission (KEPT forwards: frame/present machinery) --- */
     void beginRecording() override;
     void endFrame() override;
     void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
@@ -52,7 +73,7 @@ namespace dxvk::backend {
     void beginLatencyTracking(const Rc<MtlLatencyTracker>& tracker, uint64_t frameId) override;
     void endLatencyTracking(const Rc<MtlLatencyTracker>& tracker) override;
 
-    /* --- shaders & pipeline state (hot: forward + serialize) --------------- */
+    /* --- shaders & pipeline state (hot: serialize only) --------------------- */
     void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
     void setFunctionConstants(MtlPipeline pipeline, uint32_t index, uint32_t count, const void* data) override;
     void setVertexLayout(uint32_t nAttr, const MtlVertexAttr* attrs,
@@ -68,7 +89,7 @@ namespace dxvk::backend {
     void setDepthBias(MtlDepthBias bias) override;
     void setDepthBounds(MtlDepthBounds bounds) override;
 
-    /* --- slot-based argument-table binding (hot) ---------------------------- */
+    /* --- slot-based argument-table binding (hot: serialize only) ------------ */
     void bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) override;
     void bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride) override;
     void bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) override;
@@ -79,22 +100,24 @@ namespace dxvk::backend {
     void bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) override;
     void pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) override;
 
-    /* --- render targets / barriers (bindRenderTargets hot) ------------------ */
+    /* --- render targets / barriers (hot: serialize only) -------------------- */
     void bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) override;
     void emitGraphicsBarrier(MtlStageMask srcStages, MtlBarrierScope srcScope,
                              MtlStageMask dstStages, MtlBarrierScope dstScope) override;
 
-    /* --- draws (hot) --------------------------------------------------------- */
+    /* --- draws (hot: serialize only) ------------------------------------------ */
     void draw(uint32_t count, const MtlDrawArgs* args) override;
     void drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) override;
 
-    /* --- clears (clearRenderTarget hot) --------------------------------------- */
+    /* --- clears (hot: serialize only) ------------------------------------------ */
     void clearRenderTarget(const Rc<MtlTextureView>& view, MtlAspectMask clear,
                            MtlClearValue value, MtlAspectMask discard) override;
     void clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset, MtlSize extent,
                         MtlAspectMask aspects, MtlClearValue value) override;
 
-    /* --- copies / blits / resolves / mips (cold: forward only) ---------------- */
+    /* --- copies / blits / resolves / mips (serialize when wire-eligible;
+     *     forward only for pseudo-resource sides = present machinery,
+     *     plus copyTextureToBuffer = the readback executor) ---------------- */
     void copyTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff,
                      const Rc<MtlTexture>& src, MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) override;
     void copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -114,7 +137,8 @@ namespace dxvk::backend {
     void generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter) override;
     void transformImage(const Rc<MtlTexture>& image, MtlSubresourceRange range, MtlBarrierScope scope) override;
 
-    /* --- init / upload / discard (cold) ---------------------------------------- */
+    /* --- init / upload / discard (KEPT forwards: resource allocation +
+     *     upload machinery) ---------------------------------------------------- */
     void initBuffer(const Rc<MtlBuffer>& buffer) override;
     void initImage(const Rc<MtlTexture>& image) override;
     void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) override;
@@ -122,19 +146,20 @@ namespace dxvk::backend {
                       const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size) override;
     bool ensureTextureUsage(const Rc<MtlTexture>& image, MtlTextureUsage usage) override;
 
-    /* --- queries (cold) ---------------------------------------------------------- */
+    /* --- queries (occlusion begin/end: STUBBED all-passed, no forward;
+     *     writeTimestamp: kept — local submission spine) --------------------- */
     void beginQuery(const Rc<MtlQuery>& query) override;
     void endQuery(const Rc<MtlQuery>& query) override;
     void writeTimestamp(const Rc<MtlQuery>& query) override;
 
-    /* --- signals / events (cold) ---------------------------------------------------- */
+    /* --- signals / events (KEPT forwards: frontend completion spine) ---------- */
     void signal(const Rc<MtlSignal>& signal, uint64_t value) override;
     void signalGpuEvent(const Rc<MtlEvent>& event) override;
 
-    /* --- lifetime / residency (cold) ---------------------------------------------------- */
+    /* --- lifetime / residency (KEPT forward: submission keep-alive) ------------- */
     void track(Rc<MtlResource>&& resource) override;
 
-    /* --- debug labels (cold) --------------------------------------------------------------- */
+    /* --- debug labels (KEPT forwards: residual local command buffers) ------------ */
     void beginDebugLabel(const char* label) override;
     void endDebugLabel() override;
     void insertDebugLabel(const char* label) override;

@@ -1105,11 +1105,13 @@ namespace dxvk::backend {
       r->library = fn != nullptr ? fn->library : 0u;
       endRecord();
     }
-    m_inner->bindShader(stage, std::move(fn));
   }
 
   void MtlWireContext::setFunctionConstants(MtlPipeline pipeline, uint32_t index, uint32_t count, const void* data) {
-    m_inner->setFunctionConstants(pipeline, index, count, data);
+    /* Thin recorder: not forwarded (the client no longer renders) and NOT yet
+     * transported (no wire record exists) — the inner impl was a base-class
+     * stub anyway, so this loses nothing that dual execution provided. */
+    (void)pipeline; (void)index; (void)count; (void)data;
   }
 
   void MtlWireContext::setVertexLayout(uint32_t nAttr, const MtlVertexAttr* attrs,
@@ -1138,7 +1140,6 @@ namespace dxvk::backend {
     /* S3 v13: layout shadow for the draw-#1 parity dump */
     m_attrShadow.assign(attrs, attrs + nAttr);
     m_layoutShadow.assign(layouts, layouts + nLayout);
-    m_inner->setVertexLayout(nAttr, attrs, nLayout, layouts);
   }
 
   void MtlWireContext::setPrimitiveTopology(MtlPrimitiveTopology topology) {
@@ -1146,7 +1147,6 @@ namespace dxvk::backend {
       r->topology = uint32_t(topology);
       endRecord();
     }
-    m_inner->setPrimitiveTopology(topology);
   }
 
   void MtlWireContext::setViewports(uint32_t n, const MtlViewport* viewports) {
@@ -1168,7 +1168,6 @@ namespace dxvk::backend {
       }
       endRecord();
     }
-    m_inner->setViewports(n, viewports);
   }
 
   void MtlWireContext::setRasterizerState(const MtlRasterizerState& rs) {
@@ -1181,7 +1180,6 @@ namespace dxvk::backend {
       r->sample_count = rs.sampleCount;
       endRecord();
     }
-    m_inner->setRasterizerState(rs);
   }
 
   void MtlWireContext::setMultisampleState(const MtlMultisampleState& ms) {
@@ -1192,7 +1190,6 @@ namespace dxvk::backend {
       r->alpha_to_one = ms.alphaToOne ? 1u : 0u;
       endRecord();
     }
-    m_inner->setMultisampleState(ms);
   }
 
   namespace {
@@ -1216,7 +1213,6 @@ namespace dxvk::backend {
       fillStencilFace(r->back, ds.back);
       endRecord();
     }
-    m_inner->setDepthStencilState(ds);
   }
 
   void MtlWireContext::setBlendMode(uint32_t rt, const MtlBlendMode& blend) {
@@ -1232,7 +1228,6 @@ namespace dxvk::backend {
       r->write_mask = blend.writeMask;
       endRecord();
     }
-    m_inner->setBlendMode(rt, blend);
   }
 
   void MtlWireContext::setBlendColor(MtlColor4 color) {
@@ -1243,7 +1238,6 @@ namespace dxvk::backend {
       r->color[3] = color.a;
       endRecord();
     }
-    m_inner->setBlendColor(color);
   }
 
   void MtlWireContext::setStencilReference(uint32_t reference) {
@@ -1251,7 +1245,6 @@ namespace dxvk::backend {
       r->reference = reference;
       endRecord();
     }
-    m_inner->setStencilReference(reference);
   }
 
   void MtlWireContext::setDepthBias(MtlDepthBias bias) {
@@ -1261,11 +1254,12 @@ namespace dxvk::backend {
       r->clamp = bias.clamp;
       endRecord();
     }
-    m_inner->setDepthBias(bias);
   }
 
   void MtlWireContext::setDepthBounds(MtlDepthBounds bounds) {
-    m_inner->setDepthBounds(bounds);
+    /* Thin recorder: not forwarded, no wire record — depth bounds has no
+     * native Metal analogue and was a documented no-op locally too (§6.3). */
+    (void)bounds;
   }
 
   /* --- slot-based argument-table binding ------------------------------------ */
@@ -1286,7 +1280,6 @@ namespace dxvk::backend {
       sh.length = slice.length();
       sh.stride = stride;
     }
-    m_inner->bindVertexBuffer(binding, std::move(slice), stride);
   }
 
   void MtlWireContext::bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride) {
@@ -1303,7 +1296,6 @@ namespace dxvk::backend {
       sh.length = length;
       sh.stride = stride;
     }
-    m_inner->bindVertexBufferRange(binding, offset, length, stride);
   }
 
   void MtlWireContext::bindIndexBuffer(MtlBufferSlice&& slice, MtlIndexType type) {
@@ -1320,7 +1312,6 @@ namespace dxvk::backend {
       m_indexShadow.length = slice.length();
       m_indexShadow.type = uint32_t(type);
     }
-    m_inner->bindIndexBuffer(std::move(slice), type);
   }
 
   void MtlWireContext::bindUniformBuffer(MtlStageMask stages, uint32_t slot, MtlBufferSlice&& slice) {
@@ -1343,7 +1334,6 @@ namespace dxvk::backend {
         sh.dirty = true; /* S3 v13: content re-ships at the next draw */
       }
     }
-    m_inner->bindUniformBuffer(stages, slot, std::move(slice));
   }
 
   void MtlWireContext::bindUniformBufferRange(MtlStageMask stages, uint32_t slot, MtlDeviceSize offset, MtlDeviceSize length) {
@@ -1364,7 +1354,6 @@ namespace dxvk::backend {
           * advance shape — fresh bytes sit at the new range */
       }
     }
-    m_inner->bindUniformBufferRange(stages, slot, offset, length);
   }
 
   void MtlWireContext::bindTexture(MtlStageMask stages, uint32_t slot, Rc<MtlTextureView>&& view) {
@@ -1383,11 +1372,19 @@ namespace dxvk::backend {
      * real texture (view key bits carried for server-side view minting). */
     if (wired())
       emitBindTextureById(stages, slot, view);
-    m_inner->bindTexture(stages, slot, std::move(view));
   }
 
   void MtlWireContext::bindBufferView(MtlStageMask stages, uint32_t slot, Rc<MtlTexelBufferView>&& view) {
-    m_inner->bindBufferView(stages, slot, std::move(view));
+    /* Thin recorder: not forwarded (inner was a base-class stub — texel
+     * buffer views are unimplemented locally too) and not yet transported.
+     * Named once so a title that binds one is loud. */
+    if (view != nullptr) {
+      static std::atomic<bool> s_warned = { false };
+      bool expected = false;
+      if (s_warned.compare_exchange_strong(expected, true))
+        Logger::warn("MtlWireContext: bindBufferView not transported (no wire record) — server never sees texel buffers");
+    }
+    (void)stages; (void)slot;
   }
 
   void MtlWireContext::bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler) {
@@ -1402,7 +1399,6 @@ namespace dxvk::backend {
       }
       endRecord();
     }
-    m_inner->bindSampler(stages, slot, std::move(sampler));
   }
 
   void MtlWireContext::pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) {
@@ -1429,7 +1425,6 @@ namespace dxvk::backend {
         }
       }
     }
-    m_inner->pushData(stages, offset, size, data);
   }
 
   /* --- render targets / barriers --------------------------------------------- */
@@ -1489,12 +1484,14 @@ namespace dxvk::backend {
       }
     }
 
-    m_inner->bindRenderTargets(std::move(targets), feedbackLoop);
   }
 
   void MtlWireContext::emitGraphicsBarrier(MtlStageMask srcStages, MtlBarrierScope srcScope,
                                            MtlStageMask dstStages, MtlBarrierScope dstScope) {
-    m_inner->emitGraphicsBarrier(srcStages, srcScope, dstStages, dstScope);
+    /* Thin recorder: not forwarded — barriers order LOCAL passes, and the
+     * client records no passes anymore. The server orders execution by ring
+     * position (single consumer), which subsumes the barrier's intent. */
+    (void)srcStages; (void)srcScope; (void)dstStages; (void)dstScope;
   }
 
   /* --- draws -------------------------------------------------------------------- */
@@ -1668,7 +1665,6 @@ namespace dxvk::backend {
       }
       endRecord();
     }
-    m_inner->draw(count, args);
   }
 
   void MtlWireContext::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
@@ -1688,7 +1684,6 @@ namespace dxvk::backend {
       }
       endRecord();
     }
-    m_inner->drawIndexed(count, args);
   }
 
   /* --- clears --------------------------------------------------------------------- */
@@ -1731,7 +1726,6 @@ namespace dxvk::backend {
       }
     }
 
-    m_inner->clearRenderTarget(view, clear, value, discard);
   }
 
   void MtlWireContext::clearImageView(const Rc<MtlTextureView>& view, MtlOrigin offset, MtlSize extent,
@@ -1762,18 +1756,23 @@ namespace dxvk::backend {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
       }
     }
-    m_inner->clearImageView(view, offset, extent, aspects, value);
   }
 
   /* --- cold paths: forward only ------------------------------------------------------ */
 
   void MtlWireContext::copyTexture(const Rc<MtlTexture>& dst, MtlSubresourceLayers dstSub, MtlOrigin dstOff,
                                    const Rc<MtlTexture>& src, MtlSubresourceLayers srcSub, MtlOrigin srcOff, MtlSize extent) {
-    /* S3 v9: THE menu-composition op (UpdateTexture / 1:1 StretchRect). */
+    /* S3 v9: THE menu-composition op (UpdateTexture / 1:1 StretchRect).
+     * Thin recorder: server-side when both textures have wire identity; the
+     * LOCAL copy runs only when a side is a pseudo-resource that cannot cross
+     * the wire — THE present copy (drawable dst / server-wrap src) is exactly
+     * that shape, and it MUST stay client-side. */
+    bool remote = false;
     if (wired() && dst != nullptr && src != nullptr) {
       const uint64_t dstId = ensureTextureCreated(dst);
       const uint64_t srcId = ensureTextureCreated(src);
       if (dstId && srcId) {
+        remote = true;
         if (auto* r = beginRecord<d9mt_wire_rec_copy_texture>(d9mt_wire_op_copy_texture)) {
           r->dst_wire_id = dstId;
           r->dst_handle = dst->texture.tex;
@@ -1792,7 +1791,8 @@ namespace dxvk::backend {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
       }
     }
-    m_inner->copyTexture(dst, dstSub, dstOff, src, srcSub, srcOff, extent);
+    if (!remote)
+      m_inner->copyTexture(dst, dstSub, dstOff, src, srcSub, srcOff, extent);
   }
 
   void MtlWireContext::copyBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -1907,10 +1907,14 @@ namespace dxvk::backend {
 
   void MtlWireContext::resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src, MtlResolveRegion region,
                                       MtlFormat format, MtlResolveMode color, MtlResolveMode stencil) {
+    /* Thin recorder: rendered content lives on the SERVER — resolve there.
+     * Local execution only for pseudo-resource sides (cannot cross the wire). */
+    bool remote = false;
     if (wired() && dst != nullptr && src != nullptr) {
       const uint64_t dstId = ensureTextureCreated(dst);
       const uint64_t srcId = ensureTextureCreated(src);
       if (dstId && srcId) {
+        remote = true;
         if (auto* r = beginRecord<d9mt_wire_rec_resolve_texture>(d9mt_wire_op_resolve_texture)) {
           r->dst_wire_id = dstId;
           r->dst_handle = dst->texture.tex;
@@ -1926,7 +1930,8 @@ namespace dxvk::backend {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
       }
     }
-    m_inner->resolveTexture(dst, src, region, format, color, stencil);
+    if (!remote)
+      m_inner->resolveTexture(dst, src, region, format, color, stencil);
   }
 
   void MtlWireContext::blitTextureView(const Rc<MtlTextureView>& dst, const MtlOffset3D dstBox[2],
@@ -1934,12 +1939,18 @@ namespace dxvk::backend {
                                        MtlSamplerFilter filter) {
     /* S3 v9 meta-blit: normalize rects EXACTLY like the local path
      * (mtl_context_transfer.cpp blitTextureView) and ship the final
-     * viewport rect + normalized uv — the server just applies them. */
+     * viewport rect + normalized uv — the server just applies them.
+     * Thin recorder: server-side when both images have wire identity (a
+     * degenerate rect is a no-op on both sides); local execution only for
+     * pseudo-resource sides — THE scaled present blit (drawable dst /
+     * server-wrap src) is exactly that shape and MUST stay client-side. */
+    bool remote = false;
     if (wired() && dst != nullptr && src != nullptr &&
         dst->image != nullptr && src->image != nullptr) {
       const uint64_t dstId = ensureTextureCreated(dst->image);
       const uint64_t srcId = ensureTextureCreated(src->image);
       if (dstId && srcId) {
+        remote = true;
         int32_t dx0 = dstBox[0].x, dy0 = dstBox[0].y;
         int32_t dx1 = dstBox[1].x, dy1 = dstBox[1].y;
         float sx0 = float(srcBox[0].x), sy0 = float(srcBox[0].y);
@@ -1977,7 +1988,8 @@ namespace dxvk::backend {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
       }
     }
-    m_inner->blitTextureView(dst, dstBox, src, srcBox, filter);
+    if (!remote)
+      m_inner->blitTextureView(dst, dstBox, src, srcBox, filter);
   }
 
   bool MtlWireContext::presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) {
@@ -1985,9 +1997,13 @@ namespace dxvk::backend {
   }
 
   void MtlWireContext::generateMipmaps(const Rc<MtlTextureView>& view, MtlSamplerFilter filter) {
+    /* Thin recorder: texture content lives on the SERVER — mip there. Local
+     * execution only for a pseudo-resource target (cannot cross the wire). */
+    bool remote = false;
     if (wired() && view != nullptr && view->image != nullptr) {
       const uint64_t id = ensureTextureCreated(view->image);
       if (id) {
+        remote = true;
         if (auto* r = beginRecord<d9mt_wire_rec_generate_mipmaps>(d9mt_wire_op_generate_mipmaps)) {
           r->wire_id = id;
           r->client_handle = view->image->texture.tex;
@@ -1997,11 +2013,14 @@ namespace dxvk::backend {
         g_copySkips.fetch_add(1u, std::memory_order_relaxed);
       }
     }
-    m_inner->generateMipmaps(view, filter);
+    if (!remote)
+      m_inner->generateMipmaps(view, filter);
   }
 
   void MtlWireContext::transformImage(const Rc<MtlTexture>& image, MtlSubresourceRange range, MtlBarrierScope scope) {
-    m_inner->transformImage(image, range, scope);
+    /* Thin recorder: not forwarded — a layout/hazard transition for LOCAL
+     * consumption that no longer happens (inner impl was a base-class stub). */
+    (void)image; (void)range; (void)scope;
   }
 
   void MtlWireContext::initBuffer(const Rc<MtlBuffer>& buffer) {
