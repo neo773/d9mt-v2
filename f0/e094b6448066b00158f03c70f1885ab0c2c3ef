@@ -1,0 +1,51 @@
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_da32a9dfd6cf51 1302
+  s_9dc0f2092159a8::t_ba77f268e18838 1461-1588,1590-1591
+  s_9dc0f2092159a8::t_fcf1218f1e7dda 742-744
+  s_9dc0f2092159a8::t_bc77883187c5d7 1608-1609
+  s_9dc0f2092159a8::t_e9cee0147bc988 108-116
+  s_9dc0f2092159a8::t_075443d017abf9 1097-1099
+  s_9dc0f2092159a8::t_1d4e661ea805b2 14
+  s_9dc0f2092159a8::t_efba0590ec7a0b 1375-1390
+  s_9dc0f2092159a8::t_f4915d97c94d51 1322-1323
+server/test_feed.c
+  s_9dc0f2092159a8::t_e2dbf569702628 156-157,159-161,179-182,192-195
+  s_9dc0f2092159a8::t_b68359dea29869 1395-1547
+  s_9dc0f2092159a8::t_f47a1cd35898e0 196-197
+server/test_stub.metal
+  s_9dc0f2092159a8::t_b3df859f9b4d74 79-93
+server/HANDOFF-S3.md
+  s_9dc0f2092159a8::t_5f08891e4623be 969-1047
+server/executor.mm
+  s_9dc0f2092159a8::t_dc29a93e4ca165 230-233,236-244
+  s_9dc0f2092159a8::t_5d18e159f2a80f 3281
+  s_9dc0f2092159a8::t_5b4621306eb9d3 299,306
+  s_9dc0f2092159a8::t_68ed67555be229 2783-2843,2853
+  s_9dc0f2092159a8::t_090357f5ffecf4 3308
+  s_9dc0f2092159a8::t_2be88910c59a75 455,458-459
+  s_9dc0f2092159a8::t_07bcc78bf28aec 1824-1825
+  s_9dc0f2092159a8::t_d84bb6a7e6216c 3322
+  s_9dc0f2092159a8::t_f72fde420e4461 2905
+  s_9dc0f2092159a8::t_55b9f384be8f18 245
+  s_9dc0f2092159a8::t_a4a3c19fd0a39f 460
+driver/backend/mtl_wire_context.h
+  s_9dc0f2092159a8::t_b4d7b69ce18d30 32
+  s_9dc0f2092159a8::t_e4648f83f91441 171-172,178-202
+  s_9dc0f2092159a8::t_aadbedad3dd02f 203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f0e094b6448066b00158f03c70f1885ab0c2c3ef",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
