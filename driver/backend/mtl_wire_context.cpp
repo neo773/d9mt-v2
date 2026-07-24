@@ -185,13 +185,9 @@ namespace dxvk::backend {
     std::atomic<uint64_t> g_srvCompletedFrame = { 0u };
     std::atomic<uint64_t> g_blobAllocs = { 0u };  /* PROF blob= */
 
-    /* Round 3: app-thread per-call cost buckets (PROF appUs=). Taps live in
-     * the D3D9 entry seams; buckets without a tap yet read 0. al (blobAlloc)
-     * nests inside lk and decomposes it. */
-    enum AppProfBucket : uint32_t {
-      AppProfLock = 0, AppProfUnlock, AppProfDraw, AppProfSetConst,
-      AppProfSetTexture, AppProfAlloc, AppProfCount
-    };
+    /* Round 3: definitions for the app-thread per-call buckets declared in
+     * mtl_wire_emit.h (AppProfBucket/AppProfScope). Taps sit in the D3D9
+     * entry seams; al (blobAlloc) nests inside lk and decomposes it. */
     std::atomic<uint64_t> g_appProfNs[AppProfCount] = {};
     std::atomic<uint64_t> g_appProfCalls[AppProfCount] = {};
     std::atomic<bool>     g_appProfOn = { false };
