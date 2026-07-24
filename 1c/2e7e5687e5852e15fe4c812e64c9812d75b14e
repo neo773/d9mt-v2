@@ -1,0 +1,38 @@
+server/test_feed.c
+  s_9dc0f2092159a8::t_5d8cc96667a1b9 1147-1210
+server/HANDOFF-ALLIN.md
+  s_9dc0f2092159a8::t_a2044301153766 243-266
+  s_9dc0f2092159a8::t_da0e956b965c5b 212-235,237-241,267-304
+  s_9dc0f2092159a8::t_25b508d2d82fba 236,242
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_2138fbbae8718a 585-597,599
+  s_9dc0f2092159a8::t_89a23d07847f5e 1104-1109
+  s_9dc0f2092159a8::t_ade8405b228e06 1110-1111
+server/executor.mm
+  s_9dc0f2092159a8::t_cf4d5003deef76 2421-2459
+  s_9dc0f2092159a8::t_d902e73bc7f624 2848-2855
+  s_9dc0f2092159a8::t_8ee0b9ff70ed75 2586
+  s_9dc0f2092159a8::t_72d33252d90469 513-517
+  s_9dc0f2092159a8::t_8f8567c83cd6fd 2764-2767
+  s_9dc0f2092159a8::t_1705a26c1e5c77 2991-2993
+  s_9dc0f2092159a8::t_7595f8a8994a7c 2832-2847,2856-2870
+  s_9dc0f2092159a8::t_1fab580adba2bf 2505
+  s_9dc0f2092159a8::t_27781ddcc9a819 3323-3329
+  s_9dc0f2092159a8::t_3d8a3bd21bba2e 2477-2480,2483-2484
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "1c2e7e5687e5852e15fe4c812e64c9812d75b14e",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
