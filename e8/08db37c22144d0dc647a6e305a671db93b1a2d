@@ -1,0 +1,27 @@
+driver/backend/mtl_wire_emit.h
+  s_9dc0f2092159a8::t_3b855b3905c85f 35-44
+driver/backend/mtl_wire_context.cpp
+  s_9dc0f2092159a8::t_3aacafccd4c575 2156-2157,2165-2170,2174-2175,2179,2185,2187
+  s_9dc0f2092159a8::t_a8341e571df247 1075-1081
+driver/d3d9/d3d9_swapchain.cpp
+  s_9dc0f2092159a8::t_69181084e9945a 777-782
+  s_9dc0f2092159a8::t_3dd7c50e8cdbde 753-756
+  s_9dc0f2092159a8::t_339467369ff5f5 809-811,820-826,829,836-837,841,844-865,871-874,881-884,890-891,899,904,916-917
+  s_9dc0f2092159a8::t_5609d6d3cb837c 101-107,117-122,127-134,140,147,150,156-157,174,178-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e808db37c22144d0dc647a6e305a671db93b1a2d",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
