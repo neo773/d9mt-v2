@@ -275,6 +275,209 @@ static inline int d9mt_blob_coalesce_covered(struct d9mt_blob_pool* p,
   return merged_any;
 }
 
+/* --- ARENA LAYER (round 3: the app-thread O(1) allocation discipline) ------
+ *
+ * Live GTA showed the calm-frame wall moving to the APP THREAD: thousands
+ * of Locks/frame each running the pool's reuse ladder (freelist scan +
+ * split-fit + covered-coalesce) — after a street transition the freelist
+ * holds ~10k entries, making every Lock an O(10k) scan. Venus never scans
+ * at map time: suballocation is a bump inside a pooled chunk.
+ *
+ * This layer sits ON TOP of d9mt_blob_pool (which keeps its exact API and
+ * gates — the soak/reuse-law tests still pin the underlying logic):
+ *  - the HOT path is one bump inside the open 2 MiB chunk: O(1), no loops;
+ *  - a full chunk closes and a new one is acquired from the pool (the
+ *    ladder runs ~once per 128 slices — amortized O(1); the pool freelist
+ *    stays CHUNK-granular and small);
+ *  - slices retire against their chunk (live counter + max retire stamp);
+ *    a chunk whose last slice retired returns to the pool WHOLE, stamped
+ *    with the max serial — the credit law holds at chunk granularity
+ *    (strictly conservative vs per-slice);
+ *  - allocations >= CHUNK/4 route DIRECTLY to the pool (big VB class —
+ *    rare; retire falls through when no chunk contains the offset);
+ *  - retire lookup is a binary search over CLOSED chunks (chunk-granular,
+ *    dozens-to-hundreds of entries, ~8 steps — not the per-slice thousands
+ *    the old path scanned).
+ * NOTE vs the "retire whole arenas at present" sketch: per-frame arena
+ * retirement is UNSOUND here — blob slices back PERSISTENT buffer
+ * generations (a DISCARD rename's slice lives until the NEXT discard,
+ * which may be many frames away). The live counter gives the same O(1)
+ * lock-path cost with correct lifetimes. */
+
+#define D9MT_BLOB_ARENA_CHUNK (2ull << 20)
+#define D9MT_BLOB_ARENA_DIRECT_MIN (D9MT_BLOB_ARENA_CHUNK / 4ull)
+
+struct d9mt_blob_arena_ent { /* CLOSED chunk */
+  uint64_t off;    /* pool offset of the chunk */
+  uint64_t live;   /* outstanding slices */
+  uint64_t serial; /* max retire stamp seen */
+};
+
+struct d9mt_blob_arena {
+  struct d9mt_blob_pool* pool;
+  struct d9mt_blob_arena_ent* ents; /* closed chunks, sorted by off */
+  uint32_t nents, ecap;
+  /* the OPEN chunk (scalars — index/pointer stability under realloc) */
+  uint64_t curOff;  /* UINT64_MAX = none */
+  uint64_t curUsed;
+  uint64_t curLive;
+  uint64_t curSerial;
+  /* stats */
+  uint64_t chunks;  /* chunks acquired */
+  uint64_t directs; /* large allocations routed straight to the pool */
+};
+
+static inline void d9mt_blob_arena_init(struct d9mt_blob_arena* a,
+                                        struct d9mt_blob_pool* pool) {
+  a->pool = pool;
+  a->nents = 0;
+  a->curOff = UINT64_MAX;
+  a->curUsed = a->curLive = a->curSerial = 0;
+  a->chunks = 0;
+  a->directs = 0;
+}
+
+static inline void d9mt_blob_arena_destroy(struct d9mt_blob_arena* a) {
+  free(a->ents);
+  a->ents = 0;
+  a->ecap = 0;
+  a->nents = 0;
+}
+
+/* Greatest closed chunk with off <= x containing x, else UINT32_MAX. */
+static inline uint32_t d9mt_blob_arena_find(const struct d9mt_blob_arena* a,
+                                            uint64_t x) {
+  uint32_t lo = 0, hi = a->nents;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2u;
+    if (a->ents[mid].off <= x)
+      lo = mid + 1u;
+    else
+      hi = mid;
+  }
+  if (lo == 0)
+    return UINT32_MAX;
+  lo--;
+  return x < a->ents[lo].off + D9MT_BLOB_ARENA_CHUNK ? lo : UINT32_MAX;
+}
+
+static inline int d9mt_blob_arena_insert(struct d9mt_blob_arena* a,
+                                         struct d9mt_blob_arena_ent e) {
+  if (a->nents == a->ecap) {
+    const uint32_t ncap = a->ecap ? a->ecap * 2u : 64u;
+    void* n = realloc(a->ents, (size_t)ncap * sizeof(*a->ents));
+    if (!n)
+      return 0;
+    a->ents = (struct d9mt_blob_arena_ent*)n;
+    a->ecap = ncap;
+  }
+  {
+    uint32_t i = a->nents;
+    while (i > 0 && a->ents[i - 1u].off > e.off) {
+      a->ents[i] = a->ents[i - 1u];
+      i--;
+    }
+    a->ents[i] = e;
+    a->nents++;
+  }
+  return 1;
+}
+
+static inline void d9mt_blob_arena_remove(struct d9mt_blob_arena* a,
+                                          uint32_t idx) {
+  for (uint32_t i = idx; i + 1u < a->nents; i++)
+    a->ents[i] = a->ents[i + 1u];
+  a->nents--;
+}
+
+static inline uint64_t d9mt_blob_arena_alloc(struct d9mt_blob_arena* a,
+                                             uint64_t size,
+                                             uint64_t completed_serial) {
+  const uint64_t need = d9mt_blob_round(size);
+  if (need == 0)
+    return UINT64_MAX;
+  if (need >= D9MT_BLOB_ARENA_DIRECT_MIN) {
+    a->directs++;
+    return d9mt_blob_alloc(a->pool, size, completed_serial);
+  }
+  /* THE hot path: one bump, no loops. */
+  if (a->curOff != UINT64_MAX && a->curUsed + need <= D9MT_BLOB_ARENA_CHUNK) {
+    const uint64_t off = a->curOff + a->curUsed;
+    a->curUsed += need;
+    a->curLive++;
+    return off;
+  }
+  /* close the full chunk (amortized: once per ~CHUNK/need allocations) */
+  if (a->curOff != UINT64_MAX) {
+    if (a->curLive == 0) {
+      /* every slice already retired: return it to the pool whole */
+      d9mt_blob_retire(a->pool, a->curOff, D9MT_BLOB_ARENA_CHUNK,
+                       a->curSerial);
+    } else {
+      struct d9mt_blob_arena_ent e;
+      e.off = a->curOff;
+      e.live = a->curLive;
+      e.serial = a->curSerial;
+      if (!d9mt_blob_arena_insert(a, e)) {
+        /* OOM on the tiny table: leak-avoidance — the chunk's remaining
+         * slices can never chunk-retire; account them as direct so their
+         * retires fall through to the pool per-slice (correct, slower). */
+      }
+    }
+    a->curOff = UINT64_MAX;
+  }
+  /* acquire a fresh chunk (pool ladder runs HERE, off the per-slice path) */
+  {
+    const uint64_t chunk =
+        d9mt_blob_alloc(a->pool, D9MT_BLOB_ARENA_CHUNK, completed_serial);
+    if (chunk == UINT64_MAX) {
+      /* region pressure: degrade to a direct slice (counted by pool drops
+       * if THAT also misses) rather than failing a small alloc outright */
+      a->directs++;
+      return d9mt_blob_alloc(a->pool, size, completed_serial);
+    }
+    a->chunks++;
+    a->curOff = chunk;
+    a->curUsed = need;
+    a->curLive = 1;
+    a->curSerial = 0;
+    return chunk;
+  }
+}
+
+static inline void d9mt_blob_arena_retire(struct d9mt_blob_arena* a,
+                                          uint64_t off, uint64_t size,
+                                          uint64_t serial) {
+  /* open chunk? */
+  if (a->curOff != UINT64_MAX && off >= a->curOff &&
+      off < a->curOff + D9MT_BLOB_ARENA_CHUNK) {
+    if (a->curLive)
+      a->curLive--;
+    if (serial > a->curSerial)
+      a->curSerial = serial;
+    return; /* chunk still open — recycles when it closes with live==0 */
+  }
+  {
+    const uint32_t idx = d9mt_blob_arena_find(a, off);
+    if (idx != UINT32_MAX) {
+      struct d9mt_blob_arena_ent* e = &a->ents[idx];
+      if (serial > e->serial)
+        e->serial = serial;
+      if (e->live)
+        e->live--;
+      if (e->live == 0) {
+        const uint64_t coff = e->off;
+        const uint64_t cserial = e->serial;
+        d9mt_blob_arena_remove(a, idx);
+        d9mt_blob_retire(a->pool, coff, D9MT_BLOB_ARENA_CHUNK, cserial);
+      }
+      return;
+    }
+  }
+  /* direct class (or insert-OOM orphan): per-slice pool retire */
+  d9mt_blob_retire(a->pool, off, size, serial);
+}
+
 #ifdef __cplusplus
 }
 #endif

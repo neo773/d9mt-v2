@@ -3168,6 +3168,76 @@ main(int argc, char **argv) {
              "completed<retire, granted at completed>=retire\n");
     }
 
+    /* --- ROUND-3 GATE (a): ARENA O(1) LOCK-PATH ALLOCATION ---------------
+     * 10k allocs+retires per frame x 100 frames through the arena layer —
+     * the EXACT code the driver's Lock path runs (mtl_blob_pool.h arena).
+     * Asserts: (1) avg wall < 1 ms/frame (the old per-Lock ladder was
+     * O(freelist) and a post-transition freelist holds ~10k entries — it
+     * blows this bound by orders of magnitude); (2) the credit law holds
+     * through chunk recycling (per-16KiB-slot shadow: a handed-out slot was
+     * free or cooling with serial <= completed). --- */
+    {
+      enum { AR_FRAMES = 100, AR_ALLOCS = 10000, AR_SLOTS = 65536 };
+      static struct d9mt_blob_pool apool; /* zero-init required (static) */
+      static struct d9mt_blob_arena aar;
+      static uint64_t aoff[2][AR_ALLOCS];
+      static uint8_t aslot[AR_SLOTS];   /* 0=free 1=live 2=cooling */
+      static uint64_t aserial[AR_SLOTS];
+      const uint64_t AR_CAP = (uint64_t)AR_SLOTS * D9MT_BLOB_ALIGN; /* 1 GiB */
+      d9mt_blob_init(&apool, 0, AR_CAP);
+      d9mt_blob_arena_init(&aar, &apool);
+      mach_timebase_info_data_t tbA;
+      mach_timebase_info(&tbA);
+      uint64_t worstNs = 0, totalNs = 0;
+      for (uint64_t f = 1; f <= AR_FRAMES; f++) {
+        const uint64_t completed = f > 2 ? f - 2 : 0;
+        const uint64_t t0 = mach_absolute_time();
+        for (int i = 0; i < AR_ALLOCS; i++) {
+          uint64_t off = d9mt_blob_arena_alloc(&aar, 16000, completed);
+          if (off == UINT64_MAX)
+            FAIL("arena gate: alloc failed at frame %llu i=%d (region "
+                 "leaked through the arena?)", (unsigned long long)f, i);
+          uint64_t slot = off / D9MT_BLOB_ALIGN;
+          if (slot >= AR_SLOTS)
+            FAIL("arena gate: offset out of range (%llu)",
+                 (unsigned long long)off);
+          if (aslot[slot] == 1 ||
+              (aslot[slot] == 2 && aserial[slot] > completed))
+            FAIL("arena gate: PREMATURE REUSE slot=%llu state=%d "
+                 "serial=%llu completed=%llu",
+                 (unsigned long long)slot, aslot[slot],
+                 (unsigned long long)aserial[slot],
+                 (unsigned long long)completed);
+          aslot[slot] = 1;
+          aoff[f & 1][i] = off;
+          if (f > 1) { /* retire the previous generation (rename shape) */
+            uint64_t poff = aoff[(f & 1) ^ 1][i];
+            d9mt_blob_arena_retire(&aar, poff, 16000, f);
+            aslot[poff / D9MT_BLOB_ALIGN] = 2;
+            aserial[poff / D9MT_BLOB_ALIGN] = f;
+          }
+        }
+        const uint64_t dNs =
+            (mach_absolute_time() - t0) * tbA.numer / tbA.denom;
+        totalNs += dNs;
+        if (dNs > worstNs)
+          worstNs = dNs;
+      }
+      const uint64_t chunksA = aar.chunks;
+      if (totalNs / AR_FRAMES > 1000000ull)
+        FAIL("arena gate: %llu us/frame average for 10k alloc+retire "
+             "(want < 1000 us — the lock path is NOT O(1))",
+             (unsigned long long)(totalNs / AR_FRAMES / 1000u));
+      d9mt_blob_arena_destroy(&aar);
+      d9mt_blob_destroy(&apool);
+      printf("[test_feed] arena O(1) gate: 100 x 10k alloc+retire = %llu "
+             "us/frame avg (worst %llu), reuse law held through chunk "
+             "recycling (chunks=%llu)\n",
+             (unsigned long long)(totalNs / AR_FRAMES / 1000u),
+             (unsigned long long)(worstNs / 1000u),
+             (unsigned long long)chunksA);
+    }
+
     /* --- P1 BLOB GATE 0b: production-shaped SOAK (the street signature that
      * exhausted the 128 MiB region: blob= plateaued, blobFb= climbed).
      * Model, at 3x the measured street rate, 1000 frames, completion
@@ -4322,6 +4392,71 @@ main(int argc, char **argv) {
              "the listener on %d/64 (max lead %lld us, lag>100us on %d) — "
              "frame completion observable without the listener\n",
              led, (long long)(maxLeadNs / 1000), lag);
+    }
+
+    /* --- ROUND-3 GATE (b): CREATE-STORM + STREAMING MIX ------------------
+     * The live burst signature: buffer-create storms while texture
+     * streaming runs mid-pass (stg=20k -> useFlush=20k windows). Blob
+     * creates are registration-only server-side (no encoder) and texture
+     * deliveries park — NO mix of the two may close a pass: useFlush stays
+     * 0 in ALL windows, passes stay O(frames), tripwires quiet. Uses the
+     * textured pipeline + texture 960 (has content from the P2 gates). --- */
+    {
+      uint64_t fluS0 = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed);
+      uint64_t encS0 = atomic_load_explicit(&status->encoders, memory_order_relaxed);
+      uint64_t errS0 = atomic_load_explicit(&status->exec_errors, memory_order_relaxed);
+      static uint8_t solidY[64 * 64 * 4];
+      for (size_t k = 0; k < sizeof(solidY); k += 4) {
+        solidY[k] = 0; solidY[k + 1] = 255; solidY[k + 2] = 255; solidY[k + 3] = 255;
+      }
+      struct d9mt_wire_rec_bind_texture_by_id btS;
+      memset(&btS, 0, sizeof(btS));
+      btS.hdr.opcode = d9mt_wire_op_bind_texture_by_id;
+      btS.hdr.size = sizeof(btS);
+      btS.stages = 0x2;
+      btS.slot = 0;
+      btS.image_wire_id = 960;
+      btS.format = 80;
+      for (int fb = 0; fb < 6; fb++) {
+        emit(&btS, sizeof(btS));
+        emit_backbuffer_rt();
+        emit_clear(0.f, 1.f, 0.f);
+        emit_draws(1); /* pass opens */
+        for (int i = 0; i < 60; i++) { /* the create storm, mid-pass */
+          struct d9mt_wire_rec_create_buffer cb;
+          memset(&cb, 0, sizeof(cb));
+          cb.hdr.opcode = d9mt_wire_op_create_buffer;
+          cb.hdr.size = sizeof(cb);
+          cb.wire_id = 30000u + (uint64_t)fb * 60u + (uint64_t)i;
+          cb.client_handle = 0xD0000u + (uint64_t)fb * 60u + (uint64_t)i;
+          cb.size = 16384;
+          cb.heap_offset = (uint64_t)HEAP_CAP + 512u * 1024u +
+                           (uint64_t)(i & 7) * D9MT_BLOB_ALIGN;
+          emit(&cb, sizeof(cb));
+          if ((i & 7) == 0) { /* streaming interleaved with the storm */
+            emit_upload_tex(960, 0xB960, 64, 64, solidY, sizeof(solidY),
+                            64 * 4);
+            emit(&btS, sizeof(btS));
+            emit_draws(1);
+          }
+        }
+        emit_present(++frame);
+        if (wait_u64(&status->frames, frame, 15000))
+          FAIL("R3 burst mix (frame %d): never presented", fb);
+      }
+      uint64_t fluSD = atomic_load_explicit(&status->upl_flush_use, memory_order_relaxed) - fluS0;
+      uint64_t encSD = atomic_load_explicit(&status->encoders, memory_order_relaxed) - encS0;
+      uint64_t errSD = atomic_load_explicit(&status->exec_errors, memory_order_relaxed) - errS0;
+      if (fluSD != 0)
+        FAIL("R3 burst mix: %" PRIu64 " pass closes (useFlush) under "
+             "create-storm + streaming (want 0 in ALL windows)", fluSD);
+      if (encSD > 7) /* 6 frames x 1 pass + slack */
+        FAIL("R3 burst mix: %" PRIu64 " passes for 6 frames", encSD);
+      if (errSD != 0)
+        FAIL("R3 burst mix: exec_errors +%" PRIu64, errSD);
+      printf("[test_feed] R3 burst mix: 6 frames x (60 blob creates + 8 "
+             "mid-pass texture uploads + draws) -> %" PRIu64 " passes, "
+             "useFlush=0, tripwires quiet\n", encSD);
     }
 
     /* stale-id probe: wire 777 lived (RED-filled) in SESSION 1; the quiesce

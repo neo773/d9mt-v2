@@ -18,6 +18,8 @@
  * Header is PE-safe (mingw x86_64 C++17): no unix/ObjC types.
  */
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 
 #include "../util/rc/util_rc_ptr.h"
@@ -107,6 +109,48 @@ namespace dxvk::backend::wire {
    * wire is down and no server read can ever happen). */
   uint64_t blobStamp();
   bool blobReusable(uint64_t stamp);
+
+  /* --- Round 3: APP-THREAD PER-CALL COST instrumentation ------------------
+   * Live GTA showed the calm-frame wall on the APP thread (timeline notice
+   * = the whole inter-present gap while client CS totalled 0.7 ms): the
+   * game makes thousands of D3D9 calls/frame, so anything per-call is a
+   * frame-rate term. These buckets time the hot D3D9 entry seams
+   * (d3d9_device.cpp) + the blob allocator, reported per PROF window as
+   * appUs= with a breakdown — this layer can never hide again. Enabled only
+   * under D9MT_PROFILE (g_appProfOn; ~2 atomics + 2 clock reads per call
+   * when on, one relaxed load when off). */
+  enum AppProfBucket : uint32_t {
+    AppProfLock = 0,   /* Lock/LockBuffer/LockImage */
+    AppProfUnlock,     /* Unlock twins */
+    AppProfDraw,       /* Draw{,Indexed}Primitive{,UP} */
+    AppProfSetConst,   /* SetVertexShaderConstantF */
+    AppProfSetTex,     /* SetTexture */
+    AppProfAlloc,      /* blobAlloc + blobRetire (inside Lock, decomposes it) */
+    AppProfCount
+  };
+  extern std::atomic<uint64_t> g_appProfNs[AppProfCount];
+  extern std::atomic<uint64_t> g_appProfCalls[AppProfCount];
+  extern std::atomic<bool> g_appProfOn;
+
+  struct AppProfScope {
+    uint32_t bucket;
+    bool on;
+    std::chrono::steady_clock::time_point t0;
+    explicit AppProfScope(uint32_t b)
+      : bucket(b), on(g_appProfOn.load(std::memory_order_relaxed)) {
+      if (on)
+        t0 = std::chrono::steady_clock::now();
+    }
+    ~AppProfScope() {
+      if (on) {
+        const auto d = std::chrono::steady_clock::now() - t0;
+        g_appProfNs[bucket].fetch_add(
+          (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(d).count(),
+          std::memory_order_relaxed);
+        g_appProfCalls[bucket].fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
+  };
 
   /* Any thread (D3D9Query::GetData path — MtlBackendQuery::getData in
    * mtl_context_transfer.cpp). Polls the shared occlusion result ring

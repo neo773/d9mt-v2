@@ -1900,6 +1900,20 @@ static void promoteOrFlushParkedBufXfers() {
         g->uplPromoted++;
         continue; /* entry retired — the draw reads the promoted bytes */
       }
+      /* Round 3: name WHY the consumed entry could not promote (the flush
+       * backstop must never fire silently again). */
+      { static int n = 0;
+        if (n++ < 8)
+          fprintf(stderr, "[serverd] upl-flush #%d: wire=%llu dst=%llu "
+                          "sz=%llu why=%s blockSerial=%llu completed=%llu\n",
+                  n, (unsigned long long)t.res->wireId,
+                  (unsigned long long)t.dstOff, (unsigned long long)t.size,
+                  earlierOverlap ? "earlier-overlap"
+                  : t.res->buffer.storageMode != MTLStorageModeShared
+                      ? "non-shared-dst"
+                      : "block-unretired",
+                  (unsigned long long)t.blockSerial,
+                  (unsigned long long)completed); }
       mustFlush = true;
     }
     g->deferredBufXfers[w++] = std::move(t);
@@ -2638,6 +2652,20 @@ static void handleUploadBuffer(const d9mt_wire_rec_upload_buffer* r) {
   }
   std::memcpy(rs.cpu, src, (size_t)r->size);
   heapAck(r->heap_generation); /* region free the moment the copy is taken */
+  /* Round 3: name the residual staged class (the burst-spill audit) — the
+   * first 8 say WHOSE traffic still stages and WHY it could not go direct. */
+  { static int n = 0;
+    if (n++ < 8)
+      fprintf(stderr, "[serverd] upl-stage #%d: wire=%llu handle=%llx "
+                      "sz=%llu dst=%llu %s refSerial=%llu completed=%llu "
+                      "pass=%d\n", n, (unsigned long long)r->wire_id,
+              (unsigned long long)r->client_handle,
+              (unsigned long long)r->size, (unsigned long long)dstAbs,
+              res->buffer.storageMode == MTLStorageModeShared
+                  ? (res->pendingBufXfers ? "parked-range" : "range-live")
+                  : "NON-SHARED-dst",
+              (unsigned long long)res->refSerial,
+              (unsigned long long)completedSerial(), g->pass.active ? 1 : 0); }
   if (g->pass.active) {
     DeferredBufXfer t;
     t.res = res;

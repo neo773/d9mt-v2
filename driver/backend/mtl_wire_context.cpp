@@ -177,10 +177,24 @@ namespace dxvk::backend {
      *    mechanism IS the second half of the gate, not a new one. */
     std::mutex g_blobMutex;
     d9mt_blob_pool g_blobPool;
+    /* Round 3: O(1) app-thread allocation layer over the pool (chunk bump;
+     * the pool ladder runs only at chunk granularity — mtl_blob_pool.h). */
+    d9mt_blob_arena g_blobArena;
     std::atomic<bool> g_blobReady = { false };
     std::atomic<uint64_t> g_markerMirror = { 0u };
     std::atomic<uint64_t> g_srvCompletedFrame = { 0u };
     std::atomic<uint64_t> g_blobAllocs = { 0u };  /* PROF blob= */
+
+    /* Round 3: app-thread per-call cost buckets (PROF appUs=). Taps live in
+     * the D3D9 entry seams; buckets without a tap yet read 0. al (blobAlloc)
+     * nests inside lk and decomposes it. */
+    enum AppProfBucket : uint32_t {
+      AppProfLock = 0, AppProfUnlock, AppProfDraw, AppProfSetConst,
+      AppProfSetTexture, AppProfAlloc, AppProfCount
+    };
+    std::atomic<uint64_t> g_appProfNs[AppProfCount] = {};
+    std::atomic<uint64_t> g_appProfCalls[AppProfCount] = {};
+    std::atomic<bool>     g_appProfOn = { false };
     std::atomic<uint64_t> g_blobFallbacks = { 0u }; /* pool miss -> host backing */
 
     /* S3 v4 / V19: dead-server latch. presentObserved (app thread) tracks
@@ -556,6 +570,9 @@ namespace dxvk::backend {
       if (wantBlob && g_wt.heap->capacity == WireHeapCapacity) {
         std::lock_guard<std::mutex> lock(g_blobMutex);
         d9mt_blob_init(&g_blobPool, WireHeapCapacity, WireBlobCapacity);
+        d9mt_blob_arena_init(&g_blobArena, &g_blobPool); /* round 3: O(1) layer */
+        g_appProfOn.store(std::getenv("D9MT_PROFILE") != nullptr,
+                          std::memory_order_relaxed);
         g_blobReady.store(true, std::memory_order_release);
       }
     } else if (g_wt.heapMem) {
@@ -2616,8 +2633,14 @@ namespace dxvk::backend::wire {
 
   /* --- P1 blob substrate (VENUS_CONTRACT_DIFF.md P1; mtl_blob_pool.h) ------ */
 
+  /* Round 3: app-thread per-call cost surface (mtl_wire_emit.h). */
+  std::atomic<uint64_t> g_appProfNs[AppProfCount] = {};
+  std::atomic<uint64_t> g_appProfCalls[AppProfCount] = {};
+  std::atomic<bool> g_appProfOn = { false };
+
   bool blobAlloc(uint64_t size, void** mapPtr, uint64_t* heapOffset,
                  uint64_t* reserved) {
+    AppProfScope prof(AppProfAlloc); /* round 3: the layer that hid */
     if (!g_blobReady.load(std::memory_order_acquire) || size == 0u ||
         g_wireDown.load(std::memory_order_acquire))
       return false;
@@ -2629,9 +2652,16 @@ namespace dxvk::backend::wire {
         ? UINT64_MAX
         : g_srvCompletedFrame.load(std::memory_order_acquire);
     uint64_t off;
+    const uint64_t tAl0 = uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
     { std::lock_guard<std::mutex> lock(g_blobMutex);
-      off = d9mt_blob_alloc(&g_blobPool, size, completed);
+      /* Round 3: O(1) arena bump (the pool's reuse ladder runs only at
+       * chunk granularity, ~once per 128 slices — mtl_blob_pool.h). */
+      off = d9mt_blob_arena_alloc(&g_blobArena, size, completed);
     }
+    g_appProfNs[AppProfAlloc].fetch_add(
+      uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()) - tAl0,
+      std::memory_order_relaxed);
+    g_appProfCalls[AppProfAlloc].fetch_add(1u, std::memory_order_relaxed);
     if (off == UINT64_MAX && completed != UINT64_MAX) {
       /* Opportunistic retire sweep BEFORE falling back: the per-present
        * mirror can be a present stale while allocation is per-draw — a
@@ -2645,7 +2675,7 @@ namespace dxvk::backend::wire {
         completed = s.server_frame_serial;
         g_srvCompletedFrame.store(completed, std::memory_order_release);
         std::lock_guard<std::mutex> lock(g_blobMutex);
-        off = d9mt_blob_alloc(&g_blobPool, size, completed);
+        off = d9mt_blob_arena_alloc(&g_blobArena, size, completed);
       }
     }
     if (off == UINT64_MAX) {
@@ -2661,6 +2691,7 @@ namespace dxvk::backend::wire {
         Logger::warn(str::format("MtlWireContext: blob pool MISS #", n,
           " size=", size, " (bump=", bump, "/", WireBlobCapacity,
           " nfree=", nfree, " flDrops=", fldrops, " completed=", completed,
+          " chunks=", g_blobArena.chunks, " directs=", g_blobArena.directs,
           ") — falling back to legacy upload path"));
       }
       return false;
@@ -2673,6 +2704,7 @@ namespace dxvk::backend::wire {
   }
 
   void blobRetire(uint64_t heapOffset, uint64_t reserved) {
+    AppProfScope prof(AppProfAlloc);
     if (!g_blobReady.load(std::memory_order_acquire))
       return;
     /* Conservative stamp: the frame being recorded at retire time (marker+1)
@@ -2685,7 +2717,7 @@ namespace dxvk::backend::wire {
         ? 0u
         : g_markerMirror.load(std::memory_order_acquire) + 1u;
     std::lock_guard<std::mutex> lock(g_blobMutex);
-    d9mt_blob_retire(&g_blobPool, heapOffset, reserved, stamp);
+    d9mt_blob_arena_retire(&g_blobArena, heapOffset, reserved, stamp);
   }
 
   uint64_t blobStamp() {
@@ -3354,6 +3386,35 @@ namespace dxvk::backend::prof {
       " blobFlDrop=", [] {
         std::lock_guard<std::mutex> lock(g_blobMutex);
         return g_blobPool.freelist_drops;
+      }(),
+      " blobCh=", [] {
+        std::lock_guard<std::mutex> lock(g_blobMutex);
+        return g_blobArena.chunks;
+      }(),
+      /* Round 3: app-thread per-call cost, WINDOW deltas, us/calls per
+       * bucket (lk=Lock ul=Unlock dr=Draw* sc=SetVSConstantF st=SetTexture
+       * al=blobAlloc/Retire — al nests inside lk, it decomposes it). The
+       * timeline's t0->(prev t8) app gap must decompose into these. */
+      " appUs=", [] {
+        static uint64_t prevNs[AppProfCount] = {};
+        static uint64_t prevCalls[AppProfCount] = {};
+        static const char* names[AppProfCount] =
+          { "lk", "ul", "dr", "sc", "st", "al" };
+        uint64_t total = 0u;
+        std::string out;
+        for (uint32_t i = 0; i < AppProfCount; i++) {
+          const uint64_t ns = g_appProfNs[i].load(std::memory_order_relaxed);
+          const uint64_t cl = g_appProfCalls[i].load(std::memory_order_relaxed);
+          const uint64_t dNs = ns - prevNs[i];
+          const uint64_t dCl = cl - prevCalls[i];
+          prevNs[i] = ns;
+          prevCalls[i] = cl;
+          if (i != AppProfAlloc)
+            total += dNs;
+          out += str::format(i ? " " : "", names[i], "=", dNs / 1000u, "/",
+                             dCl);
+        }
+        return str::format(total / 1000u, "{", out, "}");
       }());
     prev = s;
   }

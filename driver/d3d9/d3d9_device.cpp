@@ -26,6 +26,11 @@
 
 #include "d3d9_initializer.h"
 
+/* Round 3: app-thread per-call cost buckets (backend::wire::AppProfScope) —
+ * the D3D9 entry seams are a frame-rate term at thousands of calls/frame;
+ * PROF appUs= decomposes them (mtl_wire_emit.h). */
+#include "../backend/mtl_wire_emit.h"
+
 #include <algorithm>
 #include <cfloat>
 #ifdef MSC_VER
@@ -2771,6 +2776,7 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetTexture(DWORD Stage, IDirect3DBaseTexture9* pTexture) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfSetTex);
     if (unlikely(InvalidSampler(Stage)))
       return D3D_OK;
 
@@ -2995,6 +3001,7 @@ namespace dxvk {
           D3DPRIMITIVETYPE PrimitiveType,
           UINT             StartVertex,
           UINT             PrimitiveCount) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfDraw);
     D3D9DeviceLock lock = LockDevice();
 
     if (unlikely(m_state.vertexDecl == nullptr))
@@ -3047,6 +3054,7 @@ namespace dxvk {
           UINT             NumVertices,
           UINT             StartIndex,
           UINT             PrimitiveCount) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfDraw);
     D3D9DeviceLock lock = LockDevice();
 
     if (unlikely(m_state.vertexDecl == nullptr))
@@ -3108,6 +3116,7 @@ namespace dxvk {
           UINT             PrimitiveCount,
     const void*            pVertexStreamZeroData,
           UINT             VertexStreamZeroStride) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfDraw);
     D3D9DeviceLock lock = LockDevice();
 
     if (unlikely(!VertexStreamZeroStride))
@@ -3162,6 +3171,7 @@ namespace dxvk {
           D3DFORMAT        IndexDataFormat,
     const void*            pVertexStreamZeroData,
           UINT             VertexStreamZeroStride) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfDraw);
     D3D9DeviceLock lock = LockDevice();
 
     if (unlikely(!VertexStreamZeroStride))
@@ -3550,6 +3560,7 @@ namespace dxvk {
           UINT   StartRegister,
     const float* pConstantData,
           UINT   Vector4fCount) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfSetConst);
     D3D9DeviceLock lock = LockDevice();
 
     return SetShaderConstants<
@@ -4928,6 +4939,7 @@ namespace dxvk {
             D3DLOCKED_BOX*          pLockedBox,
       const D3DBOX*                 pBox,
             DWORD                   Flags) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfLock);
     D3D9DeviceLock lock = LockDevice();
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
@@ -5186,6 +5198,7 @@ namespace dxvk {
         D3D9CommonTexture*      pResource,
         UINT                    Face,
         UINT                    MipLevel) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfUnlock);
     D3D9DeviceLock lock = LockDevice();
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
@@ -5434,6 +5447,7 @@ namespace dxvk {
           UINT                    SizeToLock,
           void**                  ppbData,
           DWORD                   Flags) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfLock);
     D3D9DeviceLock lock = LockDevice();
 
     if (unlikely(ppbData == nullptr))
@@ -5620,6 +5634,7 @@ namespace dxvk {
 
   HRESULT D3D9DeviceEx::UnlockBuffer(
         D3D9CommonBuffer*       pResource) {
+    backend::wire::AppProfScope apf(backend::wire::AppProfUnlock);
     D3D9DeviceLock lock = LockDevice();
 
     if (pResource->DecrementLockCount() != 0)

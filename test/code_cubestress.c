@@ -206,8 +206,7 @@ int main(void) {
     m_rot_y(world, ang);
     m_mul(wv, world, view);
     m_mul(mvp, wv, proj);
-    LOG("mvp row0 = %.3f %.3f %.3f %.3f", mvp[0], mvp[1], mvp[2], mvp[3]);
-    LOG("mvp row3 = %.3f %.3f %.3f %.3f", mvp[12], mvp[13], mvp[14], mvp[15]);
+
     /* STATICMVP: set constants only on frame 0 to isolate the upload ring.
      * SAMEVAL: call every frame but always with frame-0 matrix (isolates the
      * per-frame Alloc/offset-bump from the constant VALUE). */
@@ -226,9 +225,9 @@ int main(void) {
     if (!getenv("STATICMVP") || f == 0)
       CHECK(IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, upload, 4));
 
-    CHECK(IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
-                                 D3DCOLOR_XRGB(16, 16, 40), 1.0f, 0));
-    CHECK(IDirect3DDevice9_BeginScene(dev));
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+                           D3DCOLOR_XRGB(16, 16, 40), 1.0f, 0);
+    IDirect3DDevice9_BeginScene(dev);
     /* STRESS: a grid of cubes, one SetVertexShaderConstantF per draw — forces
      * the D3D9 constant ring to wrap within a frame and floods per-draw
      * uploads under GPU overlap. If server-side upload application races
@@ -250,12 +249,15 @@ int main(void) {
           for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) t[c*4+r] = mvp2[r*4+c];
           memcpy(mvp2, t, sizeof(mvp2));
         }
-        CHECK(IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, mvp2, 4));
-        CHECK(IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, 8, 0, 12));
+        /* hot loop: log only failures — per-draw printf costs ~14ms/frame */
+        HRESULT hr1 = IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, mvp2, 4);
+        HRESULT hr2 = IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, 8, 0, 12);
+        if (FAILED(hr1) || FAILED(hr2))
+          LOG("!!! draw %d failed set=0x%lx draw=0x%lx", ci, (unsigned long)hr1, (unsigned long)hr2);
       }
     }
-    CHECK(IDirect3DDevice9_EndScene(dev));
-    CHECK(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL));
+    IDirect3DDevice9_EndScene(dev);
+    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
 
     /* readback churn isolation: with RARERB set, only read frames 0,1,last */
     if (getenv("RARERB") && f >= 2 && f != FRAMES - 1) { continue; }

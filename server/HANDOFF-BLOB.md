@@ -251,6 +251,50 @@ starvation on color-RT creates (draws skipped while the RT resource is
 pending). No separate mechanism found; re-measure after blobFb=0 and only
 then chase whatever residue remains (counters stay in srv-stats).
 
+## ROUND 3 — the app-thread wall (O(1) arena) + burst-spill audit
+
+Live decode (calm 30fps windows, P2/P3 engaged and working): passes=66
+scene-perfect, useFlush=0, stg=0, GPU feedback live — yet frame ~39 ms.
+Timeline notice=27 ms == the APP THREAD's inter-present time (client CS
+0.7 ms): something per-call on the app thread costs ~4x the old driver.
+
+1. **O(1) lock-path allocation (mtl_blob_pool.h ARENA layer)**: the pool's
+   reuse ladder (freelist scan + split-fit + covered-coalesce) ran at EVERY
+   Lock on the app thread — after a street transition the freelist holds
+   ~10k entries, making each Lock an O(10k) scan. The arena layer bumps
+   inside an open 2 MiB chunk (O(1), no loops); the ladder now runs only at
+   chunk acquisition (~once per 128 slices). Slices retire against their
+   chunk (live counter + max stamp); a fully-retired chunk returns to the
+   pool WHOLE — the credit law holds at chunk granularity (strictly
+   conservative). >=512 KiB allocations route direct. NOTE: per-frame
+   whole-arena retirement is UNSOUND here (slices back PERSISTENT buffer
+   generations — a rename's slice lives until the NEXT discard); the live
+   counter gives the same O(1) with correct lifetimes. The pool API and all
+   its gates are unchanged underneath. Driver switch: wire::blobAlloc/
+   blobRetire -> d9mt_blob_arena_alloc/retire (mtl_wire_context.cpp).
+   Suspects still open if appUs says the wall is elsewhere: renameBuffer's
+   recycle-miss slow path (blobAlloc + full-slice memset + MTLDevice_
+   newBuffer UNIXCALL per miss; recycle depth only 4 — mtl_device_impl).
+2. **appUs= instrumentation (this layer can never hide again)**: PROF now
+   prints `appUs=total{lk ul dr sc st al}` — window us/calls for
+   Lock/Unlock, Draw*, SetVSConstantF, SetTexture entry seams
+   (d3d9_device.cpp, backend::wire::AppProfScope) and the blob
+   allocator (al, nested inside lk). D9MT_PROFILE-gated; the timeline's
+   t0->(prev t8) app gap must decompose into these buckets.
+3. **Burst-spill audit hooks (server)**: first-8 named logs at the staged
+   decision (`upl-stage #n: wire= sz= {range-live|parked-range|
+   NON-SHARED-dst} refSerial= completed= pass=`) and at the consumed-
+   unpromotable flush (`upl-flush #n: why={earlier-overlap|non-shared-dst|
+   block-unretired} blockSerial= completed=`) — the surviving streaming
+   spill (stg=20k -> useFlush=20k in create-storm windows) names itself on
+   the next live run. Expected causes: blobFb fallback re-ships (the arena
+   should collapse these) or block-unretired same-frame consumption.
+
+Gates (green): arena O(1) (100x10k alloc+retire, avg <1 ms/frame asserted,
+slot-shadow reuse law through chunk recycling), R3 burst mix (blob create
+storm + mid-pass texture streaming in ONE pass per frame: useFlush=0,
+passes O(frames)), full suite + full-clean chain.
+
 ## Expected GTA signature (next real-game run)
 
 - `upl=` per PROF window collapses ~100x (only texture + residual buffer
