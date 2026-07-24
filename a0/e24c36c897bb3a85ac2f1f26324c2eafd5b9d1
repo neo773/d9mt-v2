@@ -1,0 +1,26 @@
+server/HANDOFF-BLOB.md
+  s_9dc0f2092159a8::t_9f07c3d1da6cb2 1-152
+server/test_feed.c
+  s_9dc0f2092159a8::t_a79dda556a45d2 526,537-543,548
+  s_9dc0f2092159a8::t_9669a84e632b3b 3318
+  s_9dc0f2092159a8::t_64927cdac64c3b 3116-3222,3227-3229,3234-3317,3319-3454
+  s_9dc0f2092159a8::t_daea5115b461ee 56,65-69
+  s_9dc0f2092159a8::t_d464fe277d907f 3223-3226,3230-3233
+  s_9dc0f2092159a8::t_dd08425a4885b3 3455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a0e24c36c897bb3a85ac2f1f26324c2eafd5b9d1",
+  "prompts": {},
+  "sessions": {
+    "s_9dc0f2092159a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d67ac47b-205d-45ff-a745-08908779bc6e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "neo773 <neo773@protonmail.com>"
+    }
+  }
+}
