@@ -133,8 +133,11 @@ main(int argc, char **argv) {
   if (rc)
     return 2; /* status->error already set */
 
-  /* Ready: the client's spawn gate. Everything above is published. */
-  atomic_store_explicit(&status->heartbeat, 1, memory_order_release);
+  /* Ready: the client's spawn gate. Everything above is published. V19: no
+   * heartbeat seed here — the executor watchdog (already running since
+   * d9mt_executor_init) is the heartbeat's only writer, on a fixed 10 ms
+   * timer; a seed store would race it backward. The client's attach
+   * handshake waits for heartbeat CHANGE, which the watchdog supplies. */
   atomic_store_explicit(&status->epoch, 1, memory_order_release);
   fprintf(stderr, "[serverd] ready: pid=%d dir=%s ring=%llu B surfaces=%ux%u\n",
           getpid(), dir, (unsigned long long)ring->capacity, width, height);

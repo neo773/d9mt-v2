@@ -23,7 +23,15 @@
  *                                          (quiesce/begin ack — the server is
  *                                          process-lifetime and resets its state
  *                                          between client device sessions)
- *   offset   8  u64      heartbeat         monotonic, ~100 Hz while alive
+ *   offset   8  u64      heartbeat         monotonic, ~100 Hz while the
+ *                                          PROCESS lives. V19: bumped by the
+ *                                          executor watchdog thread on a
+ *                                          fixed 10 ms timer — NEVER by the
+ *                                          consuming path. Liveness is a
+ *                                          property of the process, not of
+ *                                          work arriving: an idle or
+ *                                          record-wedged (but alive) server
+ *                                          keeps heartbeating
  *   offset  16  u64      progress          consumed ring bytes (mirror of ring->tail)
  *   offset  24  u64      completed_serial  last completed submission serial
  *                                          (S1: stays 0 — no server-side execution)

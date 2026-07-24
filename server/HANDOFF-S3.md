@@ -1589,3 +1589,86 @@ Honest flags / debt:
 - heapAllocWait stalls the CS thread up to 50 ms per starved upload; only
   reachable past 96 MiB of stashed content (load-time), steady state
   never pays it.
+
+## V19 — MUTUAL-STARVATION WEDGE: heartbeat liveness decoupled from work
+
+### The mechanism (Opus live-sample forensic of a real GTA wedge)
+
+Both processes were HEALTHY at sample time and starving each other
+forever:
+
+- Server consumer: parked on the ring-head futex, ring EMPTY, occasional
+  timeout wakes (clock_gettime + the ~10 Hz stat/pid checks), re-park. No
+  deadlock, no GPU wait.
+- Client: had declared "server heartbeat frozen >3s — disabling wire
+  transport (dead server)" and stopped producing FOREVER.
+
+Root cause: `status->heartbeat` was bumped by the CONSUMER thread between
+loop passes, so liveness silently depended on the consumer loop cycling —
+on WORKLOAD. The wedge shape is load-then-lull: a streaming burst stalls
+the producer (V18 heapAllocWait storms burn CS time waiting for heap
+acks), the heartbeat freezes past the client's 3 s window while the
+consumer is not cycling cleanly, the client latches `g_serverDead` and
+stops producing, the ring drains, the server idles — and by the time
+anyone samples it, both sides look healthy. The disable is PERMANENT by
+design, so the game runs forward-only forever (the "freeze"/no-wire
+signature).
+
+### The liveness law
+
+**Liveness is a property of the process, not of work arriving.** Enforced
+in three places:
+
+1. **Heartbeat ownership moved to the executor watchdog thread**
+   (`server/executor.mm` `watchdogMain`): bumps `status->heartbeat` every
+   10 ms (~100 Hz) unconditionally while the process lives. The watchdog
+   sleeps in a pure timer loop and touches no Metal/ring state — it cannot
+   be wedged by workload. Its S3 v8 1 s diagnostics are unchanged (every
+   100th tick). The consumer (`server/consumer.m`) no longer bumps the
+   heartbeat at all; its wake path is audited/documented in-file: each
+   wake does (1) ~10 Hz ring-unlink + client-pid checks, (2) exit-flag
+   check, (3) head reload + shutdown check + re-park/drain.
+2. **Client detector tightened** (`driver/backend/mtl_wire_context.cpp`
+   `presentObserved`): dead now requires BOTH, each frozen >3 s
+   (`kServerDeadMs`, unchanged): heartbeat frozen AND a NON-EMPTY ring
+   whose tail has not moved — the server is only dead if it fails to
+   consume AVAILABLE work. An idle-but-alive server (empty ring) keeps
+   refreshing the tail baseline and can never trip. A record-wedged-but-
+   alive server keeps heartbeating and is owned by `waitForSpace`'s
+   bounded consecutive zero-progress windows (unchanged), which on a full
+   ring — a backlog by definition — still fast-path the disable when the
+   heartbeat is also frozen (dead process). Baselines
+   (`g_lastTailSeen`/`g_lastTailLiveMs`) reset per attach/connect like the
+   hb pair.
+3. **Ack-path audit** (the V18 trigger): heap acks (`heap->consumed`) are
+   published by `executor.mm heapAck` AT RECORD EXECUTION — per consumed
+   region, never batched to presents, never dependent on more work
+   arriving. No fix needed; documented at `heapAllocWait`. New PROF
+   instrument `hWaitMs=` (window delta of cumulative `g_texAckWaitMs`)
+   names how much CS wall-time each 256-frame window burned inside
+   heapAllocWait — the next capture shows whether ack backpressure is
+   what stalls the producer into the lull.
+
+### Gates (server/test_feed.c, run by scripts/build-server.sh)
+
+- **idle-liveness**: attach, send NOTHING for 10 s — heartbeat must
+  advance EVERY second (the detector needs a 3 s freeze; per-second
+  advance proves it cannot trip) and the ring stays empty (the detector's
+  backlog half stays false). PASS.
+- **load-lull-load**: 2000-record storm, 5 s silence (the old kill
+  window), 2000-record storm — the second storm must flow (progress
+  reaches head) and the heartbeat must tick >=100 through the lull. PASS.
+- Wedge sim (S3 v8) unchanged and still green: hb ticks while the create
+  worker is wedged 6 s — now trivially true (watchdog-owned) instead of
+  depending on consumer decoupling alone.
+- All pre-existing scenarios green; full-clean chain (rm -rf build;
+  build-bridge; build-driver -> build-server gate).
+
+### Expected GTA signature
+
+No permanent post-streaming freeze: the wire survives load-then-lull
+(`hb=` stays ~100/window in PROF even through lulls; no "disabling wire
+transport (dead server)" line). During streaming bursts `hWaitMs=` names
+the producer stall budget — if it approaches the window's wall-clock,
+heap-ack backpressure is the next perf lever, but it can no longer kill
+the transport.

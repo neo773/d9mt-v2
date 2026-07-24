@@ -37,8 +37,9 @@ body.
 
 1. **Server consumer idle park** (`server/consumer.m`): `usleep(1000)` →
    `d9mt_futex_wait(&ring->head, head, 1ms)`. The 1 ms backstop equals the
-   old poll latency on a lost wake and keeps the heartbeat (~100 Hz) and the
-   unlink/pid checks (~10 Hz) on cadence. `_WireRing_kick` (unixcall 212,
+   old poll latency on a lost wake and keeps the unlink/pid checks (~10 Hz)
+   on cadence. (V19: the heartbeat no longer lives in this loop at all —
+   see HANDOFF-S3.md V19; the executor watchdog owns it on a fixed timer.) `_WireRing_kick` (unixcall 212,
    `bridge/unix/winemetal_unix.c`) is no longer a no-op: it wakes
    `&ring->head`; the producer still kicks ONLY on the empty→nonempty
    transition. Consumer exit wakes `&ring->tail` so a parked producer fails
@@ -86,7 +87,10 @@ PE wrapper: `WireRing_wait(op, timeout_us, a, b)`
 - Client dead-server heartbeat latch (`presentObserved`): reads stats it
   already fetches per present; no sleep loop exists there.
 - Server heartbeat itself: it IS the liveness signal; it must tick on a
-  clock, not on wakes.
+  clock, not on wakes. (V19 made this literal: the consumer loop's bump —
+  which still coupled the tick to the loop cycling, i.e. to work — moved to
+  the executor watchdog's fixed 10 ms timer. Liveness is a property of the
+  process, not of work arriving.)
 - test_feed `wait_u64`/scenario polls: test-side observation loops.
 
 ## Gates (server/test_feed.c, run by scripts/build-server.sh)

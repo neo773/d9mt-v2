@@ -3617,6 +3617,127 @@ main(int argc, char **argv) {
     rmdir(wdir);
   }
 
+  /* --- V19 liveness gates: the mutual-starvation wedge shape. The
+   * heartbeat is WATCHDOG-owned (liveness is a property of the process,
+   * not of work arriving), so (a) an idle server heartbeats forever and
+   * the client's dead-server detector can never trip on silence, and
+   * (b) a load-then-lull-then-load sequence — the exact wedge trigger —
+   * flows on the second storm instead of starving. --- */
+  {
+    char ldir[900];
+    snprintf(ldir, sizeof(ldir), "%s/d9mt-test-XXXXXX", tmp ? tmp : "/tmp");
+    if (!mkdtemp(ldir))
+      FAIL("liveness mkdtemp: %s", strerror(errno));
+    void *r4, *s4, *h4;
+    if (create_file(ldir, "ring", sizeof(struct d9mt_wire_ring) + RING_CAP, &r4) ||
+        create_file(ldir, "status", sizeof(struct d9mt_status), &s4) ||
+        create_file(ldir, "heap", D9MT_WIRE_HEAP_DATA_OFFSET + (1u << 20), &h4))
+      return 1;
+    struct d9mt_wire_ring *lr = r4;
+    lr->capacity = RING_CAP;
+    lr->data_offset = sizeof(struct d9mt_wire_ring);
+    lr->magic = D9MT_WIRE_RING_MAGIC;
+    struct d9mt_wire_heap *lh = h4;
+    lh->capacity = 1u << 20;
+    lh->data_offset = D9MT_WIRE_HEAP_DATA_OFFSET;
+    lh->magic = D9MT_WIRE_HEAP_MAGIC;
+    struct d9mt_status *ls = s4;
+
+    /* rebase the producer globals onto this scenario's ring */
+    g_ring = lr;
+    g_data = (uint8_t *)r4 + sizeof(struct d9mt_wire_ring);
+    g_head = 0;
+
+    pid_t lpid;
+    char *largv[] = {(char *)server_bin, ldir, "64", "64", NULL};
+    if (posix_spawn(&lpid, server_bin, NULL, NULL, largv, environ))
+      FAIL("liveness posix_spawn failed");
+    for (int i = 0;; i++) {
+      if (atomic_load_explicit(&ls->epoch, memory_order_acquire) == 1)
+        break;
+      int lst;
+      if (waitpid(lpid, &lst, WNOHANG) == lpid)
+        FAIL("liveness server died before ready (0x%x)", lst);
+      if (i >= 1000)
+        FAIL("liveness server not ready");
+      usleep(10000);
+    }
+
+    /* (a) idle-liveness: attach, send NOTHING for 10 s. The heartbeat must
+     * advance EVERY second (the client detector needs a 3 s freeze to even
+     * consider death, so per-second advance proves it cannot trip), and
+     * the V19 dead predicate's other half (non-empty ring unconsumed) must
+     * stay false — the ring is empty the whole time. */
+    for (int sec = 0; sec < 10; sec++) {
+      uint64_t h0 = atomic_load_explicit(&ls->heartbeat, memory_order_acquire);
+      usleep(1000000);
+      uint64_t h1 = atomic_load_explicit(&ls->heartbeat, memory_order_acquire);
+      if (h1 == h0)
+        FAIL("idle-liveness: heartbeat FROZEN during idle second %d "
+             "(hb=%" PRIu64 ") — idle server would be misdeclared dead", sec, h0);
+      uint64_t ltail = atomic_load_explicit(&lr->tail, memory_order_acquire);
+      uint64_t lhead = atomic_load_explicit(&lr->head, memory_order_acquire);
+      if (ltail != lhead)
+        FAIL("idle-liveness: ring not empty while idle (tail=%" PRIu64
+             " head=%" PRIu64 ")", ltail, lhead);
+    }
+    printf("[test_feed] idle-liveness: 10 s of silence — heartbeat advanced "
+           "every second, dead-server predicate never true\n");
+
+    /* (b) load-lull-load: storm, 5 s of silence (the old wedge's kill
+     * window: consumer idles, the consumer-owned heartbeat froze, client
+     * disabled the wire), storm again — the second storm MUST flow. */
+    for (uint32_t i = 0; i < 2000; i++) {
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
+      emit(&sr, sizeof(sr));
+    }
+    if (wait_u64(&ls->progress, g_head, 5000))
+      FAIL("load-lull-load: first storm did not consume");
+    uint64_t lullHb0 = atomic_load_explicit(&ls->heartbeat, memory_order_acquire);
+    usleep(5000000);
+    uint64_t lullHb1 = atomic_load_explicit(&ls->heartbeat, memory_order_acquire);
+    if (lullHb1 - lullHb0 < 100)
+      FAIL("load-lull-load: heartbeat nearly froze through the lull "
+           "(+%" PRIu64 " ticks in 5 s, want >=100)", lullHb1 - lullHb0);
+    for (uint32_t i = 0; i < 2000; i++) {
+      struct d9mt_wire_rec_set_stencil_reference sr = {
+          {d9mt_wire_op_set_stencil_reference, sizeof(sr), 0}, i, 0};
+      emit(&sr, sizeof(sr));
+    }
+    if (wait_u64(&ls->progress, g_head, 5000))
+      FAIL("load-lull-load: SECOND storm did not flow (post-lull starvation)");
+    printf("[test_feed] load-lull-load: storm / 5 s silence / storm — second "
+           "storm flowed, hb +%" PRIu64 " through the lull\n",
+           lullHb1 - lullHb0);
+
+    /* clean detach + reap */
+    struct d9mt_wire_rec_nul ldetach = {{d9mt_wire_op_detach, 8, 0}};
+    emit(&ldetach, sizeof(ldetach));
+    int lst = -1, lexited = 0;
+    for (int i = 0; i < 800; i++) {
+      if (waitpid(lpid, &lst, WNOHANG) == lpid) {
+        lexited = 1;
+        break;
+      }
+      usleep(10000);
+    }
+    if (!lexited) {
+      kill(lpid, SIGKILL);
+      FAIL("liveness server did not exit after detach");
+    }
+    if (!WIFEXITED(lst) || WEXITSTATUS(lst) != 0)
+      FAIL("liveness server exit status 0x%x", lst);
+    char p4[1024];
+    snprintf(p4, sizeof(p4), "%s/ring", ldir);
+    unlink(p4);
+    snprintf(p4, sizeof(p4), "%s/status", ldir);
+    unlink(p4);
+    snprintf(p4, sizeof(p4), "%s/heap", ldir);
+    unlink(p4);
+    rmdir(ldir);
+  }
+
   /* teardown */
   char p[1024];
   snprintf(p, sizeof(p), "%s/ring", dir);

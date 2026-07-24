@@ -12,10 +12,15 @@
  *     (os_sync_wait_on_address SHARED — mtl_futex.h owns the discipline).
  *     The producer's kick (unixcall 212) wakes the address after its head
  *     release-store; the 1 ms timeout backstop equals the old poll latency
- *     on a lost wake and keeps the heartbeat/stat cadences below intact.
+ *     on a lost wake and keeps the stat/pid cadences below intact.
  *   - PROGRESS: ring->tail is mirrored into status->progress after every
  *     record — the client-visible consumption cursor.
- *   - LIVENESS: status->heartbeat ticks ~100 Hz whether draining or idle.
+ *   - LIVENESS (V19): status->heartbeat is NOT owned here. The executor's
+ *     watchdog thread bumps it every 10 ms unconditionally — liveness is a
+ *     property of the process, not of work arriving. This loop owning it
+ *     was the mutual-starvation bug: any long record handler froze the
+ *     heartbeat, the client latched dead-server and stopped producing, the
+ *     ring drained, and both sides starved forever while healthy.
  *   - EXIT: Detach opcode (courtesy end-of-stream), ring->shutdown flag, or
  *     the ring file disappearing (client died / tore down without detach —
  *     checked ~10 Hz via stat) all end the loop cleanly.
@@ -58,16 +63,18 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
   int detached = 0;
   int unlinked = 0;
   int client_dead = 0;
-  uint64_t last_hb_ms = now_ms();
-  uint64_t last_stat_ms = last_hb_ms;
+  uint64_t last_stat_ms = now_ms();
 
+  /* EVERY pass of this loop — a kick, a 1 ms park timeout, or falling out
+   * of a drain burst — does exactly this (V19 audit of the wake path):
+   *   1. ~10 Hz (stat-clocked): ring file unlink check + client PID
+   *      liveness check — the two exit-without-detach fallbacks.
+   *   2. exit-flag check (unlinked/detached/client_dead breaks the loop).
+   *   3. reload ring->head (acquire); empty => shutdown-flag check, then
+   *      re-park; nonempty => drain.
+   * NOT here (V19): the heartbeat — the executor watchdog owns it. */
   for (;;) {
-    /* liveness first: heartbeat ~100 Hz, drain or idle */
     uint64_t now = now_ms();
-    if (now - last_hb_ms >= 10) {
-      atomic_fetch_add_explicit(&status->heartbeat, 1, memory_order_relaxed);
-      last_hb_ms = now;
-    }
     /* client-death fallback: ring file unlinked => exit (~10 Hz check).
      * S3 v5 (process-lifetime server): also watch the CLIENT PID — the
      * server survives every device/context churn and owns its own cleanup
@@ -95,7 +102,7 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
       /* Kernel park: the producer kicks &head after its head release-store
        * (value-compare in the kernel closes the race with this wait). The
        * 1 ms backstop bounds a lost wake to the old poll latency and keeps
-       * the heartbeat (~100 Hz) / unlink+pid checks (~10 Hz) above alive. */
+       * the unlink+pid checks (~10 Hz) above alive. */
       d9mt_futex_wait(&ring->head, head, 1000u * 1000u /* 1 ms */);
       continue;
     }
@@ -205,6 +212,8 @@ d9mt_consumer_run(struct d9mt_wire_ring *ring, struct d9mt_status *status,
       fprintf(stderr, "[serverd]   op %3u: %llu\n", op,
               (unsigned long long)op_counts[op]);
 
+  /* one farewell tick: executor_finish above joined the watchdog (the V19
+   * heartbeat owner), so this is the last heartbeat this process writes */
   atomic_fetch_add_explicit(&status->heartbeat, 1, memory_order_relaxed);
   atomic_store_explicit(&ring->consumer_exited, 1, memory_order_release);
   /* Release any producer parked on tail: it re-checks consumer_exited and

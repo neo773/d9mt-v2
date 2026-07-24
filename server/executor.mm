@@ -1723,19 +1723,37 @@ static uint64_t monotonicMsSrv() {
   return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-/* S3 v8 watchdog thread: every second, name (a) a create-worker Metal call
- * that has not returned in >5 s — with the exact values that wedged it —
- * and (b) a consumer stuck inside one wire opcode with NO progress for
- * >5 s. Diagnostics only (a stuck ObjC call cannot be aborted); one line
- * per incident. */
+/* S3 v8 watchdog thread — V19: it also OWNS the liveness heartbeat.
+ *
+ * V19 LIVENESS LAW: liveness is a property of the process, not of work
+ * arriving. status->heartbeat is bumped HERE, every 10 ms, unconditionally,
+ * for as long as the process runs. It used to be bumped by the consumer
+ * thread between records, which silently made liveness depend on the
+ * consumer loop cycling: any long record handler (or any park anomaly)
+ * froze the heartbeat, the client latched "dead server" and stopped
+ * producing forever, the server drained and idled forever — distributed
+ * mutual starvation, with BOTH processes healthy. The watchdog is the one
+ * thread that is always sleeping in a timer loop and touches no Metal or
+ * ring state, so it can never be wedged by workload.
+ *
+ * Diagnostics (S3 v8, unchanged, every second): name (a) a create-worker
+ * Metal call that has not returned in >5 s — with the exact values that
+ * wedged it — and (b) a consumer stuck inside one wire opcode with NO
+ * progress for >5 s. Diagnostics only (a stuck ObjC call cannot be
+ * aborted); one line per incident. */
 static void watchdogMain() {
   pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0); /* not frame-critical */
   uint64_t warnedJob = 0;
   uint32_t lastOp = 0;
   uint64_t lastProgress = 0, opSinceMs = 0;
   bool warnedOp = false;
+  uint32_t tick = 0;
   while (!g->watchdogStop.load(std::memory_order_acquire)) {
-    usleep(1000000);
+    usleep(10000); /* 10 ms — the ~100 Hz heartbeat cadence */
+    atomic_fetch_add_explicit(&g->status->heartbeat, 1, memory_order_relaxed);
+    if (++tick < 100)
+      continue; /* diagnostics below stay on their 1 s cadence */
+    tick = 0;
     const uint64_t now = monotonicMsSrv();
     const uint64_t js = g->workerJobStartMs.load(std::memory_order_acquire);
     if (js && now - js > 5000 && warnedJob != js) {

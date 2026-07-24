@@ -119,14 +119,24 @@ namespace dxvk::backend {
     /* True once WireRing_attach has been issued (profiler stats source). */
     std::atomic<bool> g_wireAttached = { false };
 
-    /* S3 v4: dead-server latch. presentObserved (app thread) tracks the
-     * server heartbeat; frozen for >3 s while in SERVER mode = dead server,
-     * and the CS producer disables instead of streaming into a dead ring
-     * until it fills. Reset per attach. */
+    /* S3 v4 / V19: dead-server latch. presentObserved (app thread) tracks
+     * the server heartbeat (V19: watchdog-owned server-side, ticks while
+     * the PROCESS lives — idle or busy). Dead requires BOTH, each frozen
+     * for >3 s while in SERVER mode:
+     *   1. heartbeat frozen (the process stopped existing), AND
+     *   2. a non-empty ring whose tail has not moved (it is failing to
+     *      consume AVAILABLE work).
+     * An idle-but-alive server (empty ring, ticking heartbeat) must NEVER
+     * trip this — heartbeat-only detection was the V19 mutual-starvation
+     * wedge: a load-then-lull froze the old consumer-owned heartbeat, the
+     * latch tripped, the producer stopped forever, the server idled
+     * forever. Reset per attach/connect. */
     std::atomic<bool> g_serverMode = { false };
     std::atomic<bool> g_serverDead = { false };
     std::atomic<uint64_t> g_lastHb = { 0u };
     std::atomic<int64_t> g_lastHbChangeMs = { 0 };
+    std::atomic<uint64_t> g_lastTailSeen = { 0u };
+    std::atomic<int64_t> g_lastTailLiveMs = { 0 };
     constexpr int64_t kServerDeadMs = 3000;
 
     int64_t monotonicMs() {
@@ -220,6 +230,12 @@ namespace dxvk::backend {
      *               shipped content the client no longer holds (the fresh
      *               server texture starts EMPTY — black until re-written). */
     std::atomic<uint64_t> g_texAckWaits   = { 0u };
+    /* V19: TOTAL wall-clock ms the CS thread burned inside heapAllocWait
+     * (cumulative; PROF `hWaitMs=` reports the window delta). The V19 wedge
+     * trigger was a streaming burst whose ack-waits stalled the producer
+     * long enough to drain the ring — this names how many seconds a window
+     * lost to heap-ack backpressure. */
+    std::atomic<uint64_t> g_texAckWaitMs  = { 0u };
     std::atomic<uint64_t> g_texStashBytes = { 0u };
     std::atomic<uint64_t> g_texDrops      = { 0u };
     std::atomic<uint64_t> g_texConvSkips  = { 0u };
@@ -379,6 +395,8 @@ namespace dxvk::backend {
     g_serverDead.store(false, std::memory_order_relaxed);
     g_lastHb.store(0u, std::memory_order_relaxed);
     g_lastHbChangeMs.store(monotonicMs(), std::memory_order_relaxed);
+    g_lastTailSeen.store(0u, std::memory_order_relaxed);
+    g_lastTailLiveMs.store(monotonicMs(), std::memory_order_relaxed);
     Logger::info(str::format("MtlWireContext: connected to live render server "
       "(session #", g_wt.session, ")"));
     return true;
@@ -447,6 +465,8 @@ namespace dxvk::backend {
     g_serverDead.store(false, std::memory_order_relaxed);
     g_lastHb.store(0u, std::memory_order_relaxed);
     g_lastHbChangeMs.store(monotonicMs(), std::memory_order_relaxed);
+    g_lastTailSeen.store(0u, std::memory_order_relaxed);
+    g_lastTailLiveMs.store(monotonicMs(), std::memory_order_relaxed);
     g_serverMode.store(g_wt.hasConsumer, std::memory_order_release);
 
     const uint32_t claim = g_claimSeq.fetch_add(1u, std::memory_order_relaxed);
@@ -578,9 +598,12 @@ namespace dxvk::backend {
             window, " stall windows"));
         return true;
       }
-      /* S3 v4: a live-but-slow consumer heartbeats through a stall (~100
-       * ticks per window); frozen heartbeat + zero tail progress = DEAD
-       * server — disable NOW instead of burning the full window budget. */
+      /* S3 v4 / V19: the heartbeat ticks while the server PROCESS lives
+       * (watchdog-owned, workload-independent), so on a FULL ring — a
+       * backlog by definition — frozen heartbeat + zero tail progress =
+       * dead process — disable NOW instead of burning the full window
+       * budget. A live-but-wedged consumer keeps heartbeating and is
+       * handled by the bounded zero-progress windows instead. */
       if (g_wt.ring->tail.load(std::memory_order_acquire) == tailAtStart) {
         WMTWireStats hbEnd = { };
         WireRing_stats(&hbEnd);
@@ -646,11 +669,13 @@ namespace dxvk::backend {
       return nullptr;
     }
 
-    /* S3 v4: never stream into a dead ring. The present path latches
-     * g_serverDead when the server heartbeat freezes for >3 s — cheaper and
-     * far earlier than waiting for a 16 MiB ring to fill. Permanent. */
+    /* S3 v4 / V19: never stream into a dead ring. The present path latches
+     * g_serverDead only when the server heartbeat froze >3 s AND a
+     * non-empty ring went unconsumed for the same window — cheaper and far
+     * earlier than waiting for a 16 MiB ring to fill, and never tripped by
+     * an idle-but-alive server. Permanent. */
     if (g_wt.hasConsumer && g_serverDead.load(std::memory_order_acquire)) {
-      Logger::err("MtlWireContext: server heartbeat frozen >3s — disabling wire transport (dead server)");
+      Logger::err("MtlWireContext: server dead (heartbeat frozen >3s with unconsumed backlog) — disabling wire transport");
       g_wt.active = false;
       return nullptr;
     }
@@ -858,18 +883,33 @@ namespace dxvk::backend {
    * black server texture, so a short CS-thread stall is the correct trade
    * under bulk-streaming backpressure. Quiet probes: no double-counting. */
   uint64_t MtlWireContext::heapAllocWait(const void* src, uint64_t bytes, uint64_t* genOut) {
-    const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::milliseconds(kTexAckWaitBudgetMs);
+    /* V19 ack-path audit: the ack this poll waits for (heap->consumed) is
+     * published by the server AT RECORD EXECUTION (executor.mm heapAck —
+     * called from every upload handler the moment the slab copy detaches
+     * the GPU from the region), NOT batched to presents or deferred to
+     * future work. An idle server therefore holds no acks hostage: once
+     * the ring drains, `consumed` == the last shipped generation and this
+     * wait can only be pending on IN-FLIGHT consumption. The counters
+     * below (texWait= count, hWaitMs= time) prove per window how much CS
+     * time this backpressure costs — the V19 wedge trigger candidate. */
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline = t0 + std::chrono::milliseconds(kTexAckWaitBudgetMs);
+    uint64_t off = UINT64_MAX;
     for (;;) {
       ::Sleep(1); /* server ack cadence is per-consumed-region; 1 ms poll */
-      const uint64_t off = heapAlloc(src, bytes, genOut, true /* quiet */);
+      off = heapAlloc(src, bytes, genOut, true /* quiet */);
       if (off != UINT64_MAX) {
         g_texAckWaits.fetch_add(1u, std::memory_order_relaxed);
-        return off;
+        break;
       }
       if (std::chrono::steady_clock::now() >= deadline)
-        return UINT64_MAX;
+        break;
     }
+    g_texAckWaitMs.fetch_add(uint64_t(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count()),
+      std::memory_order_relaxed);
+    return off;
   }
 
   bool MtlWireContext::emitUploadBuffer(uint64_t wireId, uint64_t clientHandle,
@@ -2468,20 +2508,35 @@ namespace dxvk::backend::wire {
     if (s.server_frame_serial + 1u >= local)
       g_srvPace.fetch_add(1u, std::memory_order_relaxed);
 
-    /* S3 v4 dead-server latch: the heartbeat ticks ~100 Hz whenever the
-     * server lives (the v2 create worker keeps the consumer loop — and thus
-     * the heartbeat — running through boot storms). Frozen for >3 s in
-     * SERVER mode = dead; the CS producer disables at its next record
+    /* S3 v4 / V19 dead-server latch: the heartbeat ticks ~100 Hz while the
+     * server PROCESS lives (V19: watchdog-owned, workload-independent).
+     * Dead requires BOTH frozen for >3 s in SERVER mode: the heartbeat AND
+     * consumption of a non-empty ring (tail parked under a backlog). An
+     * idle-but-alive server never trips (empty ring keeps refreshing the
+     * tail baseline); a record-wedged-but-alive server never trips either
+     * (heartbeat ticks) — that shape is owned by waitForSpace's bounded
+     * zero-progress windows. The CS producer disables at its next record
      * instead of streaming into a dead ring until it fills. */
     if (g_serverMode.load(std::memory_order_acquire) &&
-        !g_serverDead.load(std::memory_order_relaxed)) {
+        !g_serverDead.load(std::memory_order_relaxed) &&
+        g_wt.ring != nullptr) {
       const int64_t now = monotonicMs();
       if (s.heartbeat != g_lastHb.load(std::memory_order_relaxed)) {
         g_lastHb.store(s.heartbeat, std::memory_order_relaxed);
         g_lastHbChangeMs.store(now, std::memory_order_relaxed);
-      } else if (now - g_lastHbChangeMs.load(std::memory_order_relaxed) > kServerDeadMs) {
-        g_serverDead.store(true, std::memory_order_release);
       }
+      const uint64_t tail = g_wt.ring->tail.load(std::memory_order_acquire);
+      const uint64_t head = g_wt.ring->head.load(std::memory_order_relaxed);
+      if (tail != g_lastTailSeen.load(std::memory_order_relaxed) || tail == head) {
+        g_lastTailSeen.store(tail, std::memory_order_relaxed);
+        g_lastTailLiveMs.store(now, std::memory_order_relaxed);
+      }
+      const bool hbFrozen =
+        now - g_lastHbChangeMs.load(std::memory_order_relaxed) > kServerDeadMs;
+      const bool backlogStuck = head != tail &&
+        now - g_lastTailLiveMs.load(std::memory_order_relaxed) > kServerDeadMs;
+      if (hbFrozen && backlogStuck)
+        g_serverDead.store(true, std::memory_order_release);
     }
   }
 
@@ -2931,6 +2986,15 @@ namespace dxvk::backend::prof {
       " inel=", g_wireIneligible.load(std::memory_order_relaxed),
       " copySkip=", g_copySkips.load(std::memory_order_relaxed),
       " texWait=", g_texAckWaits.load(std::memory_order_relaxed),
+      " hWaitMs=", [] {
+        /* V19 window delta: CS-thread ms burned in heapAllocWait this
+         * window (the load-then-lull wedge trigger instrument) */
+        static uint64_t prevWaitMs = 0u;
+        const uint64_t now = g_texAckWaitMs.load(std::memory_order_relaxed);
+        const uint64_t d = now - prevWaitMs;
+        prevWaitMs = now;
+        return d;
+      }(),
       " texStashB=", g_texStashBytes.load(std::memory_order_relaxed) >> 10,
       " texDrop=", g_texDrops.load(std::memory_order_relaxed),
       " texConv=", g_texConvSkips.load(std::memory_order_relaxed),
