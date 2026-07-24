@@ -3,6 +3,7 @@
 #define __WINEMETAL_THUNKS_H
 
 #include "winemetal.h"
+#include <stddef.h>   /* offsetof — layout parity asserts below */
 
 #pragma pack(push, 8)
 
@@ -640,6 +641,21 @@ struct unixcall_wire_server_frame {
                               * table, which binds by resource id, not handle.
                               * 0 = unusable (a 0 id samples nothing: black). */
 };
+
+/* Layout parity proof, compiled into BOTH sides (PE thunks + unix .so) from
+ * this one header: if either side sees different offsets/size the build
+ * fails, so a mismatched field at runtime can only mean a STALE binary was
+ * deployed — the mint-time unix log and the PE first-acquire log both print
+ * sizeof for exactly that comparison (72 = current, 64 = pre-resource-id). */
+#ifdef __cplusplus
+static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) == 64
+           && sizeof(struct unixcall_wire_server_frame) == 72,
+           "unixcall_wire_server_frame layout drifted");
+#else
+_Static_assert(offsetof(struct unixcall_wire_server_frame, out_gpu_resource_id) == 64
+            && sizeof(struct unixcall_wire_server_frame) == 72,
+            "unixcall_wire_server_frame layout drifted");
+#endif
 
 #pragma pack(pop)
 

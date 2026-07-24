@@ -142,6 +142,39 @@ Expected reproducer signature after the fix: dark-blue clear + red
 triangle on screen; `srvAccepted=` ≈ 256 per window once the server
 publishes.
 
+### Retest fallout: id ZERO at the PE side (chased, instrumented)
+
+First retest: the zero-id guard fired EVERY present (skip-present by
+construction — screen black with NO blit, `srvAccepted=0`), i.e.
+`gpu_resource_id` was 0 as received. Chased:
+
+- **Cache (fixed defensively):** the id read was already per-call, but it
+  is now read ONCE at mint and STORED in the `wire_srv_tex_cache` entry —
+  cache hits return the stored id; no per-present ObjC property read.
+- **Struct plumbing (proven at compile time):** `winemetal_thunks.h` now
+  `static_assert`s `offsetof(out_gpu_resource_id) == 64 && sizeof == 72`.
+  Both the PE thunk dll and the unix .so compile this one header, and both
+  dispatch tables (unix + wow64) point at the same handler — there is NO
+  conversion layer to lose the field. A runtime mismatch can therefore
+  only be a STALE DEPLOYED BINARY (winemetal.dll or winemetal.so in the
+  prefix older than bf2c2d9 — the dll↔so chain is d3d9.dll → winemetal.dll
+  thunk → winemetal.so; a stale MIDDLE never copies the new field and the
+  driver's zeroed `WMTServerFrame f = {}` survives, exactly the observed
+  signature; build-bridge.sh does NOT install into the prefix).
+- **Three-point trace for the next run:** (1) unix mint log
+  `[wire] server-frame wrap minted: ... gpuResourceID=0x... (unixcall
+  struct 72 B)` names the id at its ObjC SOURCE + the .so's compiled
+  struct size; (2) PE one-shot `acquireServerFrame: first frame raw: ...`
+  names the received values + the driver's `WMTServerFrame` size (48 B
+  current, 40 B stale); (3) the split guard warnings (`zero extent` vs
+  `zero gpuResourceId`, values printed separately — the old text
+  misleadingly printed the extent for the id branch). Read: source
+  nonzero + received zero = stale winemetal.dll/.so; source zero = the
+  IOSurface wrap itself reports no id (then the fallback is a full
+  `newTextureView` of the wrap unix-side — views mint their own resource
+  id via the same mechanism driver textures use — NOT yet implemented;
+  needs a residency answer for view-vs-parent before shipping).
+
 ## Expected cube signature (the reproducer proves this, not the build)
 
 - Log: `render server attached ... (thin recorder: server-only rendering)`,

@@ -2246,19 +2246,47 @@ namespace dxvk::backend::wire {
      * zero/out-of-bounds present copy -> GPU fault -> the present's completion
      * event never signals -> the CS thread parks forever. Never present such a
      * frame — the caller skips the present. */
+    /* One-shot receive-side probe: the RAW values as they crossed the
+     * winemetal.dll boundary, plus the struct size THIS dll was compiled
+     * with. Read together with the unix-side "[wire] server-frame wrap
+     * minted" line (which prints the id at its ObjC source + the unix .so's
+     * struct size): source-nonzero here-zero = stale winemetal PE thunk;
+     * source-zero = the wrap itself has no id. */
+    {
+      static bool s_rawLogged = false;
+      if (f.texture != 0u && !s_rawLogged) {
+        s_rawLogged = true;
+        Logger::warn(str::format("acquireServerFrame: first frame raw: "
+          "texture=0x", std::hex, f.texture,
+          " gpuResourceId=0x", f.gpu_resource_id, std::dec,
+          " ", f.width, "x", f.height, " slot=", f.slot,
+          " minted=", f.minted,
+          " (WMTServerFrame ", sizeof(WMTServerFrame), " B)"));
+      }
+    }
+    if (f.texture == 0u || f.width == 0u || f.height == 0u) {
+      static bool s_warned = false;
+      if (f.texture != 0u && !s_warned) {
+        s_warned = true;
+        Logger::warn(str::format("acquireServerFrame: server texture has zero "
+          "extent (", f.width, "x", f.height, ") — skipping present"));
+      }
+      return false;
+    }
     /* ALL-IN black-screen fix (retina/scaled present): the SCALED present
      * path samples this wrap in a render pass (blitTextureView) through an
      * MTL4 argument table — argument tables bind by MTLResourceID, not object
      * handle, and a 0 id samples nothing (LEGAL-but-black; the debug layer
      * cannot see it). By construction: no resource id -> no present (skip),
      * never a black blit. */
-    if (f.texture == 0u || f.width == 0u || f.height == 0u
-     || f.gpu_resource_id == 0u) {
-      static bool s_warned = false;
-      if (f.texture != 0u && !s_warned) {
-        s_warned = true;
-        Logger::warn(str::format("acquireServerFrame: server texture has zero "
-          "extent (", f.width, "x", f.height, ") — skipping present"));
+    if (f.gpu_resource_id == 0u) {
+      static bool s_warnedId = false;
+      if (!s_warnedId) {
+        s_warnedId = true;
+        Logger::warn(str::format("acquireServerFrame: server frame has zero "
+          "gpuResourceId (extent ", f.width, "x", f.height, " is fine) — a 0 "
+          "resource id samples BLACK in the scaled present blit; skipping "
+          "present. See the raw-values line above vs the unix mint log."));
       }
       return false;
     }

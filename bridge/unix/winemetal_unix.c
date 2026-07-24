@@ -6983,19 +6983,29 @@ static struct {
   IOSurfaceID    id;
   uint64_t       gen;
   id<MTLTexture> tex;   /* owned +1, intentionally never released (see above) */
+  uint64_t       gpu_resource_id; /* [tex gpuResourceID]._impl, read ONCE at
+                                   * mint and stored — every cache HIT must
+                                   * return it too (the scaled present blit
+                                   * binds by resource id; 0 = black sample,
+                                   * so the PE side skips such presents). */
 } wire_srv_tex_cache[WIRE_SRV_TEX_CACHE];
 static uint32_t wire_srv_tex_next = 0;   /* round-robin eviction cursor */
 
 /* Returns the cached-or-freshly-wrapped texture; *minted set to 1 iff a new
- * texture was created this call (the PE side must then make it resident). */
+ * texture was created this call (the PE side must then make it resident);
+ * *gpu_resource_id always set from the cache entry (0 only if the wrap
+ * itself reports no id — loudly logged at mint). */
 static id<MTLTexture>
 wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen,
-                           uint32_t *minted) {
+                           uint32_t *minted, uint64_t *gpu_resource_id) {
   *minted = 0;
+  *gpu_resource_id = 0;
   for (uint32_t i = 0; i < WIRE_SRV_TEX_CACHE; i++) {
     if (wire_srv_tex_cache[i].tex &&
-        wire_srv_tex_cache[i].id == sid && wire_srv_tex_cache[i].gen == gen)
+        wire_srv_tex_cache[i].id == sid && wire_srv_tex_cache[i].gen == gen) {
+      *gpu_resource_id = wire_srv_tex_cache[i].gpu_resource_id;
       return wire_srv_tex_cache[i].tex;   /* hot path: same surface generation */
+    }
   }
 
   IOSurfaceRef surf = IOSurfaceLookup(sid);
@@ -7028,6 +7038,20 @@ wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen,
   if (!tex)
     return nil;
 
+  /* Read the resource id ONCE at mint. Mint-time diagnostics (mints are
+   * rare — 3 steady surfaces + resizes): name the id at its SOURCE plus the
+   * struct size this .so was compiled with, so a black-present run log
+   * attributes a zero id to the wrap itself vs a stale binary/transport in
+   * one read. */
+  uint64_t rid = [tex gpuResourceID]._impl;
+  fprintf(stderr, "[wire] server-frame wrap minted: iosurface=%u gen=%llu "
+                  "%zux%zu gpuResourceID=0x%llx (unixcall struct %zu B)%s\n",
+          (unsigned)sid, (unsigned long long)gen, w, h,
+          (unsigned long long)rid,
+          sizeof(struct unixcall_wire_server_frame),
+          rid ? "" : " — ZERO id: scaled present would sample black; "
+                     "PE will skip-present this frame");
+
   uint32_t slot = wire_srv_tex_next;
   wire_srv_tex_next = (wire_srv_tex_next + 1u) % WIRE_SRV_TEX_CACHE;
   /* Evicted entry is intentionally NOT released — it may still sit in the
@@ -7035,7 +7059,9 @@ wire_server_lookup_texture(id<MTLDevice> device, IOSurfaceID sid, uint64_t gen,
   wire_srv_tex_cache[slot].id  = sid;
   wire_srv_tex_cache[slot].gen = gen;
   wire_srv_tex_cache[slot].tex = tex;         /* own the +1 from newTexture */
+  wire_srv_tex_cache[slot].gpu_resource_id = rid;
   *minted = 1;
+  *gpu_resource_id = rid;
   return tex;
 }
 
@@ -7075,7 +7101,8 @@ _WireServerFrame_acquire(void *obj) {
     return STATUS_SUCCESS;                      /* empty slot */
 
   uint32_t minted = 0;
-  id<MTLTexture> tex = wire_server_lookup_texture((id<MTLDevice>)p->device, sid, gen, &minted);
+  uint64_t gpu_resource_id = 0;
+  id<MTLTexture> tex = wire_server_lookup_texture((id<MTLDevice>)p->device, sid, gen, &minted, &gpu_resource_id);
   if (!tex)
     return STATUS_SUCCESS;                       /* lookup / wrap failed */
 
@@ -7096,9 +7123,9 @@ _WireServerFrame_acquire(void *obj) {
   p->out_minted       = minted;
   /* The SCALED present blit samples this texture through an MTL4 argument
    * table, which binds by MTLResourceID — a 0 id is legal-but-black (argument
-   * tables are not validated). Ship the real id; the PE side refuses to
-   * present a frame without one. */
-  p->out_gpu_resource_id = [tex gpuResourceID]._impl;
+   * tables are not validated). Ship the id read at mint (cache-carried, so
+   * cache HITS return it too); the PE side refuses to present without one. */
+  p->out_gpu_resource_id = gpu_resource_id;
   p->out_usable       = 1;
   return STATUS_SUCCESS;
 }
