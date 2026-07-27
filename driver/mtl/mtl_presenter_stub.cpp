@@ -43,6 +43,12 @@ namespace dxvk {
       logOnce("signalFrameLatency");
     }
 
+    void setSyncInterval(uint32_t) override { }
+
+    bool isVisible() override { return true; }
+
+    void syncLayerGeometry(uint32_t, uint32_t) override { }
+
     MtlExtent2D getImageExtent() const override { return m_desc.imageExtent; }
 
   private:

@@ -508,6 +508,7 @@ namespace dxvk {
     MtlObjectHandle release = MtlNullHandle;   // drawable signal
     MtlObjectHandle drawable = MtlNullHandle;  // acquired CAMetalDrawable to present
     uint64_t        frameId = 0;
+    double          minDuration = 0.0;         // seconds; 0 = present immediately
   };
 
   struct MtlSubmitStatus {

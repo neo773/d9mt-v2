@@ -367,7 +367,10 @@ namespace dxvk::backend {
     submit(false);
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
-    MetalDrawable_present(sync.drawable);
+    if (sync.minDuration > 0.0)
+      MetalDrawable_presentAfterMinimumDuration(sync.drawable, sync.minDuration);
+    else
+      MetalDrawable_present(sync.drawable);
     /* Balance the retain taken in the bridge's nextDrawable — after present
      * nothing touches the drawable again. Acquire/present/release now all run
      * on the CS thread (see D3D9SwapChainEx::PresentImage), so no drawable is

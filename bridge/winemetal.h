@@ -2293,6 +2293,19 @@ WINEMETAL_API void MTLResidencySet_removeAllocation(obj_handle_t residency_set, 
  * presentDrawable:, so the queue path needs this explicit present entry. */
 WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable);
 
+/* Paces presentation through the display pipeline: the frame is held for at
+ * least `after` seconds. Used instead of a CPU frame limiter. */
+WINEMETAL_API void MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after);
+
+/* Window visibility, as macOS defines it. Acquiring drawables for a layer that
+ * is not composited drains the drawable pool and stalls nextDrawable, so the
+ * present path must gate on this rather than on Win32 focus. */
+#define WMT_VISIBILITY_VISIBLE         0x1u  /* NSWindowOcclusionStateVisible */
+#define WMT_VISIBILITY_ON_ACTIVE_SPACE 0x2u  /* window is on the user's Space */
+#define WMT_VISIBILITY_MINIATURIZED    0x4u
+
+WINEMETAL_API uint64_t MetalView_visibility(obj_handle_t view);
+
 /* --- render encoder visibility mode (202) ---------------------------- *
  * Occlusion queries (contract 3d): the MTL4 render encoder counts samples
  * into the pass's visibilityResultBuffer at the given byte offset. */

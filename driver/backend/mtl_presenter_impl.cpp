@@ -6,10 +6,20 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+#include <chrono>
+
 namespace dxvk::backend {
 
   namespace {
     WMTPixelFormat wmtFormat(MtlFormat f) { return WMTPixelFormat(uint32_t(f)); }
+
+    /* An acquire this slow means the layer is not being composited: a healthy
+     * one returns within a frame. Well under CAMetalLayer's 1s nextDrawable
+     * timeout, so we react before paying that repeatedly. */
+    constexpr int64_t kAcquireStallMs   = 100;
+    /* Re-probe interval while stalled: long enough not to hammer a drained
+     * pool, short enough to resume within a frame or two of recovery. */
+    constexpr int64_t kAcquireBackoffMs = 250;
   }
 
   class MtlPresenterImpl : public MtlPresenter {
@@ -48,6 +58,37 @@ namespace dxvk::backend {
       applyProps();
     }
 
+    void setSyncInterval(uint32_t syncInterval) override {
+      bool vsync = syncInterval != 0u;
+
+      if (m_desc.vsync != vsync) {
+        m_desc.vsync = vsync;
+        applyProps();
+      }
+    }
+
+    void syncLayerGeometry(uint32_t clientWidth, uint32_t clientHeight) override {
+      if (!m_layer || !clientWidth || !clientHeight)
+        return;
+
+      // Wine's client rect is already in backing pixels (measured: bounds
+      // 1496x967 points at contentsScale 2 == client 2992x1934), so it IS the
+      // drawable size. Scaling it again doubles the drawable.
+      WMTLayerProps cur = { };
+      MetalLayer_getProps(m_layer, &cur);
+
+      double w = double(clientWidth);
+      double h = double(clientHeight);
+
+      if (cur.drawable_width == w && cur.drawable_height == h)
+        return;
+
+      WMTLayerProps props = cur;
+      props.drawable_width  = w;
+      props.drawable_height = h;
+      MetalLayer_setProps(m_layer, &props);
+    }
+
     MtlAcquiredDrawable acquireNextImage(uint64_t frameId) override {
       MtlAcquiredDrawable image = {};
       image.sync.frameId = frameId;
@@ -63,10 +104,27 @@ namespace dxvk::backend {
 
       /* DIAG: nextDrawable can block indefinitely on pool starvation (no
        * timeout parameter) — a silent CS-thread hang. Time it and shout. */
+      /* Mission Control stops compositing while the window still reports
+       * visible by every API (active Space, occlusionState Visible), so the
+       * visibility gate cannot see it and nextDrawable walks toward its 1s
+       * timeout every frame. Detect the symptom instead: once an acquire is
+       * pathologically slow, stop acquiring briefly and re-probe.
+       *
+       * Safe only because the caller now drains the recorded frame on the
+       * no-drawable path — an earlier version of this skipped acquires without
+       * that flush and wedged the CS thread. */
+      if (std::chrono::steady_clock::now() < m_acquireBackoffUntil)
+        return image;
+
       auto t0 = std::chrono::steady_clock::now();
       obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
+      if (unlikely(ms > kAcquireStallMs)) {
+        m_acquireBackoffUntil = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(kAcquireBackoffMs);
+      }
+
       if (unlikely(ms > 500))
         Logger::warn(str::format("MtlPresenter: nextDrawable blocked ", ms,
           "ms (frame ", frameId, ", got=", drawable != 0u, ")"));
@@ -134,6 +192,17 @@ namespace dxvk::backend {
 
     MtlExtent2D getImageExtent() const override { return m_desc.imageExtent; }
 
+    bool isVisible() override {
+      if (!m_view)
+        return true;
+
+      uint64_t vis = MetalView_visibility(m_view);
+
+      return (vis & WMT_VISIBILITY_VISIBLE)
+          && (vis & WMT_VISIBILITY_ON_ACTIVE_SPACE)
+          && !(vis & WMT_VISIBILITY_MINIATURIZED);
+    }
+
   private:
 
     Rc<MtlDevice>    m_device;
@@ -142,6 +211,7 @@ namespace dxvk::backend {
     obj_handle_t     m_wmtDevice = 0u;
     obj_handle_t     m_view      = 0u;
     obj_handle_t     m_layer     = 0u;
+    std::chrono::steady_clock::time_point m_acquireBackoffUntil = { };
     bool             m_layerResidencyAttached = false;
     uint64_t         m_lastPresented = 0u;
     uint64_t         m_completedFrame = 0u;

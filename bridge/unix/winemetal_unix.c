@@ -3890,6 +3890,94 @@ _CreateMetalViewFromHWND(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* --- window visibility (occlusion / Space) -------------------------------
+ *
+ * CoreAnimation stops retiring presented drawables once a layer is not
+ * composited; the pool then drains and nextDrawable blocks ~1s per frame
+ * (allowsNextDrawableTimeout default YES). The driver must therefore stop
+ * acquiring drawables while the window is not visible, which needs a truthful
+ * visibility signal.
+ *
+ * occlusionState / isOnActiveSpace are AppKit state and must be touched on the
+ * main thread, but a synchronous hop from the render thread deadlocks (see
+ * MetalLayer_setProps). So: observe the notifications on the main thread and
+ * publish into an atomic the caller reads lock-free. A few ms of staleness is
+ * harmless — this gates frame acquisition, not correctness.
+ *
+ * Apple counts "a Mission Control space where the user isn't working" as
+ * hidden, which is why the Space swipe must be covered by isOnActiveSpace and
+ * not by occlusionState alone.
+ */
+static _Atomic(void *) g_vis_view;
+static _Atomic uint64_t g_vis_flags;
+static _Atomic int g_vis_observing;
+
+static void
+dxmt_vis_refresh(NSView *view) {
+  uint64_t flags = 0;
+  NSWindow *win = view.window;
+  if (win) {
+    if (win.occlusionState & NSWindowOcclusionStateVisible)
+      flags |= WMT_VISIBILITY_VISIBLE;
+    if (win.isOnActiveSpace)
+      flags |= WMT_VISIBILITY_ON_ACTIVE_SPACE;
+    if (win.isMiniaturized)
+      flags |= WMT_VISIBILITY_MINIATURIZED;
+  } else {
+    /* No window yet (view not installed): report visible so startup frames are
+     * not suppressed. */
+    flags = WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE;
+  }
+  atomic_store(&g_vis_flags, flags);
+}
+
+static NTSTATUS
+_MetalView_visibility(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  NSView *view = (NSView *)params->handle;
+
+  if (!view) {
+    params->ret = WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE;
+    return STATUS_SUCCESS;
+  }
+
+  if (atomic_exchange(&g_vis_view, (void *)view) != (void *)view)
+    atomic_store(&g_vis_observing, 0);
+
+  if (atomic_exchange(&g_vis_observing, 1) == 0) {
+    /* Seed optimistically so the first frames are not gated on the async hop. */
+    atomic_store(&g_vis_flags,
+      WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSWindow *win = view.window;
+      void (^update)(NSNotification *) = ^(NSNotification *n) {
+        (void)n;
+        dxmt_vis_refresh(view);
+      };
+      NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+      if (win) {
+        [nc addObserverForName:NSWindowDidChangeOcclusionStateNotification
+                        object:win queue:[NSOperationQueue mainQueue] usingBlock:update];
+        [nc addObserverForName:NSWindowDidMiniaturizeNotification
+                        object:win queue:[NSOperationQueue mainQueue] usingBlock:update];
+        [nc addObserverForName:NSWindowDidDeminiaturizeNotification
+                        object:win queue:[NSOperationQueue mainQueue] usingBlock:update];
+      }
+      /* Space changes do not post a window notification; isOnActiveSpace must
+       * be re-read when the active Space changes. */
+      [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
+                    object:nil queue:[NSOperationQueue mainQueue] usingBlock:update];
+
+      dxmt_vis_refresh(view);
+    });
+  }
+
+  params->ret = atomic_load(&g_vis_flags);
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _ReleaseMetalView(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -6229,6 +6317,13 @@ _MetalDrawable_present(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+_MetalDrawable_presentAfterMinimumDuration(void *obj) {
+  struct unixcall_generic_obj_obj_double_noret *params = obj;
+  [(id<MTLDrawable>)params->handle presentAfterMinimumDuration:params->arg1];
+  return STATUS_SUCCESS;
+}
+
 /* --- render encoder visibility mode (202) ---------------------------- */
 static NTSTATUS
 _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
@@ -6570,6 +6665,8 @@ D9MT_POOLED(_MTLTexture_replaceRegion)
 D9MT_POOLED(_MTLTexture_usage)
 D9MT_POOLED(_MTLTexture_width)
 D9MT_POOLED(_MetalDrawable_present)
+D9MT_POOLED(_MetalDrawable_presentAfterMinimumDuration)
+D9MT_POOLED(_MetalView_visibility)
 D9MT_POOLED(_MetalDrawable_texture)
 D9MT_POOLED(_MetalLayer_getEDRValue)
 D9MT_POOLED(_MetalLayer_getProps)
@@ -6869,6 +6966,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
     &_MTLDevice_newMTL4SpatialScaler_pooled,
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+    &_MetalDrawable_presentAfterMinimumDuration_pooled,            /* 211 */
+    &_MetalView_visibility_pooled,                                 /* 212 */
 
 };
 
@@ -7099,6 +7198,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
     &_MTLDevice_newMTL4SpatialScaler_pooled,
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
+    &_MetalDrawable_presentAfterMinimumDuration_pooled,            /* 211 */
+    &_MetalView_visibility_pooled,                                 /* 212 */
 
 };
 #endif

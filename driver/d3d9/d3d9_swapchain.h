@@ -20,6 +20,7 @@
 #include "../mtl/mtl_presenter.h"
 
 #include "../util/sync/sync_signal.h"
+#include "../util/util_fps_limiter.h"
 
 #include "../wsi/wsi_window.h"
 #include "../wsi/wsi_monitor.h"
@@ -153,7 +154,18 @@ namespace dxvk {
 
     wsi::DxvkWindowState      m_windowState;
 
+    // Borderless-fullscreen restyle state (wined3d fullscreen_style).
+    HWND                      m_fullscreenWindow   = nullptr;
+    LONG                      m_savedWindowStyle   = 0;
+    LONG                      m_savedWindowExStyle = 0;
+
     double                    m_targetFrameRate = 0.0;
+
+    // DXVK's limiter: self-heals after a stall instead of burning down a
+    // backlog. Used in place of presentAfterMinimumDuration, which Apple
+    // documents as holding drawables longer than necessary — fatal here,
+    // because a held drawable never retires while the layer is uncomposited.
+    FpsLimiter                m_fpsLimiter;
 
     double                    m_displayRefreshRate = 0.0;
     bool                      m_displayRefreshRateDirty = true;
@@ -178,6 +190,8 @@ namespace dxvk {
     void InitRamp();
 
     void UpdateTargetFrameRate(uint32_t SyncInterval);
+
+    double GetPresentMinimumDuration(uint32_t SyncInterval) const;
 
     uint32_t GetActualFrameLatency();
 

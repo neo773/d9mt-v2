@@ -1793,6 +1793,24 @@ MetalDrawable_present(obj_handle_t drawable) {
   UNIX_CALL(201, &params);
 }
 
+WINEMETAL_API uint64_t
+MetalView_visibility(obj_handle_t view) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = view;
+  params.ret = 0;
+  UNIX_CALL(212, &params);
+  return params.ret;
+}
+
+WINEMETAL_API void
+MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after) {
+  struct unixcall_generic_obj_obj_double_noret params;
+  params.handle = drawable;
+  params.arg0 = 0;
+  params.arg1 = after;
+  UNIX_CALL(211, &params);
+}
+
 /* --- render encoder visibility mode (202) ---------------------------- */
 WINEMETAL_API void
 MTL4RenderCommandEncoder_setVisibilityResultMode(obj_handle_t encoder, uint32_t mode, uint64_t offset) {

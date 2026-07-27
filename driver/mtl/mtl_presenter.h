@@ -66,6 +66,18 @@ namespace dxvk {
     // swapchain create and on D3D9 Reset.
     virtual void recreate(const MtlPresenterDesc& desc) = 0;
 
+    // Presentation interval, 0 = vsync off. Driven per-Present from the D3D9
+    // present params.
+    virtual void setSyncInterval(uint32_t syncInterval) = 0;
+
+    // Re-size the layer to clientSize x the layer's LIVE contentsScale.
+    //
+    // Must be called every Present: macdrv resizes the NSView asynchronously,
+    // so any size latched at create/Reset is stale for an unknown number of
+    // frames afterwards. Sizing from the backbuffer instead of the live scale
+    // renders into the top-left quarter on Retina (scale 2).
+    virtual void syncLayerGeometry(uint32_t clientWidth, uint32_t clientHeight) = 0;
+
     // Acquire the next drawable (CAMetalLayer nextDrawable). May block on the
     // frame-latency semaphore to throttle to imageCount frames in flight.
     virtual MtlAcquiredDrawable acquireNextImage(uint64_t frameId) = 0;
@@ -81,6 +93,13 @@ namespace dxvk {
     // Current drawable size (post backing-scale) so the swapchain can size its
     // back buffers / blit target.
     virtual MtlExtent2D getImageExtent() const = 0;
+
+    // False when macOS is not compositing the layer (occluded, other Space,
+    // miniaturized). Acquiring a drawable then drains the pool — presented
+    // drawables never retire while uncomposited — and nextDrawable starts
+    // blocking ~1s per frame, which persists as a backlog after the window
+    // returns. Win32 focus is NOT a substitute: it does not track Spaces.
+    virtual bool isVisible() = 0;
   };
 
   // Factory — PHASE-D returns the logging stub (mtl_presenter_stub.cpp). The real

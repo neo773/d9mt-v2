@@ -158,7 +158,6 @@ namespace dxvk {
 
     DestroyBackBuffers();
 
-    ResetWindowProc(m_window);
     RestoreDisplayMode(m_monitor);
 
     for (auto& p : m_presenters) {
@@ -239,6 +238,36 @@ namespace dxvk {
     UpdatePresentRegion(pSourceRect, pDestRect);
     UpdatePresentParameters();
 
+    if (m_wctx->presenter != nullptr) {
+      m_wctx->presenter->setSyncInterval(presentInterval);
+
+      // Re-probe every frame: the NSView resizes asynchronously behind us, so
+      // the layer only converges on the window if we keep pushing.
+      RECT client = { };
+      if (::GetClientRect(m_window, &client)) {
+        m_wctx->presenter->syncLayerGeometry(
+          uint32_t(client.right - client.left),
+          uint32_t(client.bottom - client.top));
+      }
+    }
+
+    // Not displaying: drain rather than just returning, so queued work does not
+    // pile up across the no-display window and unwind as a slideshow when the
+    // window comes back (DXMT does the same, "so resource lifetimes stay
+    // coherent"). Native does not synthesize DEVICELOST on a plain minimize; it
+    // stops updating the front buffer, so Ex reports S_PRESENT_OCCLUDED and
+    // non-Ex reports D3D_OK.
+    //
+    // Do NOT extend this to wsi::isOccluded(): macOS already stops vending
+    // drawables for a backgrounded window (measured 0 fps), and gating here on
+    // occlusion froze the game outright.
+    // DXMT drains here (FlushDrawBatch + flushOpenWork). Doing the equivalent
+    // (EndFrame + Flush) from inside Present wedged the frame loop outright —
+    // frames stopped advancing with the window frontmost and not minimized.
+    // Plain return until that is understood.
+    if (wsi::isMinimized(m_window))
+      return D3D_OK;
+
     if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
       // We never actually rotate in the front buffer.
       // Just blit to it for GetFrontBufferData.
@@ -259,6 +288,7 @@ namespace dxvk {
       UpdateWindowedRefreshRate();
       UpdateTargetFrameRate(presentInterval);
       PresentImage(presentInterval);
+      m_fpsLimiter.delay();
       return D3D_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
@@ -505,16 +535,17 @@ namespace dxvk {
           return hr;
       }
 
-      D3D9WindowMessageFilter filter(m_window);
-
+      // No D3D9WindowMessageFilter here: it indexes the window-proc map
+      // unconditionally, and we never hook the proc, so it would dereference
+      // end(). Nothing to filter either — we send no window messages.
       if (!changeFullscreen) {
-        Logger::info("D9MT-RESET: ChangeDisplayMode...");
-        hr = ChangeDisplayMode(pPresentParams, pFullscreenDisplayMode);
-        if (FAILED(hr))
-          return hr;
+        // Already fullscreen, resolution changed: re-apply the borderless rect.
+        RECT rect = { };
+        wsi::getDesktopCoordinates(m_monitor, &rect);
 
-        Logger::info("D9MT-RESET: updateFullscreenWindow...");
-        wsi::updateFullscreenWindow(m_monitor, m_window, true);
+        ::SetWindowPos(m_window, HWND_TOP,
+          rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+          SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
       }
     }
 
@@ -723,12 +754,34 @@ namespace dxvk {
       // the fully-rendered app backbuffer. No-op unless the trigger exists.
       DumpBackbufferIfRequested(ctx, cDevice, cPresentImage, cParamsW, cParamsH);
 
+      // Do not acquire while macOS is not compositing the layer: presented
+      // drawables never retire then, so the pool drains and nextDrawable blocks
+      // ~1s per frame — a backlog that keeps costing frames after the window is
+      // visible again. Rendering itself continues (D3D9 requires an occluded
+      // device to keep succeeding); only scan-out is skipped.
+      //
+      // This must stay HERE, not as an early return from Present(): EndFrame +
+      // Flush have already run above, and the frame fences below must still be
+      // signalled. Skipping those is what froze the game previously.
+      if (!cPresenter->isVisible()) {
+        // Commit what this frame already recorded. synchronizeWsi (below) is
+        // what normally submits it, so returning without this leaks a frame of
+        // work into the context every time; sustained, the CS queue backs up
+        // and the app thread spins at 100% with no output.
+        ctx->flushCommandList("present-skipped-not-visible", nullptr);
+        cPresenter->signalFrameLatency(cFrameId);
+        if (cSignal != nullptr)
+          cSignal->signal(cFrameId);
+        return;
+      }
+
       // Acquire the drawable HERE (CS thread) — one thread owns the whole
       // acquire/present/release cycle.
       MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
       if (!cDrawable.valid) {
-        // Occluded / no drawable this frame — still advance the frame fences so
-        // the limiter and any waiter don't stall.
+        // No drawable this frame — still submit the recorded work and advance
+        // the frame fences so the limiter and any waiter don't stall.
+        ctx->flushCommandList("present-skipped-no-drawable", nullptr);
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
           cSignal->signal(cFrameId);
@@ -988,6 +1041,44 @@ namespace dxvk {
 
       m_targetFrameRate = frameRate;
     }
+
+    // A fullscreen app asked for a specific refresh rate. We no longer switch
+    // display modes to give it one, so honour it by pacing instead.
+    if (!m_presentParams.Windowed && m_presentParams.FullScreen_RefreshRateInHz)
+      m_targetFrameRate = double(m_presentParams.FullScreen_RefreshRateInHz);
+
+    if (m_parent->GetOptions()->maxFrameRate > 0)
+      m_targetFrameRate = double(m_parent->GetOptions()->maxFrameRate);
+
+    m_fpsLimiter.setTargetFrameRate(m_targetFrameRate, GetActualFrameLatency());
+  }
+
+
+  double D3D9SwapChainEx::GetPresentMinimumDuration(uint32_t SyncInterval) const {
+    // Pace via the display pipeline, not a CPU sleep (DXMT does the same):
+    // presentAfterMinimumDuration lets CoreAnimation hold the frame and lets a
+    // ProMotion panel settle to a matching refresh rate.
+    double refresh = m_targetFrameRate > 0.0
+      ? m_targetFrameRate
+      : m_displayRefreshRate;
+
+    // Only pace against a plausible refresh rate. m_displayRefreshRate is not
+    // reliably populated now that we never change the display mode, and a bogus
+    // low value here holds every drawable for ~1s, starving nextDrawable and
+    // wedging the present loop.
+    if (!SyncInterval || refresh < 20.0 || refresh > 1000.0)
+      return 0.0;
+
+    double duration = double(SyncInterval) / refresh;
+
+    static bool s_logged = false;
+    if (!s_logged) {
+      s_logged = true;
+      Logger::info(str::format("D3D9: present pacing ", duration * 1000.0,
+        "ms (target ", refresh, "Hz, interval ", SyncInterval, ")"));
+    }
+
+    return duration;
   }
 
 
@@ -1072,23 +1163,42 @@ namespace dxvk {
   HRESULT D3D9SwapChainEx::EnterFullscreenMode(
           D3DPRESENT_PARAMETERS* pPresentParams,
     const D3DDISPLAYMODEEX*      pFullscreenDisplayMode) {
-    if (FAILED(ChangeDisplayMode(pPresentParams, pFullscreenDisplayMode))) {
-      Logger::err("D3D9: EnterFullscreenMode: Failed to change display mode");
-      return D3DERR_INVALIDCALL;
-    }
-
-    HookWindowProc(m_window, this);
-
-    D3D9WindowMessageFilter filter(m_window);
-
+    // Borderless fullscreen, after wined3d_swapchain_state_setup_fullscreen
+    // (and DXMT, which does the same). The display mode is NOT changed: on
+    // macOS the mode switch is asynchronous, so every rect derived from it is
+    // stale for an unknown number of frames.
+    //
+    // The window proc is NOT hooked either. DXVK's hook resizes the window to
+    // the backbuffer on WM_ACTIVATEAPP and minimizes it on focus loss; with a
+    // backbuffer smaller than the desktop that strands the window in the
+    // top-left on the first click.
     m_monitor = wsi::getDefaultMonitor();
+
+    RECT rect = { };
+    wsi::getDesktopCoordinates(m_monitor, &rect);
 
     wsi::saveWindowState(m_window, &m_windowState, true);
 
-    if (!wsi::enterFullscreenMode(m_monitor, m_window, &m_windowState, true)) {
-        Logger::err("D3D9: EnterFullscreenMode: Failed to enter fullscreen mode");
-        return D3DERR_INVALIDCALL;
+    if (m_fullscreenWindow != m_window) {
+      m_fullscreenWindow   = m_window;
+      m_savedWindowStyle   = ::GetWindowLongW(m_window, GWL_STYLE);
+      m_savedWindowExStyle = ::GetWindowLongW(m_window, GWL_EXSTYLE);
+
+      LONG style   = (m_savedWindowStyle | WS_POPUP | WS_SYSMENU)
+                   & ~(WS_CAPTION | WS_THICKFRAME);
+      LONG exStyle = m_savedWindowExStyle & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
+
+      ::SetWindowLongW(m_window, GWL_STYLE,   style);
+      ::SetWindowLongW(m_window, GWL_EXSTYLE, exStyle);
     }
+
+    // HWND_TOP, not HWND_TOPMOST: wined3d uses topmost, but on macOS a topmost
+    // window sits above everything and cmd-tab cannot switch away from it.
+    ::SetWindowPos(m_window, HWND_TOP,
+      rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+      SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    m_displayRefreshRateDirty = true;
 
     m_parent->NotifyFullscreen(m_window, true);
 
@@ -1100,17 +1210,27 @@ namespace dxvk {
     if (!wsi::isWindow(m_window))
       return D3DERR_INVALIDCALL;
 
-    if (FAILED(RestoreDisplayMode(m_monitor)))
-      Logger::warn("D3D9: LeaveFullscreenMode: Failed to restore display mode");
-
     m_monitor = nullptr;
 
-    ResetWindowProc(m_window);
+    // Undo the borderless restyle. No display mode to restore — entering
+    // fullscreen never changed one. Preserve the live visibility/topmost bits,
+    // as wined3d does, so a window the app is driving is not hidden.
+    if (m_fullscreenWindow == m_window) {
+      LONG curStyle   = ::GetWindowLongW(m_window, GWL_STYLE)   & WS_VISIBLE;
+      LONG curExStyle = ::GetWindowLongW(m_window, GWL_EXSTYLE) & WS_EX_TOPMOST;
 
-    if (!wsi::leaveFullscreenMode(m_window, &m_windowState)) {
-      Logger::err("D3D9: LeaveFullscreenMode: Failed to exit fullscreen mode");
-      return D3DERR_NOTAVAILABLE;
+      ::SetWindowLongW(m_window, GWL_STYLE,
+        (m_savedWindowStyle   & ~WS_VISIBLE)     | curStyle);
+      ::SetWindowLongW(m_window, GWL_EXSTYLE,
+        (m_savedWindowExStyle & ~WS_EX_TOPMOST)  | curExStyle);
+
+      ::SetWindowPos(m_window, nullptr, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER |
+        SWP_NOMOVE | SWP_NOSIZE);
+
+      m_fullscreenWindow = nullptr;
     }
+
     wsi::restoreWindowState(m_window, &m_windowState, false);
 
     m_parent->NotifyFullscreen(m_window, false);
