@@ -6,16 +6,6 @@
 
 #include "../mtl/mtl_types.h"
 
-// ---------------------------------------------------------------------------
-// util_image_math.h — the format-block / mip geometry helpers the d3d9 frontend
-// calls as util::compute* (was dxvk_util.h, Vulkan-typed). Pure integer math on
-// MtlExtent3D/MtlOrigin — ZERO Vulkan. Retyped 1:1 from DXVK-3.0 dxvk_util.h.
-//
-// packImageData / encodeClearBlockValue live on the managed-conversion + BC-clear
-// paths; the tight-pack copy is real (used by depth-stencil readback), the BC
-// clear-value encoding is PHASE-E-neutered (compressed clears are rare + the
-// backend owns the encode). Logged where neutered.
-// ---------------------------------------------------------------------------
 
 namespace dxvk::util {
 
@@ -61,13 +51,11 @@ namespace dxvk::util {
       std::min(extent.depth,  imageExtent.depth  - uint32_t(offset.z)) };
   }
 
-  // blockSize of a format as an MtlExtent3D (MtlFormatInfo stores scalars).
   inline MtlExtent3D formatBlockSize(const MtlFormatInfo* info) {
     return MtlExtent3D { info ? info->blockWidth : 1u,
                          info ? info->blockHeight : 1u, 1u };
   }
 
-  // Tightly-packed block copy (was dxvk::util::packImageData, 6-arg overload).
   inline void packImageData(
           void*         dstBytes,
     const void*         srcBytes,
@@ -88,10 +76,8 @@ namespace dxvk::util {
     }
   }
 
-  // PHASE-E: BC block clear-value encoding (was encodeClearBlockValue). Compressed
-  // clears are uncommon; the Metal backend owns the real encode. Neutral pass-through.
-  inline MtlColor4 encodeClearBlockValue(MtlFormat /*format*/, const MtlColor4& color) {
-    return color;   // PHASE-E: verify — real BCn block-color packing.
+  inline MtlColor4 encodeClearBlockValue(MtlFormat , const MtlColor4& color) {
+    return color;
   }
 
 }

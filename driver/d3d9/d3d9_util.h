@@ -7,12 +7,6 @@
 
 #include "d3d9_format.h"
 
-// ADAPT (doc 02 §2, line 6): the Decode{BlendFactor,BlendOp,Filter,MipFilter,
-// AddressMode,CompareOp,StencilOp,CullMode,FillMode,IndexType,Decltype} decoders
-// are a 1:1 Vk*->Mtl* retype — switch bodies unchanged, only the return type flips
-// to the Mtl* enums. The former `#include "../dxvk/dxvk_device.h"` (which dragged in
-// DxvkInputAssemblyState + <vulkan/vulkan.h>) is severed; the Mtl* value types come
-// from mtl_types.h (pulled transitively via d3d9_format.h).
 #include "../mtl/mtl_types.h"
 
 #include "../util/util_matrix.h"
@@ -34,8 +28,8 @@ namespace dxvk {
   };
 
   inline void FixupBlendState(D3D9BlendState& State) {
-    // Old DirectX 6 HW feature that still exists...
-    // Yuck!
+    // BOTHSRCALPHA/BOTHINVSRCALPHA are a legacy DX6 blend mode with no direct
+    // Metal equivalent; remap to the SRC/INV pair they were meant to emulate.
     if (unlikely(State.Src == D3DBLEND_BOTHSRCALPHA)) {
       State.Src = D3DBLEND_SRCALPHA;
       State.Dst = D3DBLEND_INVSRCALPHA;
@@ -46,11 +40,6 @@ namespace dxvk {
     }
   }
 
-  /**
-   * @brief Returns whether or not the sampler index is valid
-   *
-   * @param Sampler Sampler index (according to the API)
-   */
   inline bool InvalidSampler(DWORD Sampler) {
     if (Sampler >= caps::MaxTexturesPS && Sampler < D3DDMAPSAMPLER)
       return true;
@@ -61,19 +50,8 @@ namespace dxvk {
     return false;
   }
 
-  /**
-   * @brief The first sampler that belongs to the vertex shader according to our internal way of storing samplers
-   */
   constexpr uint32_t FirstVSSamplerSlot = caps::MaxTexturesPS + 1;
 
-  /**
-   * @brief Remaps a sampler index by the API to an internal one
-   *
-   * Remaps the sampler index according to the way the API counts them to how we count and store them internally.
-   *
-   * @param Sampler Sampler index (according to API)
-   * @return DWORD Sampler index (according to our internal way of storing samplers)
-   */
   inline DWORD RemapSamplerState(DWORD Sampler) {
     if (Sampler >= D3DDMAPSAMPLER)
       Sampler = caps::MaxTexturesPS + (Sampler - D3DDMAPSAMPLER);
@@ -82,24 +60,10 @@ namespace dxvk {
   }
 
 
-  /**
-   * @brief Returns whether the sampler belongs to the vertex shader.
-   *
-   * The displacement map sampler is part of a fixed function feature,
-   * so it does not belong to the vertex shader.
-   * @param Sampler Sampler index (according to our internal way of storing samplers)
-   */
   constexpr bool IsVSSampler(uint32_t Sampler) {
     return Sampler >= FirstVSSamplerSlot;
   }
 
-  /**
-   * @brief Returns whether the sampler belongs to the pixel shader.
-   *
-   * The displacement map sampler is part of a fixed function feature,
-   * so it does not belong to the pixel shader.
-   * @param Sampler Sampler index (according to our internal way of storing samplers)
-   */
   constexpr bool IsPSSampler(uint32_t Sampler) {
     return Sampler <= caps::MaxTexturesPS;
   }
@@ -120,7 +84,6 @@ namespace dxvk {
           char*      pComments,
           ID3DBlob** ppDisassembly);
 
-  // Was VkSampleCountFlagBits* -> plain sample-count (uint32_t) out param.
   HRESULT DecodeMultiSampleType(
           D3DMULTISAMPLE_TYPE       MultiSample,
           DWORD                     MultisampleQuality,
@@ -128,8 +91,6 @@ namespace dxvk {
 
   MtlFormat GetPackedDepthStencilFormat(D3D9Format Format);
 
-  // Was VkFormatFeatureFlags2 -> a Metal texture-usage mask (Metal does not split
-  // "format features" from usage; the bits we care about are sampled/RT/DS).
   MtlTextureUsage GetImageFormatFeatures(DWORD Usage);
 
   MtlTextureUsage GetImageUsageFlags(DWORD Usage);
@@ -138,8 +99,6 @@ namespace dxvk {
     return srgb ? srgbFormat : format;
   }
 
-  // Was VkShaderStageFlagBits -> MtlStageMask (0 == invalid, mirrors the old
-  // VkShaderStageFlagBits(0) default).
   constexpr MtlStageMask GetShaderStage(D3D9ShaderType ShaderType) {
     switch (ShaderType) {
       case D3D9ShaderType::VertexShader: return MtlStageVertex;
@@ -162,7 +121,7 @@ namespace dxvk {
   }
 
   inline Matrix4 ConvertMatrix(const D3DMATRIX* Matrix) {
-    if (Matrix == nullptr) // Identity.
+    if (Matrix == nullptr)
       return Matrix4();
 
     return Matrix4(Matrix->m);
@@ -184,9 +143,6 @@ namespace dxvk {
     return Filter > D3DTEXF_POINT ? MtlSamplerMipFilter::Linear : MtlSamplerMipFilter::Nearest;
   }
 
-  // Retyped from the Vk-value LUT trick to an explicit switch: MtlSamplerAddressMode
-  // numeric values differ from Vk (Repeat != 0), so the "free repeat for value 0"
-  // shortcut no longer holds. Behaviour is identical.
   inline MtlSamplerAddressMode DecodeAddressMode(D3DTEXTUREADDRESS Mode) {
     switch (Mode) {
       case D3DTADDRESS_WRAP:       return MtlSamplerAddressMode::Repeat;
@@ -208,11 +164,6 @@ namespace dxvk {
 
   MtlIndexType DecodeIndexType(D3D9Format Format);
 
-  // Was VkFormat (vertex-attribute format). MtlFormat is a *pixel*-format enum and
-  // cannot represent the D3D9 scaled vertex types (UBYTE4/SHORT2/SHORT4/UDEC3);
-  // those rows return MtlFormat::Invalid with a PHASE-C note (a dedicated
-  // MtlVertexFormat enum is the proper fix — same precedent as the 9 Invalid rows in
-  // d3d9_format.cpp).
   MtlFormat DecodeDecltype(D3DDECLTYPE Type);
 
   uint32_t GetDecltypeSize(D3DDECLTYPE Type);
@@ -267,7 +218,6 @@ namespace dxvk {
   }
 
   inline bool IsBlitRegionInvalid(MtlOffset3D offsets[2], MtlSize extent) {
-    // Only bother checking x, y as we don't have 3D blits.
     return offsets[1].x < offsets[0].x ||
            offsets[1].y < offsets[0].y ||
            offsets[0].x < 0 ||
@@ -276,9 +226,6 @@ namespace dxvk {
            uint32_t(offsets[1].y) > extent.height;
   }
 
-  /**
-   * @brief Mirrors D3DTEXTURESTAGESTATETYPE but starts at 0
-   */
   enum D3D9TextureStageStateTypes : uint32_t
   {
       DXVK_TSS_COLOROP        =  0,
@@ -308,12 +255,6 @@ namespace dxvk {
   constexpr uint32_t DXVK_TSS_TCI_CAMERASPACEREFLECTIONVECTOR   = 0x00030000;
   constexpr uint32_t DXVK_TSS_TCI_SPHEREMAP                     = 0x00040000;
 
-  /**
-   * @brief Remaps a texture stage type by the API to an internal one
-   *
-   * @param Type Texture stage type according to the API
-   * @return D3D9TextureStageStateTypes Texture stage type according to our internal way of storing them
-   */
   inline D3D9TextureStageStateTypes RemapTextureStageStateType(D3DTEXTURESTAGESTATETYPE Type) {
     return D3D9TextureStageStateTypes(Type - 1);
   }
@@ -335,7 +276,6 @@ inline bool operator != (const D3DVIEWPORT9& a, const D3DVIEWPORT9& b) {
 }
 
 
-// Missing in some versions of mingw headers
 #ifndef _MSC_VER
 inline bool operator == (const RECT& a, const RECT& b) {
   return a.left   == b.left  &&
@@ -347,7 +287,7 @@ inline bool operator == (const RECT& a, const RECT& b) {
 inline bool operator != (const RECT& a, const RECT& b) {
   return !(a == b);
 }
-#endif /* _MSC_VER */
+#endif
 
 inline bool operator == (const POINT& a, const POINT& b) {
   return a.x == b.x && a.y == b.y;

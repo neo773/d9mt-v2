@@ -1,13 +1,3 @@
-/* d9mt v2 readback test: replicates wine d3d9 test_sanity's failing path —
- * Clear (NO draw, NO present) then GetRenderTargetData -> LockRect -> read a
- * pixel. Exercises the deferred-clear materialization + CPU readback path in
- * isolation. Prints results to stdout and exits (no infinite loop).
- *
- * Cases:
- *   A: Clear(red) -> readback              (wine test_sanity case 1)
- *   B: Clear(teal) -> readback corner      (wine test_sanity case 2)
- *   C: Clear(green) -> Present -> readback (post-present, buffer rotated)
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -36,8 +26,8 @@ static DWORD read_pixel(IDirect3DDevice9 *dev, UINT x, UINT y, HRESULT *out_hr) 
       dev, desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &sys, NULL);
   if (FAILED(hr)) { *out_hr = hr; IDirect3DSurface9_Release(rt); return color; }
 
-  /* canary: pre-write the target pixel so we can tell "GPU never wrote"
-   * (canary survives) from "Lock reads different memory" (reads 0) */
+  /* canary value distinguishes "GPU never wrote" (survives) from
+   * "Lock reads different memory" (reads back as 0) */
   hr = IDirect3DSurface9_LockRect(sys, &lr, NULL, 0);
   if (SUCCEEDED(hr)) {
     ((DWORD *)lr.pBits)[y * lr.Pitch / 4 + x] = 0xAABBCCDD;
@@ -99,26 +89,22 @@ int main(void) {
   HRESULT rhr;
   DWORD c;
 
-  /* capture window: give `gpucapture start` time to attach after device init */
   if (GetEnvironmentVariableA("D9MT_CAPTURE_WAIT", NULL, 0)) {
     printf("WAITING 8s for gpucapture attach...\n");
     fflush(stdout);
     Sleep(8000);
   }
 
-  /* A: clear red, readback (1,1) — expect 00ff0000 */
   hr = IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xffff0000, 1.0f, 0);
   c = read_pixel(dev, 1, 1, &rhr);
   printf("CASE-A clear=ffff0000 hr=%08lx rhr=%08lx pixel=%08lx %s\n",
          hr, rhr, c, (c & 0xffffff) == 0xff0000 ? "PASS" : "FAIL");
 
-  /* B: clear teal, readback corner (639,479) — expect 0000ddee */
   hr = IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff00ddee, 0.0f, 0);
   c = read_pixel(dev, 639, 479, &rhr);
   printf("CASE-B clear=ff00ddee hr=%08lx rhr=%08lx pixel=%08lx %s\n",
          hr, rhr, c, (c & 0xffffff) == 0x00ddee ? "PASS" : "FAIL");
 
-  /* C: clear green, present, readback (320,240) — expect 0000ff00 */
   hr = IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff00ff00, 1.0f, 0);
   IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
   c = read_pixel(dev, 320, 240, &rhr);

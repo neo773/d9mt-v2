@@ -1,7 +1,3 @@
-// PHASE-C10: D3D8<->D3D9 bridge port onto the Mtl seam.
-//   VkOffset3D -> MtlOrigin, VkExtent3D -> MtlExtent3D (d3d9_device.h
-//   UpdateTextureFromBuffer signature). Everything else is Vulkan-clean COM
-//   forwarding kept verbatim from the DXVK source.
 #include "d3d9_device.h"
 #include "d3d9_interface.h"
 #include "d3d9_bridge.h"
@@ -45,22 +41,18 @@ namespace dxvk {
     if (unlikely(dst == nullptr || src == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // CopyRects will not pass a null pSrcRect, but check anyway
     if (unlikely(pSrcRect == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // validate dimensions to ensure we calculate a meaningful srcOffset & extent
     if (unlikely(pSrcRect->left < 0
               || pSrcRect->top  < 0
               || pSrcRect->right  <= pSrcRect->left
               || pSrcRect->bottom <= pSrcRect->top))
       return D3DERR_INVALIDCALL;
 
-    // CopyRects will not pass a null pDestPoint, but check anyway
     if (unlikely(pDestPoint == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // validate dimensions to ensure we caculate a meaningful dstOffset
     if (unlikely(pDestPoint->x < 0
               || pDestPoint->y < 0))
       return D3DERR_INVALIDCALL;

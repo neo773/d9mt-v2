@@ -1,19 +1,3 @@
-/* d9mt v2 per-draw-constant test (capture-inspected): TWO draws per frame with
- * DIFFERENT vertex-shader constants between them — the case GTA hits and no
- * other v2 test covers.
- *
- * Draw 1: identity mvp  -> big triangle covering screen center.
- * Draw 2: zero-scale mvp -> collapses to a point (covers nothing) but is the
- *         LAST constant set.
- *
- * Validated by GPU capture (CrossOver blocks readback): with correct per-draw
- * indirection the drawable shows the big triangle; if the per-draw argument/
- * push/spec buffers are shared+overwritten, draw 1 retroactively reads draw 2's
- * zero mvp and the drawable is empty (black).
- *
- * Presents to the backbuffer every frame so the in-driver capture trigger
- * (C:\d9mt-test\DO_CAPTURE) fires.  Reuses the shadertri vs/ps bytecode.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>

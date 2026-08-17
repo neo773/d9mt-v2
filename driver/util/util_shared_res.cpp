@@ -27,7 +27,7 @@ namespace dxvk {
       ::CloseHandle(handle);
       return INVALID_HANDLE_VALUE;
     }
-    return handle; 
+    return handle;
   }
 
   #define IOCTL_SHARED_GPU_RESOURCE_SET_METADATA           CTL_CODE(FILE_DEVICE_VIDEO, 4, METHOD_BUFFERED, FILE_WRITE_ACCESS)

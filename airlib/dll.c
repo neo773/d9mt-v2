@@ -1,14 +1,9 @@
-/* d9mtair.dll: PE side. Same 15-line winecrt0 reimplementation as
- * d9mtmetal's dll.c — query our own module for the unixlib handle
- * (MemoryWineUnixFuncs) and dispatch through ntdll's __wine_unix_call.
- */
 #define D9MTAIR_EXPORTS
 #include <windows.h>
 #include "d9mtair.h"
 
 typedef UINT64 unixlib_handle_t;
 
-/* wine-internal MEMORY_INFORMATION_CLASS value, stable since wine 7 */
 #define MemoryWineUnixFuncs 1000
 
 extern NTSTATUS WINAPI __wine_unix_call(unixlib_handle_t handle,
@@ -19,13 +14,13 @@ extern NTSTATUS WINAPI NtQueryVirtualMemory(HANDLE process, LPCVOID addr,
 
 static unixlib_handle_t d9mtair_unix_handle;
 
-extern IMAGE_DOS_HEADER __ImageBase; /* this dll's own base, like winecrt0 */
+extern IMAGE_DOS_HEADER __ImageBase;
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(instance);
-    /* must run at attach time: wine's builtin bookkeeping for the unixlib
-     * is only guaranteed alive while the module load is in progress */
+    /* must run at attach time: wine's unixlib bookkeeping is only
+     * guaranteed alive while the module load is in progress */
     NtQueryVirtualMemory(GetCurrentProcess(), &__ImageBase,
                          MemoryWineUnixFuncs, &d9mtair_unix_handle,
                          sizeof(d9mtair_unix_handle), NULL);
@@ -33,7 +28,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   return TRUE;
 }
 
-/* lazy so a missing unixlib is reportable instead of failing dll load */
 int __cdecl D9MTAir_UnixCall(unsigned int code, void *params) {
   if (!d9mtair_unix_handle) {
     NTSTATUS status = NtQueryVirtualMemory(

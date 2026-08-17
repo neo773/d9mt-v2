@@ -29,8 +29,6 @@ namespace dxvk::wsi {
 
     std::string hint = dxvk::env::getEnvVar("DXVK_WSI_DRIVER");
     if (hint == "") {
-        // At least for Windows, it is reasonable to fall back to a default;
-        // for other platforms however we _need_ to know which WSI to use!
 #if defined(DXVK_WSI_WIN32)
         hint = "Win32";
 #else
@@ -143,8 +141,6 @@ namespace dxvk::wsi {
           bool     forceTopmost) {
     s_driver->updateFullscreenWindow(hMonitor, hWindow, forceTopmost);
   }
-
-  // PHASE-C: createSurface() removed (Vulkan WSI). Metal present via CAMetalLayer.
 
   HMONITOR getDefaultMonitor() {
     return s_driver->getDefaultMonitor();

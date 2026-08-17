@@ -66,7 +66,6 @@ namespace dxvk {
     if (op.getOpCode() == dxbc_spv::sm3::OpCode::eEnd)
       return ValidateEndToken(pFile, Line, pdwInst, cdw);
 
-    // The Void relies on validating that there are at most 10 PS inputs
     if (m_header.getType() == dxbc_spv::sm3::ShaderType::ePixel
      && m_header.getVersion().first == 3u) {
       switch (op.getOpCode()) {
@@ -142,7 +141,6 @@ namespace dxvk {
 
 
   HRESULT D3D9ShaderValidator::ValidateEndToken(const char* pFile, UINT Line, const DWORD* pdwInst, DWORD cdw) {
-    // Reached the end token.
     if (unlikely(cdw != 1)) {
       return ErrorCallback(pFile, Line, 0x6, pdwInst, cdw,
         D3D9ShaderValidatorMessage::BadEndToken,
@@ -165,11 +163,8 @@ namespace dxvk {
     if (m_callback)
       m_callback(pFile, Line, Unknown, MessageID, Message.c_str(), m_userData);
 
-    // TODO: Consider switching this to debug, once we're
-    // confident the implementation doesn't cause any issues
     Logger::warn(Message);
 
-    // Log instruction that caused the error as raw bytecode
     if (Logger::logLevel() <= LogLevel::Debug && pInstr && InstrLength) {
       std::stringstream instMsg;
 

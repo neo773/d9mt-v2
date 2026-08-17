@@ -1,7 +1,4 @@
-/* d9mt addition: PE-side marshalling for the AIR compile thunks.
- * Style mirrors airconv_thunks.c: fill params, WINE_UNIX_CALL by code. */
-
-/* export, not import — must precede winemetal.h (mirrors winemetal_thunks.c) */
+/* must precede winemetal.h to export rather than import */
 #ifdef _WIN32
 #define WINEMETAL_API __declspec(dllexport)
 #endif

@@ -1,6 +1,3 @@
-/**
- * ntdll private definitions
- */
 #include "winternl.h"
 
 #ifndef __WINE_WINE_UNIXLIB_H
@@ -15,7 +12,6 @@ extern NTSTATUS WINAPI __wine_unix_call(unixlib_handle_t handle,
 
 typedef NTSTATUS (*unixlib_entry_t)(void *args);
 
-/* some useful helpers from ntdll */
 extern const char *ntdll_get_build_dir(void);
 extern const char *ntdll_get_data_dir(void);
 extern DWORD ntdll_umbstowcs(const char *src, DWORD srclen, WCHAR *dst,
@@ -26,8 +22,6 @@ extern int ntdll_wcsicmp(const WCHAR *str1, const WCHAR *str2);
 extern int ntdll_wcsnicmp(const WCHAR *str1, const WCHAR *str2, int n);
 extern NTSTATUS ntdll_init_syscalls(ULONG id, SYSTEM_SERVICE_TABLE *table,
                                     void **dispatcher);
-
-/* exception handling */
 
 #ifdef __i386__
 typedef struct {
@@ -93,8 +87,6 @@ extern void ntdll_set_exception_jmp_buf(__wine_jmp_buf *jmp);
 
 NTSTATUS WINAPI KeUserModeCallback(ULONG id, const void *args, ULONG len,
                                    void **ret_ptr, ULONG *ret_len);
-
-/* wide char string functions */
 
 static inline int ntdll_iswspace(WCHAR wc) {
   return ('\t' <= wc && wc <= '\r') || wc == ' ' || wc == 0xa0;
@@ -302,7 +294,7 @@ static inline ULONG ntdll_wcstoul(const WCHAR *s, WCHAR **end, int base) {
 #define wcstol(str, e, b) ntdll_wcstol(str, e, b)
 #define wcstoul(str, e, b) ntdll_wcstoul(str, e, b)
 
-#else /* WINE_UNIX_LIB */
+#else
 
 extern unixlib_handle_t __wine_unixlib_handle;
 extern NTSTATUS(WINAPI *__wine_unix_call_dispatcher)(unixlib_handle_t,
@@ -312,6 +304,6 @@ extern NTSTATUS WINAPI __wine_init_unix_call(void);
 #define WINE_UNIX_CALL(code, args)                                             \
   __wine_unix_call_dispatcher(__wine_unixlib_handle, (code), (args))
 
-#endif /* WINE_UNIX_LIB */
+#endif
 
-#endif /* __WINE_WINE_UNIXLIB_H */
+#endif

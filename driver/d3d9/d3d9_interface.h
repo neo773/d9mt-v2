@@ -1,11 +1,5 @@
 #pragma once
 
-// PHASE-C6: ported off Vulkan onto the Mtl seam.
-//   Rc<DxvkInstance>       -> Rc<MtlInstance>
-//   Find9On12Args(Rc<DxvkAdapter>) -> Rc<MtlAdapter>
-//   include ../dxvk/dxvk_instance.h -> ../mtl/mtl_device.h (MtlInstance)
-// DROPPED: d3d9_interop.h + D3D9VkInteropInterface m_d3d9Interop, D3D9VkExtInterface
-//   m_d3d9ExtInterface (Vulkan interop/ext). D3D9ON12_ARGS is KEPT (d3d9_include.h).
 #include "d3d9_adapter.h"
 #include "d3d9_bridge.h"
 
@@ -13,13 +7,6 @@
 
 namespace dxvk {
 
-  /**
-  * \brief D3D9 interface implementation
-  *
-  * Implements the IDirect3DDevice9Ex interfaces
-  * which provides the way to get adapters and create other objects such as \ref IDirect3DDevice9Ex.
-  * similar to \ref DxgiFactory but for D3D9.
-  */
   class D3D9InterfaceEx final : public ComObjectClamp<IDirect3D9Ex> {
 
   public:
@@ -103,7 +90,6 @@ namespace dxvk {
             UINT            Mode,
             D3DDISPLAYMODE* pMode);
 
-    // Ex Methods
 
     UINT STDMETHODCALLTYPE GetAdapterModeCountEx(UINT Adapter, CONST D3DDISPLAYMODEFILTER* pFilter);
 
@@ -183,8 +169,6 @@ namespace dxvk {
 
     std::vector<Rc<D3D9Adapter>>  m_adapters;
 
-    // D3D9VkInteropInterface m_d3d9Interop / D3D9VkExtInterface m_d3d9ExtInterface
-    // — DROPPED (Vulkan interop/ext surfaces).
 
     bool m_unlockAdditionalFormats = false;
 

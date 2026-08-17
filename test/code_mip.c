@@ -1,8 +1,3 @@
-/* d9mt v2 mipmap test: a 4x4 texture with two mip levels (mip 0 red, mip 1
- * blue), sampled with MAXMIPLEVEL clamped to 1 so the smaller blue mip is
- * selected. A blue quad proves per-mip upload and the sampler LOD clamp both
- * work; a red quad means mip 1 was not uploaded or the LOD clamp was ignored.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -87,13 +82,12 @@ int main(void) {
   memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
 
-  /* 4x4 texture, 2 mips: mip 0 = red (4x4), mip 1 = blue (2x2). */
   IDirect3DTexture9 *tex = NULL;
   if (FAILED(IDirect3DDevice9_CreateTexture(dev, 4, 4, 2, 0, D3DFMT_A8R8G8B8,
                                             D3DPOOL_MANAGED, &tex, NULL)))
     return 1;
-  fillLevel(tex, 0, 4, 0xFFFF0000); /* red  */
-  fillLevel(tex, 1, 2, 0xFF0000FF); /* blue */
+  fillLevel(tex, 0, 4, 0xFFFF0000);
+  fillLevel(tex, 1, 2, 0xFF0000FF);
 
   static const float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, mvp, 4);
@@ -105,7 +99,7 @@ int main(void) {
   IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
   IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
   IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MIPFILTER, D3DTEXF_POINT);
-  IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAXMIPLEVEL, 1); /* clamp to mip 1 */
+  IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAXMIPLEVEL, 1);
 
   int frames = 0;
   MSG msg;

@@ -16,17 +16,13 @@ namespace dxvk::backend {
       return;
     }
 
-    /* requestResidency is persistent (invariant 2): once, here; every
-     * later commit auto-wires newly added allocations. */
     MTLResidencySet_requestResidency(m_set.handle());
 
-    /* Queue-level attach covers all command buffers committed to the
-     * queue (invariant 1; 32-sets-per-queue limit applies). */
+    // Queue-level attach covers all command buffers committed to the queue (32-sets-per-queue limit applies).
     MTL4CommandQueue_addResidencySet(m_queue, m_set.handle());
   }
 
   MtlResidencyTracker::~MtlResidencyTracker() {
-    /* GPU idle by contract — every pending serial is complete. */
     serialRetired(~0ull);
 
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -49,7 +45,6 @@ namespace dxvk::backend {
 
   void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial) {
     if (!alloc) {
-      /* No Metal object to unpin — free the host backing directly. */
       if (hostMem)
         VirtualFree(hostMem, 0, MEM_RELEASE);
       return;
@@ -97,9 +92,6 @@ namespace dxvk::backend {
       if (due.empty())
         return;
 
-      /* Batched userspace removals + ONE commit (invariant 2). Every due
-       * serial has completed, so committing the removals cannot evict
-       * anything the GPU still references (invariant 3). */
       for (const PendingRemoval& p : due)
         MTLResidencySet_removeAllocation(m_set.handle(), p.alloc);
       MTLResidencySet_commit(m_set.handle());
@@ -107,9 +99,7 @@ namespace dxvk::backend {
       m_removes += due.size();
     }
 
-    /* Final teardown outside the lock (unix round-trips). Per entry the
-     * order is: set removal (above) -> object release -> host free, so
-     * the Metal buffer dies before its bytesNoCopy memory. */
+    // Order matters: set removal (above) -> object release -> host free, so the Metal buffer dies before its bytesNoCopy memory.
     for (const PendingRemoval& p : due) {
       NSObject_release(p.alloc);
       if (p.hostMem)
@@ -121,9 +111,6 @@ namespace dxvk::backend {
     if (!layer)
       return false;
 
-    /* Borrowed: the layer owns its set (invariant 4); the queue retains
-     * it for the duration of the attach. Unavailable (0) until the layer
-     * has a device. */
     obj_handle_t set = MetalLayer_residencySet(layer);
     if (!set)
       return false;

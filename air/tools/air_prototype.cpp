@@ -1,16 +1,3 @@
-/*
- * air_prototype: hand-builds a minimal AIR module (passthrough vertex +
- * color fragment) with the LLVM 15 C++ API, wraps it in our own metallib
- * container, and writes it to disk.
- *
- * Proves the whole emission stack — LLVM 15 bitcode, air.* metadata,
- * MTLB container — is accepted by MTLDevice newLibraryWithData BEFORE any
- * IR-walking backend code exists. Structure mirrors a golden dump from
- * `xcrun metal -S -emit-llvm` (scratchpad golden/tri.ll).
- *
- * Host-only tool. Build: v2/scripts/build-air-prototype.sh
- */
-
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -42,7 +29,6 @@ const char* kDataLayout =
 
 const char* kTriple = "air64-apple-macosx15.0.0";
 
-/* Convenience metadata builders */
 MDNode* mdTuple(LLVMContext& ctx, ArrayRef<Metadata*> ops) {
   return MDTuple::get(ctx, ops);
 }
@@ -101,14 +87,13 @@ void addModuleLevelMetadata(Module& mod) {
     mdTuple(ctx, { mdString(ctx, "d9mt air prototype") }));
 }
 
-/* vertex: <{ float4 pos, float4 color }> vs_main(float4 pos, float4 color) */
 Function* buildVertexFunction(Module& mod) {
   LLVMContext& ctx = mod.getContext();
   Type* f32 = Type::getFloatTy(ctx);
   Type* float4 = FixedVectorType::get(f32, 4u);
 
   StructType* retType = StructType::get(ctx, { float4, float4 },
-    /* isPacked */ true);
+    true);
 
   FunctionType* fnType =
     FunctionType::get(retType, { float4, float4 }, false);
@@ -125,7 +110,6 @@ Function* buildVertexFunction(Module& mod) {
   ret = b.CreateInsertValue(ret, fn->getArg(1u), { 1u });
   b.CreateRet(ret);
 
-  /* !air.vertex = { fn, output list, input list } */
   Metadata* outputs = mdTuple(ctx, {
     mdTuple(ctx, {
       mdString(ctx, "air.position"),
@@ -157,7 +141,6 @@ Function* buildVertexFunction(Module& mod) {
   return fn;
 }
 
-/* fragment: float4 fs_main(float4 pos, float4 color) -> color */
 Function* buildFragmentFunction(Module& mod) {
   LLVMContext& ctx = mod.getContext();
   Type* f32 = Type::getFloatTy(ctx);
@@ -201,16 +184,15 @@ Function* buildFragmentFunction(Module& mod) {
   return fn;
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
   std::string outPath = argc > 1 ? argv[1] : "air_prototype.metallib";
   bool dumpIr = argc > 2 && std::string(argv[2]) == "--dump-ir";
 
   LLVMContext ctx;
-  /* AIR is pre-opaque-pointer LLVM; Metal's bitcode ingestion rejects
-   * opaque `ptr` (LLVM 15's default) with "Failed to upgrade function
-   * bitcode". Typed pointers are mandatory. */
+  // Metal's bitcode ingestion rejects opaque `ptr` (LLVM 15's default) with
+  // "Failed to upgrade function bitcode"; AIR requires typed pointers.
   ctx.setOpaquePointers(false);
   Module mod("air_prototype", ctx);
   mod.setDataLayout(kDataLayout);
@@ -259,7 +241,6 @@ int main(int argc, char** argv) {
     std::streamsize(metallib.size()));
   out.close();
 
-  /* raw bitcode alongside, for bisecting with Apple's packager */
   std::ofstream bcOut(outPath + ".air", std::ios::binary);
   bcOut.write(bitcode.data(), std::streamsize(bitcode.size()));
   bcOut.close();

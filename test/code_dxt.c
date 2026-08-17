@@ -1,12 +1,3 @@
-/* d9mt v2 BC1/DXT1 test: a quad textured with an 8x8 DXT1 (BC1) texture whose
- * four 4x4 blocks are solid red, green, blue and yellow. Correct BC decode +
- * block layout shows a 2x2 colour grid; a wrong block stride or unsupported
- * format shows garbage or a single colour.
- *
- * Block-compressed textures are how nearly every real game ships its art, so
- * this exercises the format-table BC entries, the BC pixel-format map, and the
- * block-aware (ceil(w/4)*blockBytes) upload path.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -24,13 +15,11 @@ struct Vertex {
   float u, v;
 };
 
-/* DXT1 block: color0 (RGB565), color1=0 (so color0>color1 = 4-colour mode),
- * and all-zero indices select color0 for every texel — i.e. a solid block. */
 static void writeSolidBlock(BYTE *dst, WORD rgb565) {
   dst[0] = (BYTE)(rgb565 & 0xFF);
   dst[1] = (BYTE)(rgb565 >> 8);
-  dst[2] = 0; dst[3] = 0;             /* color1 = black */
-  dst[4] = 0; dst[5] = 0; dst[6] = 0; dst[7] = 0; /* indices = 0 */
+  dst[2] = 0; dst[3] = 0;
+  dst[4] = 0; dst[5] = 0; dst[6] = 0; dst[7] = 0;
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -110,7 +99,6 @@ int main(void) {
   memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
 
-  /* 8x8 DXT1 = 2x2 blocks; one solid colour per block. */
   IDirect3DTexture9 *tex = NULL;
   if (FAILED(IDirect3DDevice9_CreateTexture(dev, 8, 8, 1, 0, D3DFMT_DXT1,
                                             D3DPOOL_MANAGED, &tex, NULL)))
@@ -118,10 +106,10 @@ int main(void) {
   D3DLOCKED_RECT lr;
   if (SUCCEEDED(IDirect3DTexture9_LockRect(tex, 0, &lr, NULL, 0))) {
     BYTE *base = (BYTE *)lr.pBits;
-    writeSolidBlock(base + 0, 0xF800);          /* top-left  red   */
-    writeSolidBlock(base + 8, 0x07E0);          /* top-right green */
-    writeSolidBlock(base + lr.Pitch + 0, 0x001F);/* bot-left  blue  */
-    writeSolidBlock(base + lr.Pitch + 8, 0xFFE0);/* bot-right yellow*/
+    writeSolidBlock(base + 0, 0xF800);
+    writeSolidBlock(base + 8, 0x07E0);
+    writeSolidBlock(base + lr.Pitch + 0, 0x001F);
+    writeSolidBlock(base + lr.Pitch + 8, 0xFFE0);
     IDirect3DTexture9_UnlockRect(tex, 0);
   }
 

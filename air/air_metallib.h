@@ -1,29 +1,4 @@
 #pragma once
-/*
- * Self-contained .metallib (MTLB) container writer.
- *
- * Wraps an AIR bitcode blob (an LLVM module targeting air64) into the
- * container format that MTLDevice newLibraryWithData: accepts, with no
- * dependency on Apple tooling. Layout (all little-endian):
- *
- *   MTLB header
- *   u32 function count
- *   per-function entry: u32 self-inclusive size +
- *                       tag stream (NAME/TYPE/HASH/MDSZ/OFFT/VERS/ENDT)
- *   "ENDT"                      (extended-header terminator)
- *   public metadata section     (per function: u32 size + tag stream)
- *   private metadata section    (per function: u32 size + "ENDT")
- *   bitcode
- *
- * The per-function OFFT tag holds offsets *within* the three sections.
- * Every function's HASH tag is the SHA-256 of the (shared) bitcode blob.
- *
- * Vertex functions that consume [[stage_in]] attributes must carry
- * VATT/VATY records in their public metadata or pipeline creation fails.
- *
- * Container knowledge derived from the format itself (Metal-produced
- * libraries) and the layout notes in DXMT's docs; implementation is our own.
- */
 
 #include <cstdint>
 #include <string>
@@ -39,7 +14,6 @@ enum class MetallibFunctionType : uint8_t {
   Object = 8,
 };
 
-/* MTLVertexFormat-ish type codes used by the VATY record. */
 enum class MetallibAttributeType : uint8_t {
   Float = 0x03,
   Float2 = 0x04,
@@ -61,7 +35,6 @@ struct MetallibVertexAttribute {
   MetallibAttributeType type = MetallibAttributeType::Float4;
 };
 
-/* MTLDataType codes used by the CNST record */
 enum class MetallibConstantType : uint8_t {
   Bool = 0x35,
   Int = 0x1d,
@@ -72,15 +45,13 @@ enum class MetallibConstantType : uint8_t {
 struct MetallibFunctionConstant {
   std::string name;
   MetallibConstantType type = MetallibConstantType::Uint;
-  uint16_t index = 0u;    /* MTLFunctionConstantValues index */
+  uint16_t index = 0u;
 };
 
 struct MetallibFunction {
   std::string name;
   MetallibFunctionType type = MetallibFunctionType::Vertex;
-  /* stage_in attributes; vertex functions only */
   std::vector<MetallibVertexAttribute> vertexAttributes;
-  /* AIR function constants referenced by this function */
   std::vector<MetallibFunctionConstant> functionConstants;
 };
 
@@ -93,11 +64,10 @@ struct MetallibVersions {
   uint16_t osMinor = 0u;
 };
 
-/* Assembles the container. bitcode = WriteBitcodeToFile output. */
 std::vector<uint8_t> writeMetallib(
         const void*                           bitcode,
         size_t                                bitcodeSize,
         const std::vector<MetallibFunction>&  functions,
         const MetallibVersions&               versions = MetallibVersions());
 
-} // namespace d9mt::air
+}

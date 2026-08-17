@@ -109,8 +109,6 @@ namespace dxvk::wsi {
       if (i == numLUIDs)
         continue;
 
-      /* Mirrored displays appear as multiple paths with the same
-       * GDI device name, that comes as single dxgi output. */
       if (!sources.insert(std::pair<uint32_t, uint32_t>(i, path.sourceInfo.id)).second)
         continue;
 
@@ -137,7 +135,6 @@ namespace dxvk::wsi {
   bool Win32WsiDriver::getDisplayName(
           HMONITOR         hMonitor,
           WCHAR            (&Name)[32]) {
-    // Query monitor info to get the device name
     ::MONITORINFOEXW monInfo;
     monInfo.cbSize = sizeof(monInfo);
 
@@ -181,7 +178,6 @@ namespace dxvk::wsi {
           HMONITOR         hMonitor,
           DWORD            modeNumber,
           WsiMode*         pMode) {
-    // Query monitor info to get the device name
     ::MONITORINFOEXW monInfo;
     monInfo.cbSize = sizeof(monInfo);
 
@@ -224,7 +220,6 @@ namespace dxvk::wsi {
   }
 
   static std::wstring getMonitorDevicePath(HMONITOR hMonitor) {
-    // Get the device name of the monitor.
     MONITORINFOEXW monInfo;
     monInfo.cbSize = sizeof(monInfo);
     if (!::GetMonitorInfoW(hMonitor, &monInfo)) {
@@ -232,8 +227,6 @@ namespace dxvk::wsi {
       return {};
     }
 
-    // Try and find the monitor device path that matches
-    // the name of our HMONITOR from the monitor info.
     LONG result = ERROR_SUCCESS;
     std::vector<DISPLAYCONFIG_PATH_INFO> paths;
     std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -253,7 +246,6 @@ namespace dxvk::wsi {
       return {};
     }
 
-    // Link a source name -> target name
     for (const auto& path : paths) {
       DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName;
       sourceName.header.type      = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
@@ -275,8 +267,6 @@ namespace dxvk::wsi {
         continue;
       }
 
-      // Does the source match the GDI device we are looking for?
-      // If so, return the target back.
       if (!wcscmp(sourceName.viewGdiDeviceName, monInfo.szDevice))
         return targetName.monitorDevicePath;
     }
@@ -302,10 +292,9 @@ namespace dxvk::wsi {
   }
 
   struct DxvkDeviceInterfaceDetail {
-    // SP_DEVICE_INTERFACE_DETAIL_DATA_W contains an array called
-    // "ANYSIZE_ARRAY" which is just 1 wchar_t in size.
-    // Incredible, safe, and smart API design.
-    // Allocate some chars after so it can fill these in.
+    // SP_DEVICE_INTERFACE_DETAIL_DATA_W's trailing array is declared as
+    // ANYSIZE_ARRAY (1 wchar_t); extra storage must follow it for the
+    // variable-length path the API writes back.
     SP_DEVICE_INTERFACE_DETAIL_DATA_W base;
     wchar_t extraChars[MAX_DEVICE_ID_LEN];
   };
@@ -327,7 +316,6 @@ namespace dxvk::wsi {
 
     for (DWORD monitorIdx = 0; ::SetupDiEnumDeviceInterfaces(devInfo, nullptr, &GUID_DEVINTERFACE_MONITOR, monitorIdx, &interfaceData); monitorIdx++) {
       DxvkDeviceInterfaceDetail detailData;
-      // Josh: I'm taking no chances here. I don't trust this API at all.
       memset(&detailData, 0, sizeof(detailData));
       detailData.base.cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
 
@@ -338,10 +326,7 @@ namespace dxvk::wsi {
       if (!::SetupDiGetDeviceInterfaceDetailW(devInfo, &interfaceData, &detailData.base, sizeof(detailData), nullptr, &devInfoData))
         continue;
 
-      // Check that this monitor matches the same one we are looking for.
-      // Note: For some reason the casing mismatches here, because this
-      // is a well-designed API.
-      // If it isn't what we are looking for, move along.
+      // Case-insensitive: SetupDi and DisplayConfig APIs disagree on device path casing.
       if (_wcsicmp(monitorDevicePath.c_str(), detailData.base.DevicePath) != 0)
         continue;
 

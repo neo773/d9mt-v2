@@ -218,10 +218,8 @@ namespace dxvk {
     if (ptr == nullptr)
       return nullptr;
 
-    // We can avoid needing to get the type as m_texture has the same offset
-    // no matter the texture type.
-    // The compiler is not smart enough to eliminate the call to GetType as it is
-    // not marked const.
+    // m_texture sits at the same offset in every D3D9BaseTexture instantiation,
+    // so this cast is valid regardless of the underlying texture type.
     return static_cast<D3D9Texture2D*>(ptr)->GetCommonTexture();
   }
 
@@ -240,10 +238,8 @@ namespace dxvk {
     if (tex == nullptr)
       return;
 
-    // We can avoid needing to get the type as m_refCount has the same offset
-    // no matter the texture type.
-    // The compiler is not smart enough to eliminate the call to GetType as it is
-    // not marked const.
+    // m_refCount sits at the same offset in every texture type, so this
+    // cast is valid regardless of the underlying texture type.
     return CastRefPrivate<D3D9Texture2D>(tex, AddRef);
   }
 

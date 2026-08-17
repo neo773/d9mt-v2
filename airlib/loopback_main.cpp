@@ -1,19 +1,3 @@
-/*
- * loopback_main: host-side gate for the d9mtair dylib.
- *
- * Replicates air_compiler's front half exactly (sm3 -> ir -> legalizeIr),
- * then takes the PE path: ir_serialize -> dlopen(d9mtair.so) ->
- * d9mtair_compile -> metallib bytes, written to the output path.
- *
- * run-airlib-loopback.sh byte-compares the result against air_compiler's
- * direct output for every corpus case — proving the serialize/deserialize
- * round trip and the toolchain-LLVM build produce the identical artifact
- * the host path produces.
- *
- * Built -arch x86_64 (same slice as the dylib; runs under Rosetta on
- * arm64 hosts).
- */
-
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -35,7 +19,6 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  /* --- front half: identical to air_compiler ------------------------------ */
   std::ifstream f(argv[2], std::ios::binary | std::ios::ate);
   if (!f) {
     fprintf(stderr, "cannot read %s\n", argv[2]);
@@ -62,7 +45,6 @@ int main(int argc, char** argv) {
   dxbc_spv::ir::CompileOptions compileOptions = {};
   dxbc_spv::ir::legalizeIr(builder, compileOptions);
 
-  /* --- PE path: serialize + dylib compile --------------------------------- */
   dxbc_spv::ir::Serializer serializer(builder);
   std::vector<uint8_t> irBlob(serializer.computeSerializedSize());
   if (!serializer.serialize(irBlob.data(), irBlob.size())) {
@@ -114,7 +96,6 @@ int main(int argc, char** argv) {
     std::streamsize(params.out_size));
   out.close();
 
-  /* reflection sanity: header parses + entry count consistent */
   auto* header = reinterpret_cast<const d9mt_air_reflection_header*>(
     uintptr_t(params.out_reflection));
   size_t expected = sizeof(*header)

@@ -1,12 +1,3 @@
-/* d9mt v2 alpha-test test: a quad textured with a 2x1 texture — left texel
- * opaque (alpha 255), right texel transparent (alpha 0) — drawn with
- * ALPHATESTENABLE + ALPHAFUNC GREATER and ALPHAREF=128. Correct alpha test
- * keeps the left half (alpha>0.5) and discards the right; if alpha test is
- * ignored the whole quad shows, and if it over-discards nothing shows.
- *
- * Uses a sampled texture (not vertex alpha) so the output alpha is well-defined
- * regardless of the vertex-colour shader's alpha handling.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -15,8 +6,6 @@
 static const unsigned char texquad_vs_bytecode[] = {
 #include "texquad_vs_bytecode.inc"
 };
-/* Explicit ps_3_0 that samples s0 and outputs the full sampled RGBA, so the
- * output alpha is exactly the texture alpha (assembled from test/shaders). */
 static const unsigned char texquad_ps_bytecode[] = {
 #include "alpha_ps_bytecode.inc"
 };
@@ -79,7 +68,6 @@ int main(void) {
   IDirect3DVertexBuffer9_Lock(vb, 0, sizeof(verts), &p, 0); memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
 
-  /* 2x1 texture: left opaque white, right transparent white (A8R8G8B8). */
   IDirect3DTexture9 *tex = NULL;
   if (FAILED(IDirect3DDevice9_CreateTexture(dev, 2, 1, 1, 0, D3DFMT_A8R8G8B8,
                                             D3DPOOL_MANAGED, &tex, NULL)))
@@ -87,8 +75,8 @@ int main(void) {
   D3DLOCKED_RECT lr;
   if (SUCCEEDED(IDirect3DTexture9_LockRect(tex, 0, &lr, NULL, 0))) {
     DWORD *px = (DWORD *)lr.pBits;
-    px[0] = 0xFFFFFFFF; /* opaque white */
-    px[1] = 0x00FFFFFF; /* transparent white */
+    px[0] = 0xFFFFFFFF;
+    px[1] = 0x00FFFFFF;
     IDirect3DTexture9_UnlockRect(tex, 0);
   }
 

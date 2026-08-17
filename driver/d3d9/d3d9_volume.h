@@ -1,6 +1,5 @@
 #pragma once
 
-// PHASE-C5: pure D3D9 volume wrapper (no Vulkan types). Byte-for-byte upstream.
 #include "d3d9_subresource.h"
 
 #include "d3d9_common_texture.h"

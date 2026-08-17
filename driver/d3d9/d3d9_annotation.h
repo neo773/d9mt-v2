@@ -49,8 +49,6 @@ namespace dxvk {
     dxvk::mutex m_mutex;
     std::vector<IDXVKUserDefinedAnnotation*> m_annotations;
 
-    // Provide our own event depth as we
-    // may have multiple annotators which could get out of sync.
     int32_t m_eventDepth;
 
   };

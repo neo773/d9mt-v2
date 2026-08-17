@@ -1,11 +1,11 @@
 #include "d3d9_shader_compiler.h"
 
 #include "d3d9_caps.h"
-#include "d3d9_state.h"           // D3D9SpecData, D3D9SharedPushData, D3D9VsPushData, D3D9SamplerMode, MaxNumSpecConstants
-#include "d3d9_constant_copy.h"   // D3D9ConstantType, D3D9ConstantBufferLayout
+#include "d3d9_state.h"
+#include "d3d9_constant_copy.h"
 #include "d3d9_util.h"
 
-#include "../util/util_math.h"    // align
+#include "../util/util_math.h"
 #include "../util/util_small_vector.h"
 #include "../util/log/log.h"
 
@@ -19,7 +19,7 @@
 #include <ir/ir_serialize.h>
 #include <ir/passes/ir_pass_lower_io.h>
 
-#include "d9mtair.h"              // PE<->unix AIR compile ABI (airlib, -I airlib)
+#include "d9mtair.h"
 
 #include <array>
 #include <atomic>
@@ -29,26 +29,11 @@
 #include <sstream>
 #include <unordered_map>
 
-// The AIR compile thunks are exported by the winemetal bridge (bridge/
-// d9mtair_thunks.c, codes 154..156). They resolve through the winemetal import
-// lib the driver links against. Declared here (rather than pulling the whole
-// bridge winemetal.h into a d3d9/ TU) to keep this unit air/dxbc-only.
 extern "C" uint32_t D9MTAirCompile(struct d9mt_air_compile_params* params);
 extern "C" void     D9MTAirFree   (struct d9mt_air_free_params*    params);
 
 namespace dxvk {
 
-  // ==========================================================================
-  // D3D9ShaderLowerLegacyInputPass
-  //
-  // Ported VERBATIM from DXVK-3.0-uptsream/src/d3d9/d3d9_shader.cpp:13-1091.
-  // It operates purely on a dxbc_spv::ir::Builder + D3D9ShaderOptions +
-  // D3D9ShaderAnalysis and is entirely backend-neutral (doc 03 §2a). The ONLY
-  // change vs upstream is getPushDataStage(), whose parameter is retyped from
-  // VkShaderStageFlags to the seam's MtlStageMask (the push-data Stages fields
-  // in d3d9_state.h are already MtlStageMask) — this removes the single Vulkan
-  // touch so the driver Vulkan gate stays PASS.
-  // ==========================================================================
   class D3D9ShaderLowerLegacyInputPass {
 
   public:
@@ -221,9 +206,6 @@ namespace dxvk {
     }
 
     void fixupStaticCbvDebugName() {
-      // If the static buffer only has one struct member, any OpDebugMemberName
-      // instruction will not apply properly, so just set it as the debug name
-      // for the constant buffer itself.
       using namespace dxbc_spv;
 
       const auto& op = m_builder.getOp(m_staticCbv);
@@ -266,11 +248,11 @@ namespace dxvk {
       using namespace dxbc_spv;
 
       auto type = ir::Type()
-        .addStructMember(ir::ScalarType::eU8, 3u)   // Fog color
-        .addStructMember(ir::ScalarType::eU8)       // Alpha ref
-        .addStructMember(ir::ScalarType::eF32)      // Fog scale
-        .addStructMember(ir::ScalarType::eF32)      // Fog end
-        .addStructMember(ir::ScalarType::eF32);     // Fog density
+        .addStructMember(ir::ScalarType::eU8, 3u)
+        .addStructMember(ir::ScalarType::eU8)
+        .addStructMember(ir::ScalarType::eF32)
+        .addStructMember(ir::ScalarType::eF32)
+        .addStructMember(ir::ScalarType::eF32);
 
       m_sharedPushData = m_builder.add(ir::Op::DclPushData(type, m_entryPoint,
         D3D9SharedPushData::Offset, getPushDataStage(D3D9SharedPushData::Stages)));
@@ -287,10 +269,10 @@ namespace dxvk {
       using namespace dxbc_spv;
 
       auto type = ir::Type()
-        .addStructMember(ir::ScalarType::eU16)      // Dynamic float count
-        .addStructMember(ir::ScalarType::eU16)      // Point size
-        .addStructMember(ir::ScalarType::eU16)      // Minimum point size
-        .addStructMember(ir::ScalarType::eU16);     // Maximum point size
+        .addStructMember(ir::ScalarType::eU16)
+        .addStructMember(ir::ScalarType::eU16)
+        .addStructMember(ir::ScalarType::eU16)
+        .addStructMember(ir::ScalarType::eU16);
 
       m_vsPushData = m_builder.add(ir::Op::DclPushData(type, m_entryPoint,
         D3D9VsPushData::Offset, getPushDataStage(D3D9VsPushData::Stages)));
@@ -329,9 +311,6 @@ namespace dxvk {
       m_firstConstBool = constantCountF + constantCountI;
 
       if (totalCount <= ir::Type::MaxStructMembers && !constantCountB) {
-        // Put floats first, then integer constants, then bools. Emit a dummy CBV
-        // declaration first so we can accumulate type info and add debug names,
-        // then fix it up later with the proper type.
         auto cbvType = ir::Type();
 
         m_staticCbv = m_builder.add(ir::Op::DclCbv(cbvType, m_entryPoint,
@@ -348,8 +327,6 @@ namespace dxvk {
 
         fixupStaticCbvDebugName();
       } else {
-        // SWVP fallback. Just emit everything as a dword array that we can
-        // dynamically index into, which will be needed for booleans.
         uint32_t boolCount = layoutB.computeConstantCount(0u);
         uint32_t vec4Count = layoutI.computeConstantCount(0u) + align(boolCount, 4u) / 4u;
 
@@ -372,8 +349,6 @@ namespace dxvk {
       if (!layout.isDynamicallyIndexed())
         return;
 
-      // Over-declare by one element so that we can index past the
-      // last actual constant in order to read zero.
       auto cbvSize = layout.computeConstantCount(-1u) + 1u;
       auto cbvType = ir::Type(ir::ScalarType::eF32, 4u).addArrayDimension(cbvSize);
 
@@ -385,14 +360,11 @@ namespace dxvk {
     void lowerLegacyConstInput(const dxbc_spv::ir::Op& decl, dxbc_spv::ir::BuiltIn builtIn) {
       using namespace dxbc_spv;
 
-      // Check which layout to use for constant mappings
       bool isFloat = builtIn == ir::BuiltIn::eLegacyConstFloat;
 
       const auto& layout = m_analysis.GetConstantLayout()->getLayout(
         isFloat ? D3D9ConstantType::Float : D3D9ConstantType::Int);
 
-      // We already emitted all the constant buffers that we might need.
-      // Replace all input loads with loads from the relevant buffer.
       dxvk::small_vector<ir::SsaDef, 256u> uses;
       m_builder.getUses(decl.getDef(), uses);
 
@@ -406,12 +378,9 @@ namespace dxvk {
             dxbc_spv_assert(isFloat);
             dxbc_spv_assert(m_dynamicCbv);
 
-            // Trivially forward the load to the dynamically indexed buffer
             auto cbvDescriptor = m_builder.addBefore(use, ir::Op::DescriptorLoad(
               ir::ScalarType::eCbv, m_dynamicCbv, m_builder.makeConstant(0u)));
 
-            // The front-end promises to bind *at least* all statically
-            // indexed constants. Only clamp dynamic indices.
             auto addressDef = addressOp.getDef();
 
             if (!addressOp.isConstant()) {
@@ -431,8 +400,6 @@ namespace dxvk {
             m_builder.rewriteOp(use, ir::Op::BufferLoad(useOp.getType(), cbvDescriptor,
               addressDef, useOp.getType().byteSize()).setFlags(ir::OpFlag::eInBounds));
           } else {
-            // For compacted constants, we need to map the source constant
-            // to a member index in the static constant buffer struct.
             dxbc_spv_assert(addressOp.isConstant());
             dxbc_spv_assert(m_staticCbv);
 
@@ -465,15 +432,11 @@ namespace dxvk {
     void lowerLegacyConstBoolInput(const dxbc_spv::ir::Op& decl) {
       using namespace dxbc_spv;
 
-      // Bools are special: In HWVP, we simply map them tp 16 bits of spec data,
-      // in SWVP we need to load them from an actual constant buffer. Build helper
-      // function to actually fetch a single boolean from the source.
       const auto& layout = m_analysis.GetConstantLayout()->getLayout(D3D9ConstantType::Bool);
 
       ir::SsaDef loadFn = {};
 
       if (!layout.computeConstantCount(0u)) {
-        // Emit regular indexed spec constant function
         uint32_t offset = m_shaderStage == ir::ShaderStage::eVertex
           ? offsetof(D3D9SpecData, vsBoolConstants)
           : offsetof(D3D9SpecData, psBoolConstants);
@@ -498,8 +461,6 @@ namespace dxvk {
 
         auto cursor = m_builder.setCursor(loadFn);
 
-        // This is all extremely awful, but compilers should be able to constant-fold
-        // all the indices and optimize. We should basically never hit this, anyway.
         auto constIndex = m_builder.add(ir::Op::ParamLoad(ir::ScalarType::eU32, loadFn, loadArg));
 
         auto cbvType = m_builder.getOp(m_staticCbv).getType().getBaseType(0u);
@@ -515,7 +476,6 @@ namespace dxvk {
         auto dwordIndex = m_builder.add(ir::Op::UBitExtract(ir::ScalarType::eU32,
           constIndex, m_builder.makeConstant(5u), m_builder.makeConstant(2u)));
 
-        // Select correct dword from vector load
         auto dword = m_builder.add(ir::Op::CompositeExtract(ir::ScalarType::eU32, vectorLoad, m_builder.makeConstant(0u)));
 
         for (uint32_t i = 1u; i < 4u; i++) {
@@ -525,7 +485,6 @@ namespace dxvk {
             dword));
         }
 
-        // Test whether the requested bit is set in the bit mask
         auto bitIndex = m_builder.add(ir::Op::UBitExtract(ir::ScalarType::eU32,
           constIndex, m_builder.makeConstant(0u), m_builder.makeConstant(5u)));
 
@@ -534,13 +493,11 @@ namespace dxvk {
         auto result = m_builder.add(ir::Op::IAnd(ir::ScalarType::eU32, dword, dwordMask));
         result = m_builder.add(ir::Op::INe(ir::ScalarType::eBool, result, m_builder.makeConstant(0u)));
 
-        // Finalize helper function
         m_builder.add(ir::Op::Return(ir::ScalarType::eBool, result));
         m_builder.add(ir::Op::FunctionEnd());
         m_builder.setCursor(cursor);
       }
 
-      // Replace all loads with function calls
       dxvk::small_vector<ir::SsaDef, 256u> uses;
       m_builder.getUses(decl.getDef(), uses);
 
@@ -562,10 +519,6 @@ namespace dxvk {
             dxbc_spv::ir::BuiltIn       builtIn) {
       using namespace dxbc_spv;
 
-      // The basic idea for all render states is to source data from
-      // a mixture of push data, spec constants and constant buffers.
-      // Replace all input loads with the full composite, and extract
-      // the required components.
       dxvk::small_vector<ir::SsaDef, 256u> uses;
       m_builder.getUses(decl.getDef(), uses);
 
@@ -577,8 +530,6 @@ namespace dxvk {
             const auto& addressOp = m_builder.getOpForOperand(useOp, 1u);
             auto addressType = addressOp.getType().getBaseType(0u);
 
-            // If the input is arrayed, extract the first
-            // address component as the array index.
             ir::SsaDef index = { };
             ir::SsaDef member = addressOp.getDef();
 
@@ -605,7 +556,6 @@ namespace dxvk {
               }
             }
 
-            // Load the full input structure
             auto result = [this, builtIn, use, index] {
               switch (builtIn) {
                 case dxbc_spv::ir::BuiltIn::eLegacyAlphaTest:
@@ -626,8 +576,6 @@ namespace dxvk {
               }
             } ();
 
-            // Extract requested member. Dead code elimination
-            // will remove any unused loads.
             if (member) {
               result = m_builder.addBefore(use, ir::Op::CompositeExtract(
                 useOp.getType(), result, member));
@@ -666,10 +614,8 @@ namespace dxvk {
       return std::nullopt;
     }
 
-    // The dword value a spec constant folds to when compiled with defaults:
-    // the canonical D3D9 default render state. Alpha test defaults to disabled
-    // (compare == Always) rather than the zero-initialized Never, so the PS
-    // alpha-test epilogue passes fragments instead of killing them all.
+    // alpha compare must fold to Always (not the zero-init Never), or the PS
+    // alpha-test epilogue would discard every fragment by default
     static uint32_t defaultSpecDword(uint32_t specId) {
       D3D9SpecData def = { };
       def.setAlphaCompareOp(MtlCompareFunction::Always);
@@ -700,14 +646,6 @@ namespace dxvk {
       auto& specDef = m_specConstants.at(specId);
 
       if (!specDef) {
-        // Spec constants are folded to their DEFAULTS this phase (function-
-        // constant PSO plumbing pending). The fold default must be the real
-        // D3D9 default render state, not raw zero: e.g. the alpha-compare-op
-        // packed in spec dword 0 defaults to MtlCompareFunction::Never(0),
-        // which makes the PS alpha-test epilogue DISCARD every fragment and
-        // renders nothing. Fold to a canonical default-state D3D9SpecData
-        // (alpha test disabled == Always) so shaders draw when the app leaves
-        // these states at their D3D9 defaults (SOURCE_OF_TRUTH §4b).
         specDef = m_builder.add(ir::Op::DclSpecConstant(
           ir::ScalarType::eU32, m_entryPoint, specId, defaultSpecDword(specId)));
         m_builder.add(ir::Op::DebugName(specDef, s_specNames.at(specId)));
@@ -721,7 +659,6 @@ namespace dxvk {
 
       auto codeStart = m_builder.getCode().first->getDef();
 
-      // Build function and load spec constant value
       auto funcArg = ir::SsaDef();
       auto funcOp = ir::Op::Function(fn.type);
 
@@ -739,7 +676,6 @@ namespace dxvk {
       auto cursor = m_builder.setCursor(fn.function);
       auto result = emitSpecConstant(fn.specId);
 
-      // Extract requested bits if this is an indexed bit mask
       if (fn.bitCount < 32u) {
         auto bitIndexDef = m_builder.makeConstant(uint32_t(fn.bitIndex));
         auto bitCountDef = m_builder.makeConstant(uint32_t(fn.bitCount));
@@ -753,13 +689,11 @@ namespace dxvk {
         result = m_builder.add(ir::Op::UBitExtract(ir::ScalarType::eU32, result, bitIndexDef, bitCountDef));
       }
 
-      // Convert to requested return type
       if (fn.type == ir::ScalarType::eBool)
         result = m_builder.add(ir::Op::INe(ir::ScalarType::eBool, result, m_builder.makeConstant(0u)));
       else
         result = m_builder.add(ir::Op::ConsumeAs(fn.type, result));
 
-      // Finalize function
       m_builder.add(ir::Op::Return(fn.type, result));
       m_builder.add(ir::Op::FunctionEnd());
       m_builder.setCursor(cursor);
@@ -794,7 +728,6 @@ namespace dxvk {
       fn.isIndexed = bool(index);
       fn.type = type;
 
-      // Build function call op that the caller can add
       auto result = ir::Op::FunctionCall(type, getSpecConstantFunction(fn, name));
 
       if (index)
@@ -859,7 +792,6 @@ namespace dxvk {
           } break;
 
           case ir::LegacyFogLayout::eFogColor: {
-            // We store the raw D3DCOLOR in .bgr order. Convert to float and swizzle.
             auto fogColor = m_builder.addBefore(ref, ir::Op::PushDataLoad(
               ir::BasicType(ir::ScalarType::eU8, 3u), m_sharedPushData, m_builder.makeConstant(0u)));
 
@@ -944,7 +876,6 @@ namespace dxvk {
       for (uint32_t i = 0u; i < resultOp.getType().getStructMemberCount(); i++) {
         switch (ir::LegacyPointArgsLayout(i)) {
           case ir::LegacyPointArgsLayout::eIsPointSprite: {
-            // Bit 1 of the point mode spec constant
             resultOp.addOperand(emitSpecConstantLoad(offsetof(D3D9SpecData, enablePointSprite),
               0u, 1u, "enablePointSprite", ref, ir::ScalarType::eBool, ir::SsaDef()));
           } break;
@@ -976,9 +907,6 @@ namespace dxvk {
       using namespace dxbc_spv;
       dxbc_spv_assert(index);
 
-      // Some state only applies to PS, and we need to offset sampler
-      // indices in vertex shaders to read the proper state bits.
-      // *Everything* here is based on spec constants.
       bool isVs = m_shaderStage == ir::ShaderStage::eVertex;
 
       auto samplerTypeOffset = isVs
@@ -1011,7 +939,6 @@ namespace dxvk {
 
           case ir::LegacySamplerStateLayout::eUseProjection: {
             if (isVs) {
-              // Not a thing in VS
               resultOp.addOperand(m_builder.makeConstant(false));
             } else {
               auto proj = emitSpecConstantLoad(offsetof(D3D9SpecData, samplerProjMask),
@@ -1028,7 +955,6 @@ namespace dxvk {
 
           case ir::LegacySamplerStateLayout::eUseGather: {
             if (isVs) {
-              // Not a thing in VS
               resultOp.addOperand(m_builder.makeConstant(false));
             } else {
               resultOp.addOperand(m_builder.addBefore(ref, ir::Op::IEq(ir::ScalarType::eBool,
@@ -1046,7 +972,6 @@ namespace dxvk {
               0u, 8u, "samplerDrefScaleBits", ref, ir::ScalarType::eU32, ir::SsaDef());
             drefShift = m_builder.addBefore(ref, ir::Op::UMax(ir::ScalarType::eU32, drefShift, m_builder.makeConstant(1u)));
 
-            // We need to divide dref by (1 << shift) - 1
             auto scale = m_builder.addBefore(ref, ir::Op::IBitInsert(ir::ScalarType::eU32,
               m_builder.makeConstant(0u), m_builder.makeConstant(-1u),
               m_builder.makeConstant(0u), drefShift));
@@ -1067,12 +992,12 @@ namespace dxvk {
       dxbc_spv_assert(index);
 
       auto textureStageCbvType = ir::Type()
-        .addStructMember(ir::ScalarType::eU32)      // constant color
-        .addStructMember(ir::ScalarType::eU32)      // padding
-        .addStructMember(ir::ScalarType::eF32, 2u)  // matrix row 0
-        .addStructMember(ir::ScalarType::eF32, 2u)  // matrix row 1
-        .addStructMember(ir::ScalarType::eF32)      // luminance scale
-        .addStructMember(ir::ScalarType::eF32)      // luminance offset
+        .addStructMember(ir::ScalarType::eU32)
+        .addStructMember(ir::ScalarType::eU32)
+        .addStructMember(ir::ScalarType::eF32, 2u)
+        .addStructMember(ir::ScalarType::eF32, 2u)
+        .addStructMember(ir::ScalarType::eF32)
+        .addStructMember(ir::ScalarType::eF32)
         .addArrayDimension(caps::TextureStageCount);
 
       if (!m_textureStageCbv) {
@@ -1105,13 +1030,11 @@ namespace dxvk {
           return -1u;
         } ();
 
-        // Emit actual load
         auto descriptor = m_builder.addBefore(ref, ir::Op::DescriptorLoad(
           ir::ScalarType::eCbv, m_textureStageCbv, m_builder.makeConstant(0u)));
         auto address = m_builder.addBefore(ref, ir::Op::CompositeConstruct(
           ir::BasicType(ir::ScalarType::eU32, 2u), index, m_builder.makeConstant(member)));
 
-        // Members in this struct are naturally aligned
         resultOp.addOperand(m_builder.addBefore(ref, ir::Op::BufferLoad(
           textureStageCbvType.getBaseType(member), descriptor, address,
           textureStageCbvType.getBaseType(member).byteSize())
@@ -1142,10 +1065,6 @@ namespace dxvk {
       return ir::SsaDef();
     }
 
-    // Retyped vs upstream (VkShaderStageFlags -> MtlStageMask): the single
-    // Vulkan touch of the upstream pass. Semantics preserved — a push-data
-    // block scoped to exactly one stage returns that stage; anything else
-    // (e.g. shared VS+FS) returns an empty mask, matching upstream.
     static dxbc_spv::ir::ShaderStageMask getPushDataStage(MtlStageMask flags) {
       using namespace dxbc_spv;
 
@@ -1161,9 +1080,6 @@ namespace dxvk {
   };
 
 
-  // ==========================================================================
-  // D3D9AirShaderBackend — concrete ID3D9MetalShaderBackend (doc 03 §5).
-  // ==========================================================================
   class D3D9AirShaderBackend : public ID3D9MetalShaderBackend {
 
   public:
@@ -1203,10 +1119,6 @@ namespace dxvk {
       if (m_ir.empty())
         return { };
 
-      // Phase-B metallib cache key = (pairedStageIoHash, specStateHash); the
-      // bytecodeHash is implicit in this object's identity (doc 03 §2d). Shared
-      // across all common-shader copies via the Rc-shared backend, so a PS/VS
-      // pair compiles its reconciled metallib exactly once.
       uint64_t cacheKey = util::hash_combine(
         std::hash<uint64_t>()(paired.prevStageIoHash),
         std::hash<uint64_t>()(specStateHash));
@@ -1221,7 +1133,6 @@ namespace dxvk {
         }
       }
 
-      // Phase B — restore the cached legalized IR (doc 03 §1b step 1).
       ir::Builder builder;
       ir::Deserializer deser(m_ir.data(), m_ir.size());
 
@@ -1230,23 +1141,14 @@ namespace dxvk {
         return { };
       }
 
-      // Link-time I/O fixups (doc 03 §1b step 2 / §2b), mirroring the LowerIoPass
-      // block of upstream DxvkIrShader::getCode (dxvk_shader_ir.cpp:2027-2077).
       ir::LowerIoPass ioPass(builder);
 
-      // VS<->PS interpolant reconciliation — the "hardest problem" / historical
-      // blackscreen class. Only the fragment stage is rewritten, and only when a
-      // paired VS IR is supplied and the stages are I/O-incompatible. This drops
-      // interpolants the PS reads but the VS never writes (-> constant zero) and
-      // ignores VS outputs the PS does not consume. Upstream order: semantic IO
-      // remap first, then the mismatch fixup (dxvk_shader_ir.cpp:2059-2062).
       if (m_stage == MtlShaderStage::Fragment
        && paired.prevStageIr != nullptr && !paired.prevStageIr->empty()) {
         ir::Builder prevBuilder;
         ir::Deserializer prevDeser(paired.prevStageIr->data(), paired.prevStageIr->size());
 
         if (prevDeser.deserialize(prevBuilder)) {
-          // D3D9 has no GS/tess in this path: the stage feeding the PS is the VS.
           auto prevStage = ir::ShaderStage::eVertex;
           ir::IoMap prevOut = ir::IoMap::forOutputs(prevBuilder, 0u);
           ir::IoMap thisIn  = ir::IoMap::forInputs(builder);
@@ -1264,7 +1166,6 @@ namespace dxvk {
         }
       }
 
-      // Pixel-shader flat interpolation (does not depend on the paired stage).
       if (m_stage == MtlShaderStage::Fragment) {
         uint32_t flatMask = m_analysis.GetFlatShadingMask();
         if (flatMask)
@@ -1273,7 +1174,6 @@ namespace dxvk {
 
       (void)specStateHash;
 
-      // Re-serialize the (possibly) fixed-up IR for the compile boundary.
       ir::Serializer ser(builder);
       size_t irSize = ser.computeSerializedSize();
 
@@ -1283,24 +1183,17 @@ namespace dxvk {
         return { };
       }
 
-      // Cross the PE->unix boundary: AirBuilder + LLVM live in the bridge
-      // (doc 04). Fold spec constants to their defaults this phase — the
-      // function-constant PSO plumbing (MTLFunctionConstantValues) lands later.
       static std::atomic<bool> s_loggedFold = { false };
       if (!s_loggedFold.exchange(true))
         Logger::info("D3D9 AIR: folding spec constants to defaults (function-constant PSO plumbing pending)");
 
       std::string entry = "main";
 
-      // 32-bit PE mode: provide OUR OWN output buffers. A unix-allocated
-      // pointer (out_metallib) is unreachable from this 32-bit process;
-      // the unix side memcpy's the result into these PE buffers instead.
-      // Metallibs for D3D9 shaders are small; 512 KB is generous.
+      // this 32-bit PE process can't dereference a unix-allocated out_metallib
+      // pointer, so provide our own buffers for the unix side to memcpy into
       std::vector<uint8_t> metallib(512u * 1024u);
       std::vector<uint8_t> reflection(64u * 1024u);
 
-      // Argument-buffer binding model (default ON; D9MT_NO_AB=1 reverts to
-      // per-slot argument-table binding for A/B debugging).
       static const bool noAb = env::getEnvVar("D9MT_NO_AB") == "1";
 
       d9mt_air_compile_params params = { };
@@ -1326,7 +1219,6 @@ namespace dxvk {
       metallib.resize(params.out_size);
       reflection.resize(params.out_reflection_size);
 
-      // Parse the reflection blob into a CbvIndex->AIR-slot map (§4b bug 1).
       D3D9CbvSlotMap cbvMap = parseReflectionCbvMap(reflection);
 
       {
@@ -1343,12 +1235,6 @@ namespace dxvk {
       return metallib;
     }
 
-    // Build the CbvIndex -> AIR Metal buffer-slot map from a d9mtair reflection
-    // blob. The frontend binds each D3D9 constant buffer at its raw CbvIndex;
-    // the AIR shader declares them at the Metal [[buffer(n)]] slots reported
-    // here. Each DclCbv reflection entry carries reg_index == the CbvIndex the
-    // frontend passed to DclCbv (setup*Cbv / clip / shared), so we map directly
-    // without relying on data-derived debug names (SOURCE_OF_TRUTH §4b bug 1).
     D3D9CbvSlotMap parseReflectionCbvMap(const std::vector<uint8_t>& blob) const {
       using Cbv = D3D9ShaderResourceMapping::CbvIndex;
       D3D9CbvSlotMap map;
@@ -1371,30 +1257,25 @@ namespace dxvk {
         off += sizeof(e);
         e.name[sizeof(e.name) - 1u] = '\0';
 
-        // Argument-buffer member: e.index is the handle-word index; the word
-        // list tells the backend flush what to write at each word.
         if (e.flags & D9MT_AIR_ENTRY_IN_AB) {
           if (map.abWords.size() <= e.index)
             map.abWords.resize(e.index + 1u, { uint8_t(0xFFu), 0u });
 
           D3D9CbvSlotMap::AbWord w = { uint8_t(0xFFu), 0u };
           if (e.kind == D9MT_AIR_BIND_BUFFER) {
-            w.kind = 0u; /* MtlShaderFunction::AbWordKind::Cbv */
-            // Legacy-builtin buffers (cF/cI/cB/...) also carry a CbvIndex-
-            // shaped reg via the frontend's CBV binding; DclCbv entries
-            // report it directly.
+            w.kind = 0u;
             w.reg = e.reg_index != D9MT_AIR_NO_REG_INDEX
               ? uint8_t(e.reg_index) : uint8_t(0xFFu);
             if (e.reg_index != D9MT_AIR_NO_REG_INDEX
              && e.reg_index < uint32_t(Cbv::Count))
               map.slot[e.reg_index] = int8_t(e.index);
           } else if (e.kind == D9MT_AIR_BIND_SAMPLER) {
-            w.kind = 2u; /* Sampler */
+            w.kind = 2u;
             w.reg = uint8_t(e.reg_index);
           } else if (e.kind == D9MT_AIR_BIND_TEXTURE_2D
                   || e.kind == D9MT_AIR_BIND_TEXTURE_CUBE
                   || e.kind == D9MT_AIR_BIND_TEXTURE_3D) {
-            w.kind = 1u; /* Texture */
+            w.kind = 1u;
             w.reg = uint8_t(e.reg_index);
           }
           map.abWords[e.index] = w;
@@ -1408,7 +1289,6 @@ namespace dxvk {
         if (e.kind != D9MT_AIR_BIND_BUFFER)
           continue;
 
-        // Only DclCbv-backed buffers carry a valid reg_index (== CbvIndex).
         if (e.reg_index != D9MT_AIR_NO_REG_INDEX && e.reg_index < uint32_t(Cbv::Count))
           map.slot[e.reg_index] = int8_t(e.index);
 
@@ -1429,12 +1309,9 @@ namespace dxvk {
     MtlShaderStage       m_stage;
     D3D9ShaderAnalysis   m_analysis;
     std::string          m_name;
-    std::vector<uint8_t> m_ir;             // serialized legalized IR (Phase A)
-    uint64_t             m_outputIoHash = 0u;  // hash of the output interpolant IoMap
+    std::vector<uint8_t> m_ir;
+    uint64_t             m_outputIoHash = 0u;
 
-    // Phase-B metallib cache, keyed on (prevStageIoHash, specStateHash). Stores
-    // the metallib bytes AND the reflection-derived CbvIndex->AIR-slot map so a
-    // cache hit still yields the binding map (SOURCE_OF_TRUTH §4b bug 1).
     struct MetallibCacheEntry {
       std::vector<uint8_t> metallib;
       D3D9CbvSlotMap       cbvMap;
@@ -1442,10 +1319,6 @@ namespace dxvk {
     std::mutex                                          m_metallibMutex;
     std::unordered_map<uint64_t, MetallibCacheEntry>    m_metallibCache;
 
-    // Stable hash of a shader's output IoMap (location type + index/built-in +
-    // component mask + semantic name/index). Two VS whose PS-facing interpolant
-    // signature is identical hash equal, so a PS reconciled against one is reused
-    // for the other.
     static uint64_t hashOutputIoMap(const dxbc_spv::ir::Builder& builder) {
       using namespace dxbc_spv;
 
@@ -1489,21 +1362,14 @@ namespace dxvk {
         return;
       }
 
-      // Backend-neutral legacy-input lowering (ported verbatim).
       D3D9ShaderLowerLegacyInputPass lowerLegacyPass(builder, options, m_analysis);
       lowerLegacyPass.run();
 
-      // Legalization AirBuilder expects (doc 03 §1b step 3). NOTE: default
-      // CompileOptions; the AIR differential corpus may pin specific options —
-      // revisit if codegen parity requires it (host check + runtime ladder).
       ir::CompileOptions compileOptions = { };
       ir::legalizeIr(builder, compileOptions);
 
-      // Record the output interpolant signature hash for the Phase-B linkage key
-      // (this VS's outputs are what a paired PS reconciles against, doc 03 §2b/§2d).
       m_outputIoHash = hashOutputIoMap(builder);
 
-      // Serialize + cache the legalized IR (doc 03 §1b step 5).
       ir::Serializer ser(builder);
       size_t size = ser.computeSerializedSize();
 

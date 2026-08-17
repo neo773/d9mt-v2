@@ -30,7 +30,6 @@ namespace dxvk {
       do {
         oldRefCount = this->m_refCount.load();
 
-        // clamp value to 0 to prevent underruns
         if (unlikely(!oldRefCount))
           return 0;
 

@@ -4,14 +4,6 @@
  * SHA-1 in C
  * By Steve Reid <steve@edmweb.com>
  * 100% Public Domain
- *
- * Test Vectors (from FIPS PUB 180-1)
- * "abc"
- *   A9993E36 4706816A BA3E2571 7850C26C 9CD0D89D
- * "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
- *   84983E44 1C3BD26E BAAE4AA1 F95129E5 E54670F1
- * A million repetitions of "a"
- *   34AA973C D4C4DAA4 F61EEB2B DBAD2731 6534016F
  */
 
 #include <stdint.h>
@@ -20,19 +12,12 @@
 
 #define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 
-/*
- * blk0() and blk() perform the initial expand.
- * I got the idea of expanding during the round function from SSLeay
- */
 # define blk0(i) (block->l[i] = (rol(block->l[i],24)&0xFF00FF00) \
     |(rol(block->l[i],8)&0x00FF00FF))
-    
+
 #define blk(i) (block->l[i&15] = rol(block->l[(i+13)&15]^block->l[(i+8)&15] \
     ^block->l[(i+2)&15]^block->l[i&15],1))
 
-/*
- * (R0+R1), R2, R3, R4 are the different operations (rounds) used in SHA1
- */
 #define R0(v,w,x,y,z,i) z+=((w&(x^y))^y)+blk0(i)+0x5A827999+rol(v,5);w=rol(w,30);
 #define R1(v,w,x,y,z,i) z+=((w&(x^y))^y)+blk(i)+0x5A827999+rol(v,5);w=rol(w,30);
 #define R2(v,w,x,y,z,i) z+=(w^x^y)+blk(i)+0x6ED9EBA1+rol(v,5);w=rol(w,30);
@@ -44,9 +29,6 @@ typedef union {
 	uint32_t l[16];
 } CHAR64LONG16;
 
-/*
- * Hash a single 512-bit block. This is the core of the algorithm.
- */
 void
 SHA1Transform(uint32_t state[5], const uint8_t* buffer)
 {
@@ -56,14 +38,12 @@ SHA1Transform(uint32_t state[5], const uint8_t* buffer)
 
 	(void)memcpy(block, buffer, SHA1_BLOCK_LENGTH);
 
-	/* Copy context->state[] to working vars */
 	a = state[0];
 	b = state[1];
 	c = state[2];
 	d = state[3];
 	e = state[4];
 
-	/* 4 rounds of 20 operations each. Loop unrolled. */
 	R0(a,b,c,d,e, 0); R0(e,a,b,c,d, 1); R0(d,e,a,b,c, 2); R0(c,d,e,a,b, 3);
 	R0(b,c,d,e,a, 4); R0(a,b,c,d,e, 5); R0(e,a,b,c,d, 6); R0(d,e,a,b,c, 7);
 	R0(c,d,e,a,b, 8); R0(b,c,d,e,a, 9); R0(a,b,c,d,e,10); R0(e,a,b,c,d,11);
@@ -85,26 +65,20 @@ SHA1Transform(uint32_t state[5], const uint8_t* buffer)
 	R4(d,e,a,b,c,72); R4(c,d,e,a,b,73); R4(b,c,d,e,a,74); R4(a,b,c,d,e,75);
 	R4(e,a,b,c,d,76); R4(d,e,a,b,c,77); R4(c,d,e,a,b,78); R4(b,c,d,e,a,79);
 
-	/* Add the working vars back into context.state[] */
 	state[0] += a;
 	state[1] += b;
 	state[2] += c;
 	state[3] += d;
 	state[4] += e;
 
-	/* Wipe variables */
 	a = b = c = d = e = 0;
 }
 
 
-/*
- * SHA1Init - Initialize new context
- */
 void
 SHA1Init(SHA1_CTX *context)
 {
 
-	/* SHA1 initialization constants */
 	context->count = 0;
 	context->state[0] = 0x67452301;
 	context->state[1] = 0xEFCDAB89;
@@ -114,9 +88,6 @@ SHA1Init(SHA1_CTX *context)
 }
 
 
-/*
- * Run your data through this.
- */
 void
 SHA1Update(SHA1_CTX *context, const uint8_t *data, size_t len)
 {
@@ -137,9 +108,6 @@ SHA1Update(SHA1_CTX *context, const uint8_t *data, size_t len)
 }
 
 
-/*
- * Add padding and return the message digest.
- */
 void
 SHA1Pad(SHA1_CTX *context)
 {
@@ -148,12 +116,12 @@ SHA1Pad(SHA1_CTX *context)
 
 	for (i = 0; i < 8; i++) {
 		finalcount[i] = (uint8_t)((context->count >>
-		    ((7 - (i & 7)) * 8)) & 255);	/* Endian independent */
+		    ((7 - (i & 7)) * 8)) & 255);
 	}
 	SHA1Update(context, (uint8_t *)"\200", 1);
 	while ((context->count & 504) != 448)
 		SHA1Update(context, (uint8_t *)"\0", 1);
-	SHA1Update(context, finalcount, 8); /* Should cause a SHA1Transform() */
+	SHA1Update(context, finalcount, 8);
 }
 
 void

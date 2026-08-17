@@ -1,12 +1,3 @@
-/* d9mt v2 indexed-draw test: the same SM3 programmable triangle as
- * code_shader.c, but drawn through an index buffer with DrawIndexedPrimitive.
- *
- * Exercises Phase 1 item 3 (index buffers + drawIndexed) on top of the
- * programmable-shader path. Geometry, shaders, declaration and constants are
- * identical to code_shader.c so any difference in output isolates the indexed
- * path. The index buffer is a trivial {0,1,2} so a correct drawIndexed must
- * produce the exact same triangle as the non-indexed DrawPrimitive.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -87,9 +78,9 @@ int main(void) {
     return 1;
 
   static const struct Vertex verts[3] = {
-      {0.0f, 0.6f, 0.5f, 0xFFFF0000},   /* top, red */
-      {0.6f, -0.6f, 0.5f, 0xFF00FF00},  /* right, green */
-      {-0.6f, -0.6f, 0.5f, 0xFF0000FF}, /* left, blue */
+      {0.0f, 0.6f, 0.5f, 0xFFFF0000},
+      {0.6f, -0.6f, 0.5f, 0xFF00FF00},
+      {-0.6f, -0.6f, 0.5f, 0xFF0000FF},
   };
   static const WORD indices[3] = {0, 1, 2};
 

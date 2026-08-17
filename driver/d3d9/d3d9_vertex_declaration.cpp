@@ -55,12 +55,11 @@ namespace dxvk {
     if (pNumElements == nullptr)
       return D3DERR_INVALIDCALL;
 
-    *pNumElements = UINT(m_elements.size()) + 1u; // Account for D3DDECL_END
+    *pNumElements = UINT(m_elements.size()) + 1u;
 
     if (pElement == nullptr)
       return D3D_OK;
 
-    // The native runtime ignores pNumElements here...
     std::copy(m_elements.begin(), m_elements.end(), pElement);
     pElement[m_elements.size()] = D3DDECL_END();
 
@@ -213,24 +212,6 @@ namespace dxvk {
           DWORD& outFvf,
           DWORD& texCountPostUpdate) {
 
-    // Mapping between a Direct3D Declaration and FVF Codes (Direct3D 9)
-    // This table maps members of a D3DVERTEXELEMENT9 declaration to a FVF code.
-    //
-    // Data type              Usage                       Usage index     FVF
-    // ----------------------------------------------------------------------------------------
-    // D3DDECLTYPE_FLOAT3     D3DDECLUSAGE_POSITION       0               D3DFVF_XYZ
-    // D3DDECLTYPE_FLOAT4     D3DDECLUSAGE_POSITIONT      0               D3DFVF_XYZRHW
-    // D3DDECLTYPE_FLOATn     D3DDECLUSAGE_BLENDWEIGHT    0               D3DFVF_XYZBn
-    // D3DDECLTYPE_UBYTE4     D3DDECLUSAGE_BLENDINDICES   0               D3DFVF_XYZB(nWeights + 1)
-    // D3DDECLTYPE_FLOAT3     D3DDECLUSAGE_NORMAL         0               D3DFVF_NORMAL
-    // D3DDECLTYPE_FLOAT1     D3DDECLUSAGE_PSIZE          0               D3DFVF_PSIZE
-    // D3DDECLTYPE_D3DCOLOR   D3DDECLUSAGE_COLOR          0               D3DFVF_DIFFUSE
-    // D3DDECLTYPE_D3DCOLOR   D3DDECLUSAGE_COLOR          1               D3DFVF_SPECULAR
-    // D3DDECLTYPE_FLOATm     D3DDECLUSAGE_TEXCOORD       n               D3DFVF_TEXCOORDSIZEm(n)
-    // D3DDECLTYPE_FLOAT3     D3DDECLUSAGE_POSITION       1               N / A
-    // D3DDECLTYPE_FLOAT3     D3DDECLUSAGE_NORMAL         1               N / A
-
-
     if (element.Usage == D3DDECLUSAGE_POSITION && element.Type == D3DDECLTYPE_FLOAT3 && element.UsageIndex == 0) {
       outFvf = D3DFVF_XYZ;
       return true;
@@ -305,14 +286,11 @@ namespace dxvk {
       DWORD& outFvf,
       DWORD& texCountPostUpdate) {
 
-    // Check if bits of format for current UsageIndex are free in the fvf
-    // It is necessary to skip multiple initializations of the bitfield because
-    // returned value is bitwise or-ed to final fvf DWORD.
-    // The D3DFVF_TEXCOORDSIZE1 is used below because it covers all formats bits.
+    // D3DFVF_TEXCOORDSIZE1 is used as the occupancy mask because its bits
+    // cover the full format field regardless of the actual texcoord size.
     if ((D3DFVF_TEXCOORDSIZE1(element.UsageIndex) & fvf) != 0)
       return false;
 
-    // Update max texture's index in fvf
     DWORD currentTexCount = element.UsageIndex + 1;
     bool retStatus = true;
 

@@ -1,15 +1,8 @@
 #include "mtl_presenter.h"
-#include "mtl_context.h"   // for MtlDevice
+#include "mtl_context.h"
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
-
-// ---------------------------------------------------------------------------
-// mtl_presenter_stub.cpp — PHASE-D log-and-return MtlPresenter. No CAMetalLayer,
-// no winemetal, no drawable pool. Lets the swapchain REWRITE compile and link
-// against the present seam. The real impl (CAMetalLayer + drawable present +
-// frame-latency shared event) lands in the swapchain REWRITE track.
-// ---------------------------------------------------------------------------
 
 namespace dxvk {
 
@@ -31,15 +24,13 @@ namespace dxvk {
       logOnce("acquireNextImage");
       MtlAcquiredDrawable image = { };
       image.sync.frameId = frameId;
-      image.valid = false;   // no real drawable in the stub
+      image.valid = false;
       return image;
     }
 
     void present(const MtlAcquiredDrawable&) override { logOnce("present"); }
 
     void signalFrameLatency(uint64_t) override {
-      // PHASE-D: contract 3e — real impl posts this from the present completion
-      // handler; stubbing it live deadlocks the frame-limiter.
       logOnce("signalFrameLatency");
     }
 

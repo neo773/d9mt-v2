@@ -48,7 +48,6 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Capture() {
     D3D9DeviceLock lock = m_parent->LockDevice();
 
-    // A state block can't capture state while another is being recorded.
     if (unlikely(m_parent->ShouldRecord()))
       return D3DERR_INVALIDCALL;
 
@@ -64,7 +63,6 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
     D3D9DeviceLock lock = m_parent->LockDevice();
 
-    // A state block can't be applied while another is being recorded.
     if (unlikely(m_parent->ShouldRecord()))
       return D3DERR_INVALIDCALL;
 
@@ -204,8 +202,6 @@ namespace dxvk {
     if (unlikely(Index >= m_state.lights.size()))
       m_state.lights.resize(Index + 1);
 
-    // Apply default light on enable, but not disable.
-    // No idea if this is correct, but matches the old logic.
     auto& light = m_state.lights[Index];
     light.isEnabled = bool(Enable);
 

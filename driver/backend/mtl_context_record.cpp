@@ -14,13 +14,6 @@
 
 #include "mtl_profiler.h"
 
-/*
- * METAL 4 backend (SOURCE_OF_TRUTH §2). Implementation notes live in
- * mtl_context_impl.h (the 9 architecture decisions). Section order mirrors the
- * header's flow: lifecycle -> pass -> state -> binding -> draw. Part 2
- * (resolve/arg-table flush/dynamic state/transfers/queries) is in impl2.cpp.
- */
-
 namespace dxvk::backend {
 
   namespace {
@@ -41,9 +34,6 @@ namespace dxvk::backend {
     m_psoCache(m_device->wmtCompiler()) {
     obj_handle_t dev = m_device->wmtDevice();
 
-    /* Per-stage argument tables (decision 3). max_buffers >= 21 (push data at
-     * [[buffer(20)]]); textures/samplers 16 = D3D9 sampler slot count.
-     * Metal 4 validation: "max buffer bind count must not be more than 31". */
     WMTArgTableInfo ati = {};
     ati.max_buffers                = 31u;
     ati.max_textures               = 16u;
@@ -55,13 +45,6 @@ namespace dxvk::backend {
     pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
     m_argTables.push_back(std::move(pair));
 
-    /* Residency: owned entirely by the device's MtlResidencyTracker
-     * (queue-attached set; nothing to bind per cmdbuf). The context only
-     * drives beforeSubmit()/serialRetired() from submit()/endFrame(). */
-
-    /* Allocator ring seed: slot 0 exists so pre-frame resource-init cmdbufs
-     * (before the first beginRecording) have backing memory. beginRecording
-     * rotates to slot 1 next. */
     m_allocators[0] = WmtAllocator::adopt(MTLDevice_newCommandAllocator(dev));
     m_allocator     = m_allocators[0].handle();
     m_frameIndex    = 1u;
@@ -70,55 +53,34 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     if (m_pass.active)
       closePass();
-    /* MetalFX scaler handles are +1-owned (bridge contract). */
     for (auto& kv : m_fxScalers)
       NSObject_release(kv.second);
-    /* Context-lifetime visibility buffer: registered at creation, leaves
-     * the residency set through the same deferred-destruction path as
-     * every other allocation. */
     if (m_visBuffer) {
       m_device->residency().allocDestroyed(m_visBuffer.detach(), nullptr,
         m_device->submissions().nextSerial());
     }
   }
 
-  // --- lifecycle -----------------------------------------------------------
 
   void MtlContextImpl::beginRecording() {
-    /* PROF: allocator rotation + the waitFor on the slot's last serial — a
-     * large bucket here means the CPU is waiting on the GPU (pacing), not
-     * that this function does work. */
     prof::Scope profScope(prof::BeginRecording);
     m_dirty = DirtyEverything;
-    /* NOTE: do NOT reset m_argTableCursor here. The argument-table pool is a
-     * cross-frame ring (selectArgumentTablesForPass); resetting the cursor per
-     * recording broke reuse and ratcheted the pool. It wraps mod size itself. */
 
-    /* Rotate to a >= ring-depth-old allocator and reset it. MTL4CommandAllocator
-     * contract: every command buffer whose memory came from this allocator must
-     * have COMPLETED before reset — with >ring-depth frames in flight (shader
-     * compile stalls) an ungated reset recycles command memory the GPU is still
-     * reading (command-stream corruption). Wait for the slot's last serial. */
     uint32_t slot = m_frameIndex % uint32_t(m_allocators.size());
     m_frameIndex++;
     if (!m_allocators[slot]) {
       m_allocators[slot] = WmtAllocator::adopt(
         MTLDevice_newCommandAllocator(m_device->wmtDevice()));
     } else {
-      /* MTL4CommandAllocator contract: the slot's prior command buffers must
-       * have COMPLETED before reset. Block on the slot's last serial (a real
-       * wait, not a log) or reset corrupts command memory the GPU is reading. */
+      /* Reset requires the slot's prior command buffers to have COMPLETED
+       * (MTL4CommandAllocator contract) — an ungated reset recycles command
+       * memory the GPU may still be reading. */
       if (m_device->submissions().completedSerial() < m_allocatorSerial[slot])
         m_device->submissions().waitFor(m_allocatorSerial[slot]);
       MTL4CommandAllocator_reset(m_allocators[slot].handle());
     }
     m_allocator = m_allocators[slot].handle();
     m_allocatorSlot = slot;
-
-    /* NO residency work here. Allocations are resident from creation until
-     * their deferred destruction retires (MtlResidencyTracker) — any
-     * per-frame set rebuild drops bound-but-not-re-touched resources and
-     * faults the GPU ("BIF0 page fault"). */
 
     ensureCommandBuffer();
   }
@@ -130,20 +92,10 @@ namespace dxvk::backend {
     m_cmdbuf = WmtCommandBuffer::adopt(
       MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
     MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
-    /* Residency sets are queue-attached (MtlResidencyTracker) — no
-     * per-cmdbuf useResidencySet. */
     m_currentSerial = m_device->submissions().nextSerial();
   }
 
-  /* D9MT_GPUCAPTURE (with MTL_CAPTURE_ENABLED=1): programmatic
-   * MTLCaptureManager GPU trace to /tmp/d9mt.gputrace. Diagnostic only —
-   * wine processes don't register with gputoolsserviced, so the gpucapture
-   * CLI can't attach to them. Two modes:
-   *   D9MT_GPUCAPTURE=N        capture the first N queue commits
-   *   D9MT_GPUCAPTURE=trigger  armed: touching C:\d9mt-test\GPUCAP starts a
-   *                            capture of the next 3 commits (repeatable) —
-   *                            lets us grab a mid-game frame on demand. */
-  static int  s_gpuCaptureRemaining = -2;  /* -2 env unread, -1 off, 0 armed */
+  static int  s_gpuCaptureRemaining = -2;
   static bool s_gpuCaptureTrigger   = false;
   static int  s_gpuCaptureCommits   = 3;
 
@@ -203,11 +155,6 @@ namespace dxvk::backend {
       closePass();
     }
 
-    /* Decision 10: replay the parked frame list into this command buffer
-     * BEFORE endCommandBuffer/commit. Every consumer of GPU-ordered results
-     * (readback waits, query polls, staging fences, Reset, present) funnels
-     * through this submit, so nothing can observe un-replayed work. No-op in
-     * immediate mode / when nothing was parked. */
     flushFramePasses();
 
     if (!m_cmdbuf)
@@ -215,34 +162,18 @@ namespace dxvk::backend {
 
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
-    /* Realize pending residency adds before the queue sees this cmdbuf
-     * (batched in the tracker; commits only when dirty). */
     m_device->residency().beforeSubmit();
 
-    /* One commit per command buffer, DELIBERATELY unbatched (the bridge
-     * signature takes an array). Every intra-frame submit is driven by
-     * D3D9DeviceEx::ExecuteFlush, which signals the submission and
-     * staging-buffer fences under this cmdbuf's serial immediately before
-     * flushing — app threads block on those fences (flush throttle, staging
-     * budget) and on query polls (MtlBackendQuery::getData) keyed to this
-     * serial. Deferring the commit to a later flush point would turn each of
-     * those waits into a stall bounded only by whoever eventually flushes
-     * (the retirement pump has no commit hook), a mid-frame latency
-     * regression that dwarfs the few saved queue crossings per frame. */
     obj_handle_t cb = m_cmdbuf.handle();
     gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), &cb, 1u);
     gpuCaptureAfterCommit();
 
-    /* MTL4: the completion signal is a queue-timeline op AFTER commit. */
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
-    /* Every submission recorded from the current allocator slot pins that
-     * slot until this serial retires (see beginRecording reset gate). */
     m_allocatorSerial[m_allocatorSlot] = serial;
 
     m_device->uploadRing().onSubmit(serial);
 
-    /* keep-alive set rides the retirement spine (decision 5) */
     if (!m_keepAlive.empty()) {
       auto keepAlive = std::make_shared<std::vector<Rc<MtlResource>>>(
         std::move(m_keepAlive));
@@ -253,8 +184,6 @@ namespace dxvk::backend {
       m_keepAlive.clear();
     }
 
-    /* The committed MTL4CommandBuffer is released only after it retires (the
-     * queue holds its own reference for the duration of GPU execution). */
     auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
     m_device->submissions().retireAfter(serial,
       [doneCmd]() mutable { doneCmd->reset(); });
@@ -265,10 +194,6 @@ namespace dxvk::backend {
     m_cmdbuf.reset();
     m_dirty = DirtyEverything;
 
-    /* Reclaim completed work on every submission, not only at endFrame:
-     * load phases submit without presenting for long stretches, and memory
-     * (retired backings, ring chunks, residency entries) must retire on the
-     * submission cadence or it piles up until present resumes. */
     const uint64_t completed = m_device->submissions().completedSerial();
     m_device->submissions().processRetirements();
     m_device->residency().serialRetired(completed);
@@ -277,13 +202,6 @@ namespace dxvk::backend {
 
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
     submit(false);
-    /* beginRecording (NOT ensureCommandBuffer) rotates the 3-deep command-
-     * allocator ring: it waits for the slot's prior GPU work to retire before
-     * reusing it (CS<->GPU pacing, caps frames in flight) and resets the
-     * allocator's command memory. Calling ensureCommandBuffer here instead left
-     * beginRecording running only once at device creation, so the CS thread
-     * submitted unbounded frames ahead of the GPU and allocator/retirement
-     * memory piled up until it froze/OOM'd after ~30s. */
     beginRecording();
     if (status) {
       status->submissionId = m_currentSerial;
@@ -292,28 +210,17 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::endFrame() {
-    /* Frame-boundary marker for Rule B (decision 10): the frontend emits
-     * endFrame() from PresentImage immediately BEFORE the present flush
-     * (EndFrame -> Flush -> present blit -> synchronizeWsi, all in CS
-     * order), so the very next flushFramePasses carries the batch that ends
-     * at the Present boundary — the one place D3D9 declares depth/stencil
-     * contents undefined and their final store may be discarded. */
     m_frameBoundaryFlush = true;
 
     uint64_t completed = m_device->submissions().completedSerial();
     {
       prof::Scope profScope(prof::EndFrame);
-      /* Retirements drop the last Rcs (allocations enqueue their deferred
-       * removal), then the tracker flushes removals whose serial completed. */
       m_device->submissions().processRetirements();
       m_device->residency().serialRetired(completed);
       m_device->uploadRing().onComplete(completed);
     }
     prof::onFrameEnd();
 
-    /* DIAG: per-frame growth watch (leak instrumentation; observers only).
-     * bufNew/bufRename/bufRecycle/imgNew attribute residency churn to its
-     * creation source (cumulative device counters). */
     static uint64_t s_diagFrame = 0u;
     if ((++s_diagFrame & 0xFFu) == 0u) {
       Logger::info(str::format("DIAG frame=", s_diagFrame,
@@ -335,14 +242,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::synchronizeWsi(MtlPresenterSync sync) {
-    /* PROF: contains one Submit (the present commit) — read Submit as a
-     * sub-bucket of SynchronizeWsi on present frames. */
     prof::Scope profScope(prof::SynchronizeWsi);
-    /* Contract 3e + METAL 4 present handshake (decision 5): waitForDrawable
-     * BEFORE commit, signalDrawable + drawable present AFTER commit. The
-     * swapchain acquires the drawable, records the backbuffer blit into it,
-     * then hands it here via sync.drawable — this is the ONLY place the
-     * drawable is actually presented to the CAMetalLayer. */
     if (sync.drawable == MtlNullHandle) {
       Logger::warn("MtlContextImpl: synchronizeWsi without drawable");
       return;
@@ -354,15 +254,6 @@ namespace dxvk::backend {
     }
     ensureCommandBuffer();
 
-    /* METAL 4 present handshake, all four steps: queue waitForDrawable BEFORE
-     * the commit that writes the drawable (GPU-side wait for the display to
-     * release the texture — without it the present copy scribbles into a
-     * drawable mid-scanout: visible tearing), then commit, then
-     * signalDrawable + present. The old forever-block fear dated from the
-     * drawable-leak era (drawables pinned in the residency set were never
-     * released by CA, so the wait could never satisfy); drawable lifecycle
-     * is sound now — acquire/copy/present/release on one thread, layer-owned
-     * residency set. */
     MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
     submit(false);
 
@@ -371,31 +262,14 @@ namespace dxvk::backend {
       MetalDrawable_presentAfterMinimumDuration(sync.drawable, sync.minDuration);
     else
       MetalDrawable_present(sync.drawable);
-    /* Balance the retain taken in the bridge's nextDrawable — after present
-     * nothing touches the drawable again. Acquire/present/release now all run
-     * on the CS thread (see D3D9SwapChainEx::PresentImage), so no drawable is
-     * ever held across a thread boundary. */
     NSObject_release(sync.drawable);
   }
 
-  // --- render pass (decision 1) ---------------------------------------------
 
   static bool sameAttachment(const Rc<MtlTextureView>& a,
                              const Rc<MtlTextureView>& b);
 
   void MtlContextImpl::bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) {
-    /* Redundant framebuffer rebind: the frontend re-binds on ANY FB-dirty
-     * flag (present, state restores, SetRenderTarget with the same target),
-     * and most of those name the SAME attachments as the open pass. Closing
-     * and reopening an identical pass is a full TBDR tile store+load for
-     * nothing — measured 52 of ~83 pass closes/frame. Keep the encoder.
-     * Identity = same subresource AND same view format (an sRGB re-view of
-     * the same texture is a different attachment to the PSO). */
-    /* EXPERIMENTAL, default OFF (D9MT_RTSKIP=1 enables): keeping the pass
-     * open across a same-target rebind cut passes 83 -> 57/frame, but a
-     * display-mode Reset with the skip active leaves the game wedged after
-     * the switch (bisect-confirmed; the held pass straddles backbuffer
-     * destruction). Re-enable once the Reset path force-closes the pass. */
     static const bool rtSkipOn = std::getenv("D9MT_RTSKIP") != nullptr;
     if (m_pass.active) {
       if (rtSkipOn) {
@@ -415,12 +289,6 @@ namespace dxvk::backend {
     }
     else
       flushPendingClears();
-    /* A folded, not-yet-drawn clear must EXECUTE before the pending pass is
-     * replaced — silently discarding it turned "Clear; (framebuffer
-     * re-dirtied); draw" into load=Load on stale content: every frame's draws
-     * accumulated on the previous frame's (the RT-feedback clear-drop bug,
-     * formerly papered over by unbinding sampled RTs in SetRenderTarget,
-     * which broke D3D9 sampler-state persistence instead). */
 
     m_pass = PendingPass();
     m_pass.targets = std::move(targets);
@@ -428,13 +296,6 @@ namespace dxvk::backend {
     m_dirty |= DirtyPso | DirtyViewport;
   }
 
-  /* Two MtlTextureViews name the SAME render-pass attachment when they view the
-   * same subresource of the same texture — NOT when they are the same object.
-   * createImageView() interns nothing (a fresh view per call), so comparing the
-   * Rc pointers here only "worked" by heap-address reuse and silently degraded
-   * to loadAction=Load on frames where the SetRenderTarget view and the Clear
-   * view landed at different addresses — dropping the clear (RT accumulation /
-   * feedback garbage; GTA-shaped). Compare the backing texture + subresource. */
   static bool sameAttachment(const Rc<MtlTextureView>& a,
                              const Rc<MtlTextureView>& b) {
     if (a == b)                     return true;
@@ -451,16 +312,10 @@ namespace dxvk::backend {
       Logger::info(str::format("CLR color img=",
         (void*)(view ? view->image.ptr() : nullptr),
         " rgba=", value.color.r, ",", value.color.g, ",", value.color.b));
-    /* DIAGNOSTIC: D9MT_NOCOLORCLEAR drops COLOR clears (keeps depth/stencil) so
-     * the backbuffer is preserved (loadAction=Load). Tests whether GTA's 2D is
-     * accumulated across frames (would compose the full loading image) vs
-     * redrawn per frame (shader/transform bug). */
     if (std::getenv("D9MT_NOCOLORCLEAR") && (clear & MtlAspectColor)) {
       clear = MtlAspectMask(clear & ~MtlAspectColor);
       if (!clear) return;
     }
-    /* Fold into the pending pass when the view is one of its attachments
-     * and the encoder hasn't opened; else flush as a mini-pass. */
     if (!m_pass.active && m_pass.pending) {
       for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
@@ -476,12 +331,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* standalone clear: dedicated mini-pass with load=clear, store=store */
-    /* DEFERRED MODE: an ACTIVE recording pass owns m_cmdChunk — the swap
-     * dance below would otherwise let the mini-pass's recordPassEntry steal
-     * the active pass's parked draws. Close (park) the active pass first;
-     * the clear entry then records in true D3D9 order (prior draws, then
-     * clear, then later draws in a fresh pass). */
     if (deferredPassesEnabled() && m_pass.active) {
       prof::bump(prof::CntPassCloseClear);
       closePass();
@@ -505,12 +354,6 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushPendingClears() {
-    /* Fold-in clears (clearRenderTarget on a bound-but-unopened pass) only
-     * execute when the pass materializes at a draw. A copy/readback (or the
-     * present blit) that arrives with no intervening draw must still observe
-     * the clear — materialize an empty load=Clear/store=Store pass now, else
-     * the clear is silently dropped (clear-only frames read back stale/black,
-     * wine test_sanity). */
     if (m_pass.active || !m_pass.pending)
       return;
     bool any = m_pass.clearDepth || m_pass.clearStencil;
@@ -529,11 +372,6 @@ namespace dxvk::backend {
 
     ensureCommandBuffer();
 
-    /* Decision 10 (deferred): open a RECORDING pass, not an encoder. All
-     * per-pass encoder-scoped state behaves identically because every write
-     * rides the CmdChunk, not the encoder: the chunk replays into the real
-     * encoder at flushFramePasses. Folded clears stay on m_pass and are
-     * captured by recordPassEntry. */
     if (deferredPassesEnabled()) {
       m_pass.encoder = 0;
       m_pass.active  = true;
@@ -547,8 +385,6 @@ namespace dxvk::backend {
     }
 
     WMTRenderPassInfo info = {};
-    /* Occlusion queries write into a per-context visibility buffer bound at
-     * pass creation (decision 7). */
     info.visibility_buffer = m_visBuffer.handle();
     for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
       const auto& view = m_pass.targets.color[i];
@@ -587,13 +423,9 @@ namespace dxvk::backend {
     m_pass.active = true;
     m_pass.pending = false;
     m_dirty = DirtyEverything;
-    /* Fresh encoder: encoder-level state (incl. setArgumentTable) is gone —
-     * the first draw of this pass must rotate in a retired pair and re-bind
-     * it (prepareDraw). Encoder-scoped trim shadows reset with it. */
     m_argTablesBound = false;
     m_lastEncodedPso = 0u;
     m_dynValid       = false;
-
   }
 
   MtlContextImpl::ArgTablePair MtlContextImpl::createArgumentTablePair() const {
@@ -611,39 +443,16 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::selectArgumentTablesForPass() {
-    /* Once per materialized pass, NOT per draw: Metal snapshots an argument
-     * table's contents at each encoded draw (MTL4RenderCommandEncoder.h,
-     * setArgumentTable:atStages: — "Metal takes a snapshot of the resources
-     * in the argument table when you encode a draw"), so mutate-draw-mutate-
-     * draw on the ONE selected pair is well-defined for the whole encoder.
-     * The old per-draw rotation neutered the ArgTableShadow diff: every draw
-     * rotated onto a cold pair and re-wrote all ~48x2 slots (argRotate ==
-     * draws, prepareDraw ~11ms/frame in GTA). Keeping the pair for the pass
-     * makes the diff write only the slots that actually change per draw.
-     *
-     * Rotation still matters at the pass boundary: round-robin the pool,
-     * reusing a slot only once its last-use submission serial has RETIRED
-     * (the same retire-after-serial discipline as the command-allocator ring
-     * / upload ring) so a pair is never rewritten while an earlier
-     * submission's GPU work is still in flight against it. Within one cmdbuf
-     * two passes can never share a pair either: the pass-start stamp below
-     * uses the UNSUBMITTED m_currentSerial, which cannot compare <= completed.
-     * If every slot is still in flight, the pool is too small for the current
-     * in-flight pass depth, so grow it right here. This self-limits: once the
-     * pool covers the peak concurrent in-flight passes it stops growing —
-     * bounded by construction. */
+    /* Metal snapshots an argument table's contents at each encoded draw, so
+     * one pair can be mutated and reused for every draw in a pass; rotation
+     * only needs to happen at the pass boundary. Growth is always by
+     * push_back at the end, never insert-at-cursor — inserting scrambles the
+     * per-slot serials so the round-robin never lands on a retired slot and
+     * the pool grows unbounded. */
     prof::bump(prof::CntArgRotate);
     const uint64_t completed = m_device->submissions().completedSerial();
     const size_t   n         = m_argTables.size();
 
-    /* Round-robin from the cursor and reuse the FIRST table whose last-use
-     * serial has retired. Only when every table is still in flight (pool too
-     * small for the current in-flight draw depth) do we grow — by push_back at
-     * the end, NEVER insert-at-cursor. The prior insert-at-cursor scrambled the
-     * per-slot serials so the round-robin never landed on a retired slot: the
-     * pool ratcheted up ~4 tables/frame forever (never shrank) and exhausted
-     * memory after ~2200 frames. A stable ring self-limits to the peak
-     * concurrent in-flight draw count and then stops growing. */
     for (size_t scan = 0u; scan < n; ++scan) {
       const size_t idx = (m_argTableCursor + scan) % n;
       if (m_argTables[idx].serial <= completed) {
@@ -675,17 +484,10 @@ namespace dxvk::backend {
   void MtlContextImpl::flushCmdChunk() {
     if (m_cmdChunk.empty())
       return;
-    /* Deferred recording has no live encoder — the chunk is consumed by
-     * recordPassEntry and replayed at flushFramePasses instead. Nothing
-     * should call this without an encoder; guard rather than crash. */
     if (!m_pass.encoder)
       return;
     prof::Scope profScope(prof::FlushCmdChunk);
     prof::bump(prof::CntChunkFlush);
-    /* ONE crossing replays the whole batch natively (mtl_cmd_chunk.h /
-     * winemetal.h code 208). The unix side consumes the structs
-     * synchronously, so the arena recycles immediately — no GPU-lifetime
-     * tracking (unlike UploadRing memory, which the GPU reads later). */
     MTL4RenderCommandEncoder_encodeCommands(m_pass.encoder, m_cmdChunk.head());
     m_cmdChunk.reset();
   }
@@ -694,39 +496,26 @@ namespace dxvk::backend {
     if (!m_pass.active)
       return;
 
-    /* Decision 10 (deferred): no encoder exists yet — park the pass. */
     if (deferredPassesEnabled()) {
       recordPassEntry();
       return;
     }
 
-    /* Replay every batched wmtcmd for this pass before the encoder is
-     * barriered/ended — the chunk invariant (non-empty only while a pass is
-     * open) holds because appends happen only after materializePass. */
     flushCmdChunk();
 
-    /* §4c: order this pass's fragment (color/depth) writes ahead of every
-     * later queue stage — a subsequent encoder that samples this RT as a
-     * texture, or copies it (present blit / gated readback), must observe the
-     * finished pixels. Metal 4 does no implicit render-pass transition. */
+    /* Metal 4 does no implicit render-pass transition: a later encoder that
+     * samples or copies this attachment must be ordered after these writes. */
     emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
     MTLCommandEncoder_endEncoding(m_pass.encoder);
     NSObject_release(m_pass.encoder);
     m_pass.encoder = 0;
     m_pass.active = false;
-    m_pass.pending = true;   /* same targets stay bound until rebound */
-    m_argTablesBound = false; /* encoder gone; next pass rotates + re-binds */
+    m_pass.pending = true;
+    m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
   }
 
-  // --- state setters (fold + dirty) ------------------------------------------
-
-  /* Redundant-state guards (perf): D3D9 titles re-set identical state
-   * constantly; an unguarded setter turns each into a dirty bit and a
-   * per-draw resolve/flush cascade downstream (resolvePso key rebuilds were
-   * ~per draw in GTA). Skipping the no-change case here kills the whole
-   * chain at the cheapest point. */
 
   void MtlContextImpl::bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) {
     Rc<MtlShaderFunction>& slot = (stage == MtlShaderStage::Vertex ? m_vs : m_fs);
@@ -752,7 +541,7 @@ namespace dxvk::backend {
   void MtlContextImpl::setPrimitiveTopology(MtlPrimitiveTopology topology) {
     if (m_topology == topology)
       return;
-    m_topology = topology;   /* PSO topology CLASS only changes across point/line/tri */
+    m_topology = topology;
     m_dirty |= DirtyPso;
   }
 
@@ -818,16 +607,14 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::setDepthBounds(MtlDepthBounds bounds) {
-    /* §6.3: accepted + no-op */
+    /* accepted but intentionally a no-op: Metal has no depth-bounds test */
   }
-
-  // --- binding ---------------------------------------------------------------
 
   void MtlContextImpl::bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) {
     auto& stream = m_vertexStreams[binding];
     if (stream.stride != stride) {
       m_strideGen++;
-      m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
+      m_dirty |= DirtyPso;
     }
     stream.slice = std::move(slice);
     stream.stride = stride;
@@ -836,17 +623,12 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::bindVertexBufferRange(uint32_t binding, MtlDeviceSize offset, MtlDeviceSize length, uint32_t stride) {
-    /* SetStreamSource fast path: same logical buffer, new offset/stride
-     * (D3D9 dynamic-VB append pattern — one bind, per-element offsets).
-     * Rebase within the slice's captured backing; a Discard rename between
-     * range updates retargets the binding through invalidateBuffer's
-     * CS-ordered refresh, same as the full-bind path. */
     auto& stream = m_vertexStreams[binding];
     if (!stream.slice.defined())
-      return;                            /* range update with nothing bound */
+      return;
     if (stream.stride != stride) {
       m_strideGen++;
-      m_dirty |= DirtyPso;               /* §6.4 stride participates in PSO key */
+      m_dirty |= DirtyPso;
     }
     stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
                                   offset, length);
@@ -876,7 +658,6 @@ namespace dxvk::backend {
 
   void MtlContextImpl::bindUniformBufferRange(MtlStageMask stages, uint32_t slot,
                                               MtlDeviceSize offset, MtlDeviceSize length) {
-    /* THE historical bug-1: this must offset the previously-bound slice. */
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
         auto& cbv = m_bindings[s].cbvs[slot];
@@ -889,16 +670,11 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::bindTexture(MtlStageMask stages, uint32_t slot, Rc<MtlTextureView>&& view) {
-    /* Stage tables have 16 slots. Internal slot 16 (the FF DMAP sampler) has
-     * no Metal table slot — drop it rather than write past the array. */
     if (unlikely(slot >= m_bindings[0].textures.size())) {
       static bool warned = false;
       if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped texture bind beyond stage table (DMAP?)"); }
       return;
     }
-    /* No-change guard: D3D9 titles re-SetTexture the bound texture per draw;
-     * an accepted redundant bind dirties the slot and (AB path) rebuilds the
-     * stage's whole handle slice downstream. */
     bool changed = false;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
@@ -911,11 +687,6 @@ namespace dxvk::backend {
     }
     if (changed) {
       m_dirty |= DirtyResources;
-      /* Decision 10: shader-read bookkeeping for Rules B/C — an attachment
-       * sampled anywhere this batch must keep its Store. Insert only on
-       * CHANGE (this branch), so the per-draw redundant-bind storm never
-       * touches the set. Conservative: a bind without a draw still inserts
-       * (only ever blocks an optimization). */
       if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
         m_frameSampled.insert(view->image.ptr());
     }
@@ -942,13 +713,6 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data) {
-    // Each stage owns a private push buffer (bound at kPushConstantIndex). The FF
-    // ubershaders (auto-converted from DXVK's GLSL) declare a RenderStates push
-    // block laid out as: D3D9SharedPushData at byte 0 (reserving MaxSharedPushDataSize
-    // = 32 bytes), then the per-stage block (D3D9Vs/Ffvs/FfpsPushData) at byte 32.
-    // The D3D9*PushData::Offset fields are relative to their block base, so a
-    // single-stage block must be shifted past the shared reservation (this mirrors
-    // DxvkPushDataBlock::computeBlockOffsetForStage: shared -> 0, per-stage -> 32).
     const bool  isShared   = (uint32_t(stages) & (uint32_t(stages) - 1u)) != 0u;
     const uint32_t baseOff = isShared ? 0u : kPushSharedBlockSize;
     for (uint32_t s = 0; s < 2; s++) {
@@ -963,7 +727,6 @@ namespace dxvk::backend {
     m_dirty |= DirtyPush;
   }
 
-  // --- draw path (decision 2+3) ----------------------------------------------
 
   bool MtlContextImpl::ensureFanIndices() {
     if (m_fanIndices != nullptr)
@@ -992,9 +755,6 @@ namespace dxvk::backend {
       return;
     prof::Scope profScope(prof::EncodeDraw);
     if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
-      /* Fan emulation: without this, fans fall into the triangle-list default
-       * and rasterize as disconnected wedges (every 3rd triangle) — 2D vector
-       * content (minimaps, HUD polygons) is the classic victim. */
       if (!ensureFanIndices())
         return;
       if (m_fanIndices->trackingSerial() != m_currentSerial)
@@ -1031,22 +791,15 @@ namespace dxvk::backend {
     if (!prepareDraw())
       return;
     if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
-      /* Indexed fans need a CPU remap of the source indices (GPU-side buffer,
-       * unreadable at record time) — unimplemented; drawn as a list. Warn so
-       * a title that actually uses them is identifiable. */
       static bool warned = false;
       if (!warned) {
         warned = true;
         Logger::warn("MtlContextImpl: indexed triangle fan drawn as list (index remap unimplemented)");
       }
     }
-    /* Record-time snapshot (MtlBufferSlice contract): index fetch resolves
-     * through the slice's captured backing, never the live buffer. */
     if (m_indexBuffer.storage() == nullptr)
       return;
     prof::Scope profScope(prof::EncodeDraw);
-    /* GPU-use stamp, compare-guarded (atomic store only when stale) —
-     * replaces the per-draw stamp walk in prepareDraw for the index buffer. */
     if (m_indexBuffer.buffer() != nullptr
      && m_indexBuffer.buffer()->trackingSerial() != m_currentSerial)
       m_indexBuffer.buffer()->setTrackingSerial(m_currentSerial);
@@ -1057,8 +810,6 @@ namespace dxvk::backend {
     for (uint32_t i = 0; i < count; i++) {
       uint64_t indexOffset = uint64_t(args[i].firstIndex) * idxSize;
       uint64_t gpuAddr     = m_indexBuffer.gpuAddress(indexOffset);
-      /* MTL4 rule: indexBufferLength is the accessible byte range from the
-       * given GPU address (to the end of the backing allocation). */
       uint64_t accessible  = m_indexBuffer.addressableLength(indexOffset);
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw_indexed>(
         uint16_t(WMTMtl4RenderCommandDrawIndexed));
@@ -1075,24 +826,11 @@ namespace dxvk::backend {
 
   bool MtlContextImpl::prepareDraw() {
     if (!m_pass.pending && !m_pass.active)
-      return false;                       /* no render targets bound */
-    /* PROF: parent bucket for the whole per-draw resolve; ResolvePso/
-     * FlushVertexBuffers/FlushResources/FlushDynamicState (and an arena-cap
-     * FlushCmdChunk) nest inside it. */
+      return false;
     prof::Scope profScope(prof::PrepareDraw);
-    /* Inline the common case: the pass is already materialized for every
-     * draw but the first — skip the call (x86-emulated prologue per draw). */
     if (unlikely(!m_pass.active))
       materializePass();
 
-    /* Arena cap: replay-and-recycle mid-pass once the batch crosses the cap.
-     * Any command boundary is a valid flush point — the stream replays in
-     * append order across flushes, and Metal snapshots the argument table at
-     * each encoded draw, so table writes replayed in a later flush can never
-     * retroactively affect a draw encoded in an earlier one.
-     * DEFERRED MODE: no live encoder to flush into — the chunk parks with
-     * the pass and its memory pools across frames (m_chunkPool), so the cap
-     * (a PE-side arena memory knob, not a correctness one) does not apply. */
     if (!deferredPassesEnabled()
      && m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
       flushCmdChunk();
@@ -1100,31 +838,11 @@ namespace dxvk::backend {
     if ((m_dirty & DirtyPso) && !resolvePso())
       return false;
 
-    /* Argument tables rotate once per PASS, not per draw (see
-     * selectArgumentTablesForPass): the first draw after materializePass
-     * rotates in a retired pair, binds it, and stamps its serial for this
-     * cmdbuf; every later draw of the pass mutates that same pair, which is
-     * well-defined because the encoder snapshots table contents at each
-     * encoded draw. materializePass sets DirtyEverything, so the rotation
-     * draw always performs the full-walk flush that reconciles the rotated-in
-     * pair's persistent contents (ArgTableShadow diff) with the current
-     * logical bindings; the OR below is belt-and-braces for any future path
-     * that clears m_argTablesBound without dirtying bindings. */
     if (!m_argTablesBound) {
       selectArgumentTablesForPass();
       bindArgumentTables();
       m_argTablesBound = true;
       m_dirty |= DirtyVertexBuffers | DirtyResources | DirtyPush;
-      /* ROTATION = FULL REWRITE. The rotated-in pair is a DIFFERENT physical
-       * table whose shadow mirrors ITS OWN last contents, not the current
-       * logical bindings — the per-slot dirty masks (which only say "touched
-       * since the last flush") are meaningless against it. Force every mask
-       * wide so the flush below visits ALL slots and reconciles the fresh
-       * pair via the shadow diff (slots that happen to match still skip the
-       * Metal write). Missing this would leave a rotated-in table with
-       * stale/missing slots = silent wrong-texture corruption. This is the
-       * ONLY place m_currentArgTable changes, so it is the only point where
-       * mask-vs-shadow coherence can break. */
       m_dirtyVertexStreams = ~0u;
       for (auto& b : m_bindings) {
         b.dirtyTextures = ~0u;
@@ -1133,17 +851,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* Binding flush, gated per draw: when NO binding-shaped state changed
-     * since the previous draw (every mutation funnels into these bits —
-     * the bind and pushData setters set them, invalidateBuffer's retarget
-     * sets them, and pass/cmdbuf/blit boundaries set DirtyEverything), the
-     * bound tables already hold exactly the current logical bindings: skip
-     * the walk entirely. On the dirty path the per-slot ArgTableShadow diff
-     * appends only slots whose value changed. Vertex streams live at fixed
-     * indices (kVertexBufferBaseIndex+) independent of the bound shader, so
-     * only DirtyVertexBuffers gates them; DirtyPso participates in the
-     * resource walk because the CBV AIR-slot map is shader-derived
-     * (flushResources translates through fn->cbvSlotMap). */
     if (m_dirty & DirtyVertexBuffers)
       flushVertexBuffers();
     if (m_dirty & (DirtyPso | DirtyResources | DirtyPush))
@@ -1153,17 +860,6 @@ namespace dxvk::backend {
       flushDynamicState();
     m_pass.encodedDraws++;
 
-    /* GPU-use stamp (MtlResource contract): every buffer this draw fetches
-     * is busy until the recording command buffer's serial completes. This
-     * is what makes D3D9DeviceEx::WaitForResource a serial compare instead
-     * of a full GPU drain. Stamped per draw, not per bind — bindings
-     * persist across submissions, so a bind-time stamp would go stale and
-     * let a Lock overwrite vertex memory a later cmdbuf still reads.
-     * TRIM: (re)bound streams are stamped by flushVertexBuffers' dirty-mask
-     * walk (it visits exactly the changed slots), and the index buffer by
-     * drawIndexed's compare-guarded stamp. The full walk below only runs
-     * when the SERIAL moves (new cmdbuf): that is the one case where an
-     * unchanged-but-still-bound binding carries a stale stamp. */
     if (unlikely(m_currentSerial != m_lastStampSerial)) {
       for (auto& stream : m_vertexStreams) {
         if (stream.slice.defined() && stream.slice.buffer() != nullptr)
@@ -1174,14 +870,11 @@ namespace dxvk::backend {
       m_lastStampSerial = m_currentSerial;
     }
 
-    /* all folded state is now bound on the encoder / argument tables; the
-     * next draw only re-flushes what changes (ring slices already snapshot). */
     m_dirty = 0u;
     prof::bump(prof::CntDraws);
     return true;
   }
 
-  // --- frame-deferred pass list (decision 10) --------------------------------
 
   CmdChunk MtlContextImpl::takeChunk() {
     if (m_chunkPool.empty())
@@ -1194,7 +887,7 @@ namespace dxvk::backend {
   void MtlContextImpl::recordPassEntry() {
     FrameEntry e;
     e.kind         = FrameEntry::Kind::Render;
-    e.targets      = m_pass.targets;          /* copy — m_pass keeps them pending */
+    e.targets      = m_pass.targets;
     e.clearColor   = m_pass.clearColor;
     e.clearValues  = m_pass.clearValues;
     e.clearDepth   = m_pass.clearDepth;
@@ -1206,12 +899,11 @@ namespace dxvk::backend {
     m_cmdChunk = takeChunk();
     m_frameEntries.push_back(std::move(e));
 
-    /* Mirror the immediate closePass post-state exactly. */
     m_pass.encoder = 0;
     m_pass.active  = false;
-    m_pass.pending = true;    /* same targets stay bound until rebound */
+    m_pass.pending = true;
     m_pass.encodedDraws = 0u;
-    m_argTablesBound = false; /* next pass rotates + re-binds */
+    m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
   }
@@ -1222,7 +914,7 @@ namespace dxvk::backend {
       closePass();
     }
     else
-      flushPendingClears();   /* a copy must observe folded, not-yet-drawn clears */
+      flushPendingClears();
     ensureCommandBuffer();
   }
 
@@ -1245,9 +937,6 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushFramePasses() {
-    /* Rule B applies only to the batch that ends at the Present boundary
-     * (armed by endFrame); consume the flag on EVERY flush so a mid-frame
-     * flush can never inherit it. */
     const bool frameBoundary = m_frameBoundaryFlush;
     m_frameBoundaryFlush = false;
 
@@ -1257,16 +946,12 @@ namespace dxvk::backend {
     }
 
     if (!m_cmdbuf) {
-      /* Cannot happen by construction (every record path runs
-       * ensureCommandBuffer first) — drop loudly rather than crash. */
       Logger::err("MtlContextImpl::flushFramePasses: entries without cmdbuf, dropped");
       m_frameEntries.clear();
       m_frameSampled.clear();
       return;
     }
 
-    /* Independent runtime gates, ON by default (mtld3d's const-bool gates,
-     * exposed as env kill-switches for in-game bisects). */
     static const bool ruleB   = std::getenv("D9MT_NO_RULE_B") == nullptr;
     static const bool ruleC   = std::getenv("D9MT_NO_RULE_C") == nullptr;
     static const bool ruleE   = std::getenv("D9MT_NO_RULE_E") == nullptr;
@@ -1275,9 +960,6 @@ namespace dxvk::backend {
 
     auto& entries = m_frameEntries;
 
-    /* Attachment identity for the rules: texture + mip + layer (the
-     * sameAttachment contract) — Rc-held by the entries, so no pointer can
-     * be recycled while parked. */
     using AttKey = std::tuple<const void*, uint32_t, uint32_t>;
     auto attKeyOf = [](const Rc<MtlTextureView>& v) {
       return AttKey((const void*)v->image.ptr(), v->key.baseMip, v->key.baseLayer);
@@ -1302,14 +984,6 @@ namespace dxvk::backend {
       return true;
     };
 
-    /* --- Rule E: fold clear-only passes into the next pass on the same
-     * targets as its load actions. Clear-only = Render entry, zero draws,
-     * empty chunk (a non-empty chunk may carry visibility-mode or barrier
-     * commands that must materialize in place). Merge target: the next
-     * Render entry attaching EVERY cleared attachment at the SAME slot with
-     * load=Load. Bail on any intervening Direct entry (its reads/writes are
-     * positional and opaque), on any intervening pass touching a cleared
-     * attachment, and on sampled targets — conservative, correctness first. */
     if (ruleE) {
       for (size_t i = 0u; i < entries.size(); ) {
         FrameEntry& p = entries[i];
@@ -1327,15 +1001,13 @@ namespace dxvk::backend {
         for (size_t j = i + 1u; j < entries.size() && !blocked && target == SIZE_MAX; j++) {
           const FrameEntry& c = entries[j];
           if (c.kind != FrameEntry::Kind::Render) {
-            blocked = true;   /* opaque transfer/blit between clear and target */
+            blocked = true;
             break;
           }
           bool touches = false, matches = true;
           for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
             if (!p.clearColor[s])
               continue;
-            /* the cleared attachment appearing at ANY slot of c counts as a
-             * touch; a fold is only legal at the SAME slot with load=Load */
             bool touchedHere = false;
             for (uint32_t cs = 0u; cs < MtlRenderTargets::MaxColorTargets; cs++)
               touchedHere = touchedHere
@@ -1355,11 +1027,11 @@ namespace dxvk::backend {
                    && !c.clearDepth && !c.clearStencil;
           }
           if (!touches)
-            continue;         /* unrelated pass; keep scanning */
+            continue;
           if (matches)
             target = j;
           else
-            blocked = true;   /* partial touch — materialize in place */
+            blocked = true;
         }
         if (target != SIZE_MAX) {
           FrameEntry& t = entries[target];
@@ -1376,19 +1048,12 @@ namespace dxvk::backend {
             m_chunkPool.push_back(std::move(ch));
           }
           entries.erase(entries.begin() + i);
-          /* don't advance — what was at i+1 is now at i */
         } else {
           i++;
         }
       }
     }
 
-    /* --- Pass merging: adjacent Render entries with IDENTICAL attachments
-     * (texture+mip+layer+format on every slot) replay into one encoder,
-     * killing a full tile store+load per merge on TBDR. The follower must
-     * have no clears (a load-action clear would wipe the leader's draws).
-     * This is the flush-time replacement for the reverted D9MT_RTSKIP hack:
-     * a Reset can never interleave here, and entries hold Rc keepalives. */
     if (mergeOn) {
       for (size_t i = 0u; i + 1u < entries.size(); ) {
         FrameEntry& a = entries[i];
@@ -1410,7 +1075,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* --- default store actions */
     for (auto& e : entries) {
       if (e.kind != FrameEntry::Kind::Render)
         continue;
@@ -1419,12 +1083,6 @@ namespace dxvk::backend {
       e.stencilStore = uint8_t(WMTStoreActionStore);
     }
 
-    /* --- Rule B: depth/stencil store=DontCare on each depth attachment's
-     * LAST pass of the batch — only at the Present boundary (D3D9: depth is
-     * undefined across Present), and only when the texture can never be
-     * shader-read: structurally (no ShaderRead usage — a D3D9 INTZ-style
-     * depth texture keeps Store forever, mtld3d's depth_is_sampleable) and
-     * observationally (not read this batch). */
     if (ruleB && frameBoundary) {
       std::unordered_set<const void*> handled;
       for (size_t ri = entries.size(); ri-- > 0u; ) {
@@ -1445,12 +1103,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* --- Rule C: color store=DontCare when the NEXT pass on the same
-     * attachment starts with a full clear. Skipped for anything sampled or
-     * transfer-read this batch (positional reads collapse conservatively
-     * into the global set) and for any texture EVER read by a transfer —
-     * the present copy reads the backbuffer every frame, which makes this
-     * the backbuffer exemption (its store never goes DontCare). */
     if (ruleC) {
       std::map<AttKey, std::pair<size_t, uint32_t>> nextUse;
       for (size_t ri = entries.size(); ri-- > 0u; ) {
@@ -1477,8 +1129,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* --- Rule F: cull passes with no draws, no commands and no surviving
-     * Store — nothing they do reaches device memory. */
     if (ruleF) {
       for (size_t i = 0u; i < entries.size(); ) {
         FrameEntry& e = entries[i];
@@ -1505,7 +1155,6 @@ namespace dxvk::backend {
       }
     }
 
-    /* --- replay, in exact record order ------------------------------------ */
     uint32_t encoders = 0u;
     for (auto& e : entries) {
       if (e.kind == FrameEntry::Kind::Direct) {
@@ -1557,16 +1206,11 @@ namespace dxvk::backend {
         m_chunkPool.push_back(std::move(ch));
       }
       e.chunks.clear();
-      /* §4c: identical producer-barrier structure to the immediate path —
-       * every encoder's fragment writes are ordered ahead of all later
-       * queue stages before endEncoding. */
       emitProducerBarrier(enc, uint64_t(WMTStageFragment));
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);
       encoders++;
 
-      /* GPU-lifetime keepalive for the attachment views (retire-by-serial
-       * at submit, which is the caller of this function). */
       for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
         if (e.targets.color[s] != nullptr)
           m_keepAlive.push_back(e.targets.color[s]);
@@ -1576,14 +1220,8 @@ namespace dxvk::backend {
     }
     prof::bump(prof::CntFramePasses, encoders);
 
-    /* No FrameEntry outlives the frame flush — the Reset-vs-parked-pass bug
-     * class (the D9MT_RTSKIP killer) is structurally impossible. */
     entries.clear();
     m_frameSampled.clear();
   }
-
-  // (resolvePso / bindArgumentTables contents / flushVertexBuffers /
-  //  flushResources / flushDynamicState / transfers / init / queries / misc
-  //  continue in mtl_context_transfer.cpp to keep TU size sane)
 
 }

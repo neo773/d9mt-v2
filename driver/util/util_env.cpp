@@ -65,7 +65,7 @@ namespace dxvk::env {
   std::string getExeName() {
     std::string fullPath = getExePath();
     auto n = fullPath.find_last_of(env::PlatformDirSlash);
-    
+
     return (n != std::string::npos)
       ? fullPath.substr(n + 1)
       : fullPath;
@@ -108,15 +108,14 @@ namespace dxvk::env {
     size_t size = PATH_MAX;
 
     if (sysctl(mib, 4, exePath, &size, NULL, 0) != 0) {
-        // throw error here?
         return "";
     }
 
     return std::string(exePath);
 #endif
   }
-  
-  
+
+
   void setThreadName(const std::string& name) {
 #ifdef _WIN32
     using SetThreadDescriptionProc = HRESULT (WINAPI *) (HANDLE, PCWSTR);
@@ -159,5 +158,5 @@ namespace dxvk::env {
     return std::filesystem::is_directory(path) || std::filesystem::create_directories(path);
 #endif
   }
-  
+
 }

@@ -9,14 +9,6 @@
 
 namespace dxvk::sync {
 
-  /**
-   * \brief Generic spin function
-   *
-   * Blocks calling thread until a condition becomes
-   * \c true, calling \c yield every few iterations.
-   * \param [in] spinCount Number of probes between each yield
-   * \param [in] fn Condition to test
-   */
   template<typename Fn>
   void spin(uint32_t spinCount, const Fn& fn) {
     while (unlikely(!fn())) {
@@ -26,8 +18,6 @@ namespace dxvk::sync {
         #elif defined(DXVK_ARCH_ARM64)
         __asm__ __volatile__ ("yield");
         #else
-        /* Do nothing (busy-loop). Please add more #elif above here if
-         * your CPU architecture has a suitable pause/yield instruction */
         #endif
         if (fn())
           return;
@@ -36,41 +26,34 @@ namespace dxvk::sync {
       dxvk::this_thread::yield();
     }
   }
-  
-  /**
-   * \brief Spin lock
-   * 
-   * A low-overhead spin lock which can be used to
-   * protect data structures for a short duration
-   * in case the structure is not likely contested.
-   */
+
   class Spinlock {
 
   public:
-    
+
     Spinlock() { }
     ~Spinlock() { }
-    
+
     Spinlock             (const Spinlock&) = delete;
     Spinlock& operator = (const Spinlock&) = delete;
-    
+
     void lock() {
       spin(200, [this] { return try_lock(); });
     }
-    
+
     void unlock() {
       m_lock.store(0, std::memory_order_release);
     }
-    
+
     bool try_lock() {
       return likely(!m_lock.load())
           && likely(!m_lock.exchange(1, std::memory_order_acquire));
     }
-    
+
   private:
-    
+
     std::atomic<uint32_t> m_lock = { 0 };
-    
+
   };
-  
+
 }

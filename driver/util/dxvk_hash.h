@@ -4,12 +4,6 @@
 
 #include "util_env.h"
 
-// ---------------------------------------------------------------------------
-// dxvk_hash.h — pure hashing helpers relocated from src/dxvk/ (backend-neutral).
-// DxvkHashState / DxvkHash / DxvkEq are used verbatim by the D3D9 state tracker
-// (constant layouts, resource-view caches, sampler keys). ZERO Vulkan — moved into
-// util/ so the d3d9 ADAPT files no longer transitively depend on the dxvk/ tree.
-// ---------------------------------------------------------------------------
 
 namespace dxvk {
 

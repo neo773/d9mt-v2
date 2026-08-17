@@ -1,10 +1,5 @@
 #pragma once
 
-// PHASE-C6: ported off Vulkan onto the Mtl seam.
-//   Rc<DxvkShader> -> Rc<MtlShaderFunction>   (the SWVP ProcessVertices module)
-//   include ../dxvk/dxvk_shader.h -> ../mtl/mtl_context.h (MtlShaderFunction)
-// The GetShaderModule body (d3d9_swvp_emu.cpp) builds the module via the neutral
-// shader backend; this header is a pure token retype.
 #include <unordered_map>
 
 #include "d3d9_include.h"

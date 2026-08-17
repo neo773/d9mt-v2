@@ -54,9 +54,7 @@ static void apply_fh4_bad_fiber_data_bypass(void) {
   if (lstrcmpiW(base, L"ForzaHorizon4.exe") != 0)
     return;
 
-  /* Temporary downstream workaround. FH4 can inherit a bogus low-address
-   * FiberData value under Wine and crash before the D3D runtime is initialized.
-   * Remove this once Wine provides the proper loader/TEB behavior. */
+  /* this game can inherit a bogus low-address FiberData value under Wine and crash before the D3D runtime is initialized. */
   fiber_data = read_gs_qword(0x20);
   if (fiber_data && fiber_data < 0x10000)
     write_gs_qword(0x20, 0);

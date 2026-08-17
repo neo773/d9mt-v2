@@ -1,12 +1,3 @@
-/* d9mt v2 depth-test test: draws a near blue triangle (z=0.3), then a far red
- * triangle (z=0.7) over the exact same area, with the z-buffer enabled. Correct
- * depth testing rejects the later, farther red triangle, so the result is blue;
- * a broken/ignored depth state shows red (last draw wins).
- *
- * Exercises Phase 1 item 4 (depth/stencil into the pipeline): the device is
- * created with an auto depth-stencil surface, ZENABLE/ZWRITEENABLE drive the
- * Metal depth-stencil state, and the frame's depth attachment is cleared.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -106,8 +97,8 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  IDirect3DVertexBuffer9 *nearVb = makeTriangle(dev, 0.3f, 0xFF0000FF); /* blue */
-  IDirect3DVertexBuffer9 *farVb = makeTriangle(dev, 0.7f, 0xFFFF0000);  /* red */
+  IDirect3DVertexBuffer9 *nearVb = makeTriangle(dev, 0.3f, 0xFF0000FF);
+  IDirect3DVertexBuffer9 *farVb = makeTriangle(dev, 0.7f, 0xFFFF0000);
   if (!nearVb || !farVb)
     return 1;
 
@@ -136,8 +127,6 @@ int main(void) {
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
                            D3DCOLOR_XRGB(16, 16, 40), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
-    /* Near (blue) first, then far (red) over the same area: depth test must
-     * keep the near triangle on top. */
     IDirect3DDevice9_SetStreamSource(dev, 0, nearVb, 0, sizeof(struct Vertex));
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 1);
     IDirect3DDevice9_SetStreamSource(dev, 0, farVb, 0, sizeof(struct Vertex));

@@ -1,9 +1,3 @@
-/* d9mt addition: minimal winecrt0 replacement for building the PE side with
- * mingw against CrossOver (no wine build tree / libwinecrt0.a available).
- * Provides the three symbols wineunixlib.h expects, backed by the classic
- * ntdll mechanism (NtQueryVirtualMemory(MemoryWineUnixFuncs) + the ntdll
- * __wine_unix_call export) — the same proven pattern as d9mtmetal/d9mtair. */
-
 #include <windows.h>
 typedef LONG NTSTATUS;
 

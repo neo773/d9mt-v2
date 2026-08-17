@@ -50,4 +50,4 @@ void SHA1Final(uint8_t [SHA1_DIGEST_LENGTH], SHA1_CTX *);
 }
 #endif
 
-#endif /* _SHA1_H */
+#endif

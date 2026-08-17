@@ -1,6 +1,5 @@
 #pragma once
 
-// PHASE-C5: VkExtent2D -> MtlExtent2D. Otherwise pure D3D9 surface wrapper.
 #include "d3d9_subresource.h"
 
 #include "d3d9_common_texture.h"

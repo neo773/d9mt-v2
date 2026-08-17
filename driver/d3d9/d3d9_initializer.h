@@ -1,11 +1,5 @@
 #pragma once
 
-// PHASE-C6: ported off Vulkan onto the Mtl seam.
-//   Rc<DxvkDevice>  -> Rc<MtlDevice>
-//   DxvkBufferSlice -> MtlBufferSlice
-//   DxvkCsChunkRef  -> KEEP (cs/dxvk_cs.h)
-// InitDeviceLocal*/InitHostVisible* bodies (d3d9_initializer.cpp) do the semantic
-// upload rewrite; this header is a token retype.
 #include "d3d9_common_buffer.h"
 #include "d3d9_common_texture.h"
 
@@ -13,13 +7,6 @@ namespace dxvk {
 
     class D3D9DeviceEx;
 
-  /**
-   * \brief Resource initialization context
-   *
-   * Manages a context which is used for resource
-   * initialization. This includes
-   * zero-initialization for buffers and images.
-   */
   class D3D9Initializer {
     constexpr static size_t MaxTransferMemory    = 32 * 1024 * 1024;
     constexpr static size_t MaxTransferCommands  = 512;

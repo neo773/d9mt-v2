@@ -1,8 +1,3 @@
-/* d9mt v2 triangle-strip test: draws a quad as a 4-vertex D3DPT_TRIANGLESTRIP.
- * Correct strip topology forms two triangles covering the whole quad (solid
- * green rectangle); if the primitive type is ignored and treated as a triangle
- * list, only the first three vertices draw (a single triangle).
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -63,7 +58,6 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  /* Strip order: TL, BL, TR, BR -> tri(TL,BL,TR) + tri(TR,BL,BR) = full quad. */
   static const struct Vertex strip[4] = {
       {-0.7f, 0.7f, 0.5f, 0xFF00FF00}, {-0.7f, -0.7f, 0.5f, 0xFF00FF00},
       {0.7f, 0.7f, 0.5f, 0xFF00FF00},  {0.7f, -0.7f, 0.5f, 0xFF00FF00}};

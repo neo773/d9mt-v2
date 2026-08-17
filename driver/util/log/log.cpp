@@ -6,56 +6,54 @@
 
 namespace dxvk {
 
-  // out-of-line definition for the static instance (missing in this fork's
-  // layout; required for linking — see EXTRACTION-LOG.md)
   Logger Logger::s_instance = { "d3d9.log" };
-  
+
   Logger::Logger(const std::string& fileName)
   : m_minLevel(getMinLogLevel()), m_fileName(fileName) {
 
   }
-  
-  
+
+
   Logger::~Logger() { }
-  
-  
+
+
   void Logger::trace(const std::string& message) {
     s_instance.emitMsg(LogLevel::Trace, message);
   }
-  
-  
+
+
   void Logger::debug(const std::string& message) {
     s_instance.emitMsg(LogLevel::Debug, message);
   }
-  
-  
+
+
   void Logger::info(const std::string& message) {
     s_instance.emitMsg(LogLevel::Info, message);
   }
-  
-  
+
+
   void Logger::warn(const std::string& message) {
     s_instance.emitMsg(LogLevel::Warn, message);
   }
-  
-  
+
+
   void Logger::err(const std::string& message) {
     s_instance.emitMsg(LogLevel::Error, message);
   }
-  
-  
+
+
   void Logger::log(LogLevel level, const std::string& message) {
     s_instance.emitMsg(level, message);
   }
-  
-  
+
+
   void Logger::emitMsg(LogLevel level, const std::string& message) {
     if (level >= m_minLevel) {
       std::lock_guard<dxvk::mutex> lock(m_mutex);
-      
+
       static std::array<const char*, 5> s_prefixes
         = {{ "trace: ", "debug: ", "info:  ", "warn:  ", "err:   " }};
-      
+
       const char* prefix = s_prefixes.at(static_cast<uint32_t>(level));
 
       if (!std::exchange(m_initialized, true)) {
@@ -83,10 +81,6 @@ namespace dxvk {
         if (!adjusted.empty()) {
 #ifdef _WIN32
           if (m_wineLogOutput) {
-            // __wine_dbg_output tries to buffer lines up to 1020 characters
-            // including null terminator, and will cause a hang if we submit
-            // anything longer than that even in consecutive calls. Work
-            // around this by splitting long lines into multiple lines.
             constexpr size_t MaxDebugBufferLength = 1018;
 
             if (adjusted.size() <= MaxDebugBufferLength) {
@@ -107,11 +101,7 @@ namespace dxvk {
             }
           }
 
-          // Don't log anything to stderr if we're not on wine. Usually games are
-          // compiled as gui apps anyway, and emitting anything to the standard
-          // output streams can crash certain games.
 #else
-          // For native builds, logging to stderr should be fine.
           std::cerr << adjusted;
 #endif
         }
@@ -123,16 +113,15 @@ namespace dxvk {
       }
     }
   }
-  
-  
+
+
   std::string Logger::getFileName(const std::string& base) {
     std::string path = env::getEnvVar("DXVK_LOG_PATH");
-    
+
     if (path == "none")
       return std::string();
 
 #ifdef _WIN32
-    // Don't create a log file if we're writing to wine's console output
     if (path.empty() && m_wineLogOutput)
       return std::string();
 #endif
@@ -155,15 +144,15 @@ namespace dxvk {
       { "error", LogLevel::Error },
       { "none",  LogLevel::None  },
     }};
-    
+
     const std::string logLevelStr = env::getEnvVar("DXVK_LOG_LEVEL");
-    
+
     for (const auto& pair : logLevels) {
       if (logLevelStr == pair.first)
         return pair.second;
     }
-    
+
     return LogLevel::Info;
   }
-  
+
 }

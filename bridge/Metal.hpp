@@ -1341,4 +1341,4 @@ InitializeTileRenderPipelineInfo(WMTTileRenderPipelineInfo &info) {
   info.fail_on_binary_archive_miss = false;
 }
 
-} // namespace WMT
+}

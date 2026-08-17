@@ -5,8 +5,6 @@
 namespace dxvk::wsi {
 
   std::vector<const char *> Win32WsiDriver::getInstanceExtensions() {
-    // PHASE-C: returned the Vulkan WSI surface extensions (VK_KHR_*surface). The
-    // Metal present path (CAMetalLayer) needs no instance extensions — empty set.
     return { };
   }
 

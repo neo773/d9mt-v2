@@ -7,37 +7,17 @@
 #include "util_time.h"
 
 namespace dxvk {
-  
-  /**
-   * \brief Frame rate limiter
-   *
-   * Provides functionality to stall an application
-   * thread in order to maintain a given frame rate.
-   */
+
   class FpsLimiter {
 
   public:
 
-    /**
-     * \brief Creates frame rate limiter
-     */
     FpsLimiter();
 
     ~FpsLimiter();
 
-    /**
-     * \brief Sets target frame rate
-     * \param [in] frameRate Target frame rate
-     */
     void setTargetFrameRate(double frameRate, uint32_t maxLatency);
 
-    /**
-     * \brief Stalls calling thread as necessary
-     *
-     * Blocks the calling thread if the limiter is enabled
-     * and the time since the last call to \ref delay is
-     * shorter than the target interval.
-     */
     void delay();
 
   private:

@@ -47,8 +47,6 @@ namespace dxvk {
     m_displayIndex    (DisplayIndex),
     m_modeCacheFormat (D3D9Format::Unknown) {
     CacheIdentifierInfo();
-    // D3D9MtlFormatTable needs to be constructed after we've cached the
-    // identifier info and determined the proper vendorID to be used.
     m_d3d9Formats = std::make_unique<D3D9MtlFormatTable>(this, m_parent->GetOptions());
 
     if (p9On12Args)
@@ -77,15 +75,15 @@ namespace dxvk {
     std::string displayName = str::fromws(wideDisplayName);
 
     copyToStringArray(pIdentifier->Description, m_deviceDesc.c_str());
-    copyToStringArray(pIdentifier->DeviceName,  displayName.c_str());    // The GDI device name. Not the actual device name.
-    copyToStringArray(pIdentifier->Driver,      m_deviceDriver.c_str()); // This is the driver's dll.
+    copyToStringArray(pIdentifier->DeviceName,  displayName.c_str());
+    copyToStringArray(pIdentifier->Driver,      m_deviceDriver.c_str());
 
     pIdentifier->DeviceIdentifier       = m_deviceGuid;
     pIdentifier->DeviceId               = m_deviceId;
     pIdentifier->VendorId               = m_vendorId;
     pIdentifier->Revision               = 0;
     pIdentifier->SubSysId               = 0;
-    pIdentifier->WHQLLevel              = m_parent->IsExtended() ? 1 : 0; // This doesn't check with the driver on Direct3D9Ex and is always 1.
+    pIdentifier->WHQLLevel              = m_parent->IsExtended() ? 1 : 0;
     pIdentifier->DriverVersion.QuadPart = INT64_MAX;
 
     return D3D_OK;
@@ -141,11 +139,9 @@ namespace dxvk {
     if (ds && !isDepthStencilFormat)
       return D3DERR_NOTAVAILABLE;
 
-    // Offscreen plain surfaces must only use lockable depth stencil formats
     if (surface && !(rt || ds) && isDepthStencilFormat && !isLockableDepthStencilFormat)
       return D3DERR_NOTAVAILABLE;
 
-    // Volume textures can not be used as render targets
     if (rt && volumeTexture)
       return D3DERR_NOTAVAILABLE;
 
@@ -154,62 +150,44 @@ namespace dxvk {
     if (unlikely(rt && CheckFormat == D3D9Format::A8 && options.disableA8RT))
       return D3DERR_NOTAVAILABLE;
 
-    // NULL RT format hack (supported across all
-    // vendors, and also advertised in D3D8)
     if (unlikely(rt && CheckFormat == D3D9Format::NULL_FORMAT && twoDimensional))
       return D3D_OK;
 
-    // AMD/Intel's driver hack for RESZ
-    // (also advertised in D3D8 by AMD drivers,
-    // not advertised at all by modern Intel drivers)
     if (unlikely(rt && CheckFormat == D3D9Format::RESZ && surface))
       return isAmd
         ? D3D_OK
         : D3DERR_NOTAVAILABLE;
 
-    // Nvidia/Intel's driver hack for ATOC
     if (unlikely(CheckFormat == D3D9Format::ATOC && surface))
       return (!isD3D8Compatible && !isAmd)
         ? D3D_OK
         : D3DERR_NOTAVAILABLE;
 
-    // Nvidia's driver hack for SSAA (supported on Nvidia
-    // drivers, ever since the GeForce 6 series)
     if (unlikely(CheckFormat == D3D9Format::SSAA && surface)) {
       if (!isD3D8Compatible && isNvidia)
         Logger::warn("D3D9Adapter::CheckDeviceFormat: Transparency supersampling (SSAA) is unsupported");
       return D3DERR_NOTAVAILABLE;
     }
 
-    // Nvidia specific depth bounds test hack
-    // (supported ever since the GeForce 6 series)
     if (unlikely(CheckFormat == D3D9Format::NVDB && surface))
-      // PHASE-E: Metal has no depth-bounds test; NVDB hack never advertised.
       return (!isD3D8Compatible && false && isNvidia)
         ? D3D_OK
         : D3DERR_NOTAVAILABLE;
 
-    // AMD specific render to vertex buffer hack
-    // (not supported on modern AMD drivers)
     if (unlikely(CheckFormat == D3D9Format::R2VB && surface)) {
       if (!isD3D8Compatible && isAmd)
         Logger::info("D3D9Adapter::CheckDeviceFormat: Render to vertex buffer (R2VB) is unsupported");
       return D3DERR_NOTAVAILABLE;
     }
 
-    // AMD specific INST (geometry instancing)
-    // hack for SM2-only capable cards
     if (unlikely(CheckFormat == D3D9Format::INST && surface))
       return (!isD3D8Compatible && isAmd)
         ? D3D_OK
         : D3DERR_NOTAVAILABLE;
 
-    // AMD/Nvidia CENT(roid) hack (not advertised
-    // by either AMD or Nvidia drivers)
     if (unlikely(CheckFormat == D3D9Format::CENT && surface))
       return D3DERR_NOTAVAILABLE;
 
-    // I really don't want to support this...
     if (unlikely(Usage & D3DUSAGE_DMAP)) {
       Logger::warn("D3D9Adapter::CheckDeviceFormat: D3DUSAGE_DMAP is unsupported");
       return D3DERR_NOTAVAILABLE;
@@ -228,12 +206,6 @@ namespace dxvk {
      && !options.supportCubeDepthFormats)
       return D3DERR_NOTAVAILABLE;
 
-    // PHASE-E: the DxvkAdapter::getFormatFeatures probe (CheckDeviceVkFormat) is
-    // dropped — no VkFormat on Metal. The D3D9_MTL_FORMAT_MAPPING above already
-    // encodes "this format has a Metal equivalent"; on Apple GPUs the standard
-    // color/depth/sampled/RT usages are universally supported for the mapped
-    // formats, so a valid mapping is treated as supported. Autogen mipmaps are
-    // advertised as available (blit generateMipmaps path).
     return D3D_OK;
   }
 
@@ -254,8 +226,7 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     auto dst = ConvertFormatUnfixed(SurfaceFormat);
-    // Wargame: European Escalation expects a D3DMULTISAMPLE_NONE
-    // NULL format check to succeed, otherwise it will crash
+    // Some titles expect a D3DMULTISAMPLE_NONE NULL format check to succeed, else they crash.
     if (SurfaceFormat != D3D9Format::NULL_FORMAT && dst.FormatColor == MtlFormat::Invalid)
       return D3DERR_NOTAVAILABLE;
 
@@ -273,15 +244,11 @@ namespace dxvk {
 
     uint32_t sampleCount = std::max<uint32_t>(MultiSampleType, 1u);
 
-    // Check if this is a power of two...
     if (sampleCount & (sampleCount - 1))
       return D3DERR_NOTAVAILABLE;
 
-    // PHASE-E: Metal reports a single MSAA sample-count ceiling per device
-    // (supportsTextureSampleCount:) that applies to both color and depth 2D
-    // targets — there is no per-format framebufferColor/DepthSampleCounts split
-    // as in Vulkan. availableFlags is the bitmask of power-of-two sample counts
-    // {1,2,4,8,...} up to that ceiling; D3D9 only uses MSAA with 2D textures.
+    // Metal exposes one MSAA sample-count ceiling per device, shared by color and depth,
+    // unlike Vulkan's per-format split.
     const uint32_t maxSamples = std::max(1u, m_caps.maxSampleCount);
     uint32_t availableFlags = 0u;
     for (uint32_t s = 1u; s <= maxSamples; s <<= 1)
@@ -334,7 +301,6 @@ namespace dxvk {
     bool targetSupported = TargetFormat == D3D9Format::X1R5G5B5
                         || TargetFormat == D3D9Format::A1R5G5B5
                         || TargetFormat == D3D9Format::R5G6B5
-                     // || TargetFormat == D3D9Format::R8G8B8 <-- We don't support R8G8B8
                         || TargetFormat == D3D9Format::X8R8G8B8
                         || TargetFormat == D3D9Format::A8R8G8B8
                         || TargetFormat == D3D9Format::A2R10G10B10
@@ -370,61 +336,41 @@ namespace dxvk {
 
     const uint32_t maxShaderModel = m_parent->IsD3D8Compatible() ? std::min(1u, options.shaderModel) : options.shaderModel;
 
-    // TODO: Actually care about what the adapter supports here.
-    // ^ For Intel and older cards most likely here.
 
-    // Device Type
     pCaps->DeviceType               = DeviceType;
-    // Adapter Id
     pCaps->AdapterOrdinal           = m_ordinal;
-    // Caps 1
     pCaps->Caps                     = D3DCAPS_READ_SCANLINE;
-    // Caps 2
     pCaps->Caps2                    = D3DCAPS2_FULLSCREENGAMMA
-                                 /* | D3DCAPS2_CANCALIBRATEGAMMA */
-                                 /* | D3DCAPS2_RESERVED */
-                                 /* | D3DCAPS2_CANMANAGERESOURCE */
                                     | D3DCAPS2_DYNAMICTEXTURES
                                     | D3DCAPS2_CANAUTOGENMIPMAP
-                                 /* | D3DCAPS2_CANSHARERESOURCE */;
-    // Caps 3
+                                 ;
     pCaps->Caps3                    = D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD
                                     | D3DCAPS3_LINEAR_TO_SRGB_PRESENTATION
                                     | D3DCAPS3_COPY_TO_VIDMEM
                                     | D3DCAPS3_COPY_TO_SYSTEMMEM
-                                 /* | D3DCAPS3_DXVAHD */
-                                 /* | D3DCAPS3_DXVAHD_LIMITED */;
-    // Presentation Intervals
+                                 ;
     pCaps->PresentationIntervals    = D3DPRESENT_INTERVAL_DEFAULT
                                     | D3DPRESENT_INTERVAL_ONE
                                     | D3DPRESENT_INTERVAL_TWO
                                     | D3DPRESENT_INTERVAL_THREE
                                     | D3DPRESENT_INTERVAL_FOUR
                                     | D3DPRESENT_INTERVAL_IMMEDIATE;
-    // Cursor
     pCaps->CursorCaps               = D3DCURSORCAPS_COLOR;
-    // Dev Caps
     pCaps->DevCaps                  = D3DDEVCAPS_EXECUTESYSTEMMEMORY
                                     | D3DDEVCAPS_EXECUTEVIDEOMEMORY
                                     | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY
                                     | D3DDEVCAPS_TLVERTEXVIDEOMEMORY
-                                 /* | D3DDEVCAPS_TEXTURESYSTEMMEMORY */
                                     | D3DDEVCAPS_TEXTUREVIDEOMEMORY
                                     | D3DDEVCAPS_DRAWPRIMTLVERTEX
                                     | D3DDEVCAPS_CANRENDERAFTERFLIP
                                     | D3DDEVCAPS_TEXTURENONLOCALVIDMEM
                                     | D3DDEVCAPS_DRAWPRIMITIVES2
-                                 /* | D3DDEVCAPS_SEPARATETEXTUREMEMORIES */
                                     | D3DDEVCAPS_DRAWPRIMITIVES2EX
                                     | D3DDEVCAPS_HWTRANSFORMANDLIGHT
                                     | D3DDEVCAPS_CANBLTSYSTONONLOCAL
                                     | D3DDEVCAPS_HWRASTERIZATION
                                     | D3DDEVCAPS_PUREDEVICE
-                                 /* | D3DDEVCAPS_QUINTICRTPATCHES */
-                                 /* | D3DDEVCAPS_RTPATCHES */
-                                 /* | D3DDEVCAPS_RTPATCHHANDLEZERO */
-                                 /* | D3DDEVCAPS_NPATCHES */;
-    // Primitive Misc. Caps
+                                 ;
     pCaps->PrimitiveMiscCaps        = D3DPMISCCAPS_MASKZ
                                     | D3DPMISCCAPS_CULLNONE
                                     | D3DPMISCCAPS_CULLCW
@@ -434,7 +380,6 @@ namespace dxvk {
                                     | D3DPMISCCAPS_CLIPTLVERTS
                                     | D3DPMISCCAPS_TSSARGTEMP
                                     | D3DPMISCCAPS_BLENDOP
-                                 /* | D3DPMISCCAPS_NULLREFERENCE */
                                     | D3DPMISCCAPS_INDEPENDENTWRITEMASKS
                                     | D3DPMISCCAPS_PERSTAGECONSTANT
                                     | D3DPMISCCAPS_FOGANDSPECULARALPHA
@@ -443,24 +388,20 @@ namespace dxvk {
                                     | D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING
                                     | D3DPMISCCAPS_FOGVERTEXCLAMPED
                                     | D3DPMISCCAPS_POSTBLENDSRGBCONVERT;
-    // Raster Caps
     pCaps->RasterCaps               = D3DPRASTERCAPS_DITHER
                                     | D3DPRASTERCAPS_ZTEST
                                     | D3DPRASTERCAPS_FOGVERTEX
                                     | D3DPRASTERCAPS_FOGTABLE
                                     | D3DPRASTERCAPS_MIPMAPLODBIAS
-                                 /* | D3DPRASTERCAPS_ZBUFFERLESSHSR */
                                     | D3DPRASTERCAPS_FOGRANGE
                                     | D3DPRASTERCAPS_ANISOTROPY
-                                 /* | D3DPRASTERCAPS_WBUFFER */
                                     | D3DPRASTERCAPS_WFOG
                                     | D3DPRASTERCAPS_ZFOG
                                     | D3DPRASTERCAPS_COLORPERSPECTIVE
                                     | D3DPRASTERCAPS_SCISSORTEST
                                     | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS
                                     | D3DPRASTERCAPS_DEPTHBIAS
-                                    | D3DPRASTERCAPS_MULTISAMPLE_TOGGLE; // <-- TODO! (but difficult in Vk)
-    // Z Comparison Caps
+                                    | D3DPRASTERCAPS_MULTISAMPLE_TOGGLE;
     pCaps->ZCmpCaps                 = D3DPCMPCAPS_NEVER
                                     | D3DPCMPCAPS_LESS
                                     | D3DPCMPCAPS_EQUAL
@@ -469,7 +410,6 @@ namespace dxvk {
                                     | D3DPCMPCAPS_NOTEQUAL
                                     | D3DPCMPCAPS_GREATEREQUAL
                                     | D3DPCMPCAPS_ALWAYS;
-    // Source Blend Caps
     pCaps->SrcBlendCaps             = D3DPBLENDCAPS_ZERO
                                     | D3DPBLENDCAPS_ONE
                                     | D3DPBLENDCAPS_SRCCOLOR
@@ -485,93 +425,63 @@ namespace dxvk {
                                     | D3DPBLENDCAPS_BOTHINVSRCALPHA
                                     | D3DPBLENDCAPS_BLENDFACTOR;
 
-    // Only 9Ex devices advertise D3DPBLENDCAPS_SRCCOLOR2 and D3DPBLENDCAPS_INVSRCCOLOR2
     if (m_parent->IsExtended())
       pCaps->SrcBlendCaps          |= D3DPBLENDCAPS_SRCCOLOR2
                                     | D3DPBLENDCAPS_INVSRCCOLOR2;
 
-    // Destination Blend Caps
     pCaps->DestBlendCaps            = pCaps->SrcBlendCaps;
-    // Alpha Comparison Caps
     pCaps->AlphaCmpCaps             = pCaps->ZCmpCaps;
-    // Shade Caps
     pCaps->ShadeCaps                = D3DPSHADECAPS_COLORGOURAUDRGB
                                     | D3DPSHADECAPS_SPECULARGOURAUDRGB
                                     | D3DPSHADECAPS_ALPHAGOURAUDBLEND
                                     | D3DPSHADECAPS_FOGGOURAUD;
-    // Texture Caps
     pCaps->TextureCaps              = D3DPTEXTURECAPS_PERSPECTIVE
-                                 /* | D3DPTEXTURECAPS_POW2 */
                                     | D3DPTEXTURECAPS_ALPHA
-                                 /* | D3DPTEXTURECAPS_SQUAREONLY */
                                     | D3DPTEXTURECAPS_TEXREPEATNOTSCALEDBYSIZE
                                     | D3DPTEXTURECAPS_ALPHAPALETTE
-                                 /* | D3DPTEXTURECAPS_NONPOW2CONDITIONAL */
                                     | D3DPTEXTURECAPS_PROJECTED
                                     | D3DPTEXTURECAPS_CUBEMAP
                                     | D3DPTEXTURECAPS_VOLUMEMAP
                                     | D3DPTEXTURECAPS_MIPMAP
                                     | D3DPTEXTURECAPS_MIPVOLUMEMAP
                                     | D3DPTEXTURECAPS_MIPCUBEMAP
-                                 /* | D3DPTEXTURECAPS_CUBEMAP_POW2 */
-                                 /* | D3DPTEXTURECAPS_VOLUMEMAP_POW2 */
-                                 /* | D3DPTEXTURECAPS_NOPROJECTEDBUMPENV */;
-    // Texture Filter Caps
+                                 ;
     pCaps->TextureFilterCaps        = D3DPTFILTERCAPS_MINFPOINT
                                     | D3DPTFILTERCAPS_MINFLINEAR
                                     | D3DPTFILTERCAPS_MINFANISOTROPIC
-                                 /* | D3DPTFILTERCAPS_MINFPYRAMIDALQUAD */
-                                 /* | D3DPTFILTERCAPS_MINFGAUSSIANQUAD */
                                     | D3DPTFILTERCAPS_MIPFPOINT
                                     | D3DPTFILTERCAPS_MIPFLINEAR
-                                 /* | D3DPTFILTERCAPS_CONVOLUTIONMONO */
                                     | D3DPTFILTERCAPS_MAGFPOINT
                                     | D3DPTFILTERCAPS_MAGFLINEAR
                                     | D3DPTFILTERCAPS_MAGFANISOTROPIC
-                                 /* | D3DPTFILTERCAPS_MAGFPYRAMIDALQUAD */
-                                 /* | D3DPTFILTERCAPS_MAGFGAUSSIANQUAD */;
-    // Cube Texture Filter Caps
+                                 ;
     pCaps->CubeTextureFilterCaps    = pCaps->TextureFilterCaps;
-    // Volume Texture Filter Caps
     pCaps->VolumeTextureFilterCaps  = pCaps->TextureFilterCaps;
-    // Texture Address Caps
     pCaps->TextureAddressCaps       = D3DPTADDRESSCAPS_WRAP
                                     | D3DPTADDRESSCAPS_MIRROR
                                     | D3DPTADDRESSCAPS_CLAMP
                                     | D3DPTADDRESSCAPS_BORDER
                                     | D3DPTADDRESSCAPS_INDEPENDENTUV
                                     | D3DPTADDRESSCAPS_MIRRORONCE;
-    // Volume Texture Address Caps
     pCaps->VolumeTextureAddressCaps = pCaps->TextureAddressCaps;
-    // Line Caps
     pCaps->LineCaps                 = D3DLINECAPS_TEXTURE
                                     | D3DLINECAPS_ZTEST
                                     | D3DLINECAPS_BLEND
                                     | D3DLINECAPS_ALPHACMP
                                     | D3DLINECAPS_FOG
-                                    | D3DLINECAPS_ANTIALIAS; //<-- Lying about doing AA lines here, we don't *fully* support that.
-    // Max Texture Width
+                                    | D3DLINECAPS_ANTIALIAS;
     pCaps->MaxTextureWidth          = MaxTextureDimension;
-    // Max Texture Height
     pCaps->MaxTextureHeight         = MaxTextureDimension;
-    // Max Volume Extent
     pCaps->MaxVolumeExtent          = 8192;
-    // Max Texture Repeat
     pCaps->MaxTextureRepeat         = 8192;
-    // Max Texture Aspect Ratio
     pCaps->MaxTextureAspectRatio    = 8192;
-    // Max Anisotropy
     pCaps->MaxAnisotropy            = 16;
-    // Max Vertex W
     pCaps->MaxVertexW               = 1e10f;
-    // Guard Bands
     pCaps->GuardBandLeft            = -32768.0f;
     pCaps->GuardBandTop             = -32768.0f;
     pCaps->GuardBandRight           =  32768.0f;
     pCaps->GuardBandBottom          =  32768.0f;
-    // Extents Adjust
     pCaps->ExtentsAdjust            = 0.0f;
-    // Stencil Caps
     pCaps->StencilCaps              = D3DSTENCILCAPS_KEEP
                                     | D3DSTENCILCAPS_ZERO
                                     | D3DSTENCILCAPS_REPLACE
@@ -581,11 +491,8 @@ namespace dxvk {
                                     | D3DSTENCILCAPS_INCR
                                     | D3DSTENCILCAPS_DECR
                                     | D3DSTENCILCAPS_TWOSIDED;
-    // FVF Caps
     pCaps->FVFCaps                  = (MaxSimultaneousTextures & D3DFVFCAPS_TEXCOORDCOUNTMASK)
-                                 /* | D3DFVFCAPS_DONOTSTRIPELEMENTS */
                                     | D3DFVFCAPS_PSIZE;
-    // Texture Op Caps
     pCaps->TextureOpCaps            = D3DTEXOPCAPS_DISABLE
                                     | D3DTEXOPCAPS_SELECTARG1
                                     | D3DTEXOPCAPS_SELECTARG2
@@ -612,11 +519,8 @@ namespace dxvk {
                                     | D3DTEXOPCAPS_DOTPRODUCT3
                                     | D3DTEXOPCAPS_MULTIPLYADD
                                     | D3DTEXOPCAPS_LERP;
-    // Max Texture Blend Stages
     pCaps->MaxTextureBlendStages    = MaxTextureBlendStages;
-    // Max Simultaneous Textures
     pCaps->MaxSimultaneousTextures  = MaxSimultaneousTextures;
-    // Vertex Processing Caps
     pCaps->VertexProcessingCaps      = D3DVTXPCAPS_TEXGEN
                                      | D3DVTXPCAPS_MATERIALSOURCE7
                                      | D3DVTXPCAPS_DIRECTIONALLIGHTS
@@ -624,61 +528,35 @@ namespace dxvk {
                                      | D3DVTXPCAPS_LOCALVIEWER
                                      | D3DVTXPCAPS_TWEENING
                                      | D3DVTXPCAPS_TEXGEN_SPHEREMAP
-                                  /* | D3DVTXPCAPS_NO_TEXGEN_NONLOCALVIEWER*/;
-    // Max Active Lights
+                                  ;
     pCaps->MaxActiveLights           = caps::MaxEnabledLights;
-    // Max User Clip Planes
     pCaps->MaxUserClipPlanes         = MaxClipPlanes;
-    // Max Vertex Blend Matrices
     pCaps->MaxVertexBlendMatrices    = 4;
-    // Max Vertex Blend Matrix Index
     pCaps->MaxVertexBlendMatrixIndex = 0;
-    // Max Point Size
     pCaps->MaxPointSize              = m_caps.maxPointSize;
-    // Max Primitive Count
     pCaps->MaxPrimitiveCount         = 0x00555555;
-    // Max Vertex Index
     pCaps->MaxVertexIndex            = 0x00ffffff;
-    // Max Streams
     pCaps->MaxStreams                = MaxStreams;
-    // Max Stream Stride
-    pCaps->MaxStreamStride           = 508; // bytes
+    pCaps->MaxStreamStride           = 508;
 
-    // Late fixed-function capable cards, such as the GeForce 4 MX series,
-    // expose support for VS 1.1, while not advertising any PS support
     const uint32_t majorVersionVS = maxShaderModel == 0 ? 1 : maxShaderModel;
     const uint32_t majorVersionPS = maxShaderModel;
-    // Max supported SM1 is VS 1.1 and PS 1.4
     const uint32_t minorVersionVS = majorVersionVS != 1 ? 0 : 1;
     const uint32_t minorVersionPS = majorVersionPS != 1 ? 0 : 4;
 
-    // Shader Versions
     pCaps->VertexShaderVersion = D3DVS_VERSION(majorVersionVS, minorVersionVS);
     pCaps->PixelShaderVersion  = D3DPS_VERSION(majorVersionPS, minorVersionPS);
 
-    // Max Vertex Shader Const
     pCaps->MaxVertexShaderConst       = MaxFloatConstantsVS;
-    // Max PS1 Value
     pCaps->PixelShader1xMaxValue      = maxShaderModel > 0 ? std::numeric_limits<float>::max() : 0.0f;
-    // Dev Caps 2
     pCaps->DevCaps2                   = D3DDEVCAPS2_STREAMOFFSET
-                                   /* | D3DDEVCAPS2_DMAPNPATCH */
-                                   /* | D3DDEVCAPS2_ADAPTIVETESSRTPATCH */
-                                   /* | D3DDEVCAPS2_ADAPTIVETESSNPATCH */
                                       | D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES
-                                   /* | D3DDEVCAPS2_PRESAMPLEDDMAPNPATCH */
                                       | D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET;
-    // Max N Patch Tesselation Level
     pCaps->MaxNpatchTessellationLevel = 0.0f;
-    // Reserved for... something
     pCaps->Reserved5                  = 0;
-    // Master adapter for us is adapter 0, atm...
     pCaps->MasterAdapterOrdinal       = 0;
-    // The group of adapters this one is in
     pCaps->AdapterOrdinalInGroup      = 0;
-    // Number of adapters in current group
     pCaps->NumberOfAdaptersInGroup    = 1;
-    // Decl Type Caps
     pCaps->DeclTypes                  = D3DDTCAPS_UBYTE4
                                       | D3DDTCAPS_UBYTE4N
                                       | D3DDTCAPS_SHORT2N
@@ -689,22 +567,12 @@ namespace dxvk {
                                       | D3DDTCAPS_DEC3N
                                       | D3DDTCAPS_FLOAT16_2
                                       | D3DDTCAPS_FLOAT16_4;
-    // Number of simultaneous RTs
     pCaps->NumSimultaneousRTs         = MaxSimultaneousRenderTargets;
-    // Possible StretchRect filters
     pCaps->StretchRectFilterCaps      = D3DPTFILTERCAPS_MINFPOINT
                                       | D3DPTFILTERCAPS_MINFLINEAR
-                                   /* | D3DPTFILTERCAPS_MINFANISOTROPIC */
-                                   /* | D3DPTFILTERCAPS_MINFPYRAMIDALQUAD */
-                                   /* | D3DPTFILTERCAPS_MINFGAUSSIANQUAD */
-                                   /* | D3DPTFILTERCAPS_MIPFPOINT */
-                                   /* | D3DPTFILTERCAPS_MIPFLINEAR */
-                                   /* | D3DPTFILTERCAPS_CONVOLUTIONMONO */
                                       | D3DPTFILTERCAPS_MAGFPOINT
                                       | D3DPTFILTERCAPS_MAGFLINEAR
-                                   /* | D3DPTFILTERCAPS_MAGFANISOTROPIC */
-                                   /* | D3DPTFILTERCAPS_MAGFPYRAMIDALQUAD */
-                                   /* | D3DPTFILTERCAPS_MAGFGAUSSIANQUAD */;
+                                   ;
 
     pCaps->VS20Caps.Caps                     = maxShaderModel >= 2 ? D3DVS20CAPS_PREDICATION : 0;
     pCaps->VS20Caps.DynamicFlowControlDepth  = maxShaderModel >= 2 ? D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH : 0;
@@ -721,20 +589,11 @@ namespace dxvk {
     pCaps->PS20Caps.StaticFlowControlDepth   = maxShaderModel >= 2 ? D3DPS20_MAX_STATICFLOWCONTROLDEPTH : 0;
     pCaps->PS20Caps.NumInstructionSlots      = maxShaderModel >= 2 ? D3DPS20_MAX_NUMINSTRUCTIONSLOTS : 0;
 
-    // Vertex texture samplers are only available as part of SM3, the caps are 0 otherwise.
     pCaps->VertexTextureFilterCaps           = maxShaderModel == 3 ? D3DPTFILTERCAPS_MINFPOINT
                                                                    | D3DPTFILTERCAPS_MINFLINEAR
-                                                                /* | D3DPTFILTERCAPS_MINFANISOTROPIC */
-                                                                /* | D3DPTFILTERCAPS_MINFPYRAMIDALQUAD */
-                                                                /* | D3DPTFILTERCAPS_MINFGAUSSIANQUAD */
-                                                                /* | D3DPTFILTERCAPS_MIPFPOINT */
-                                                                /* | D3DPTFILTERCAPS_MIPFLINEAR */
-                                                                /* | D3DPTFILTERCAPS_CONVOLUTIONMONO */
                                                                    | D3DPTFILTERCAPS_MAGFPOINT
                                                                    | D3DPTFILTERCAPS_MAGFLINEAR
-                                                                /* | D3DPTFILTERCAPS_MAGFANISOTROPIC */
-                                                                /* | D3DPTFILTERCAPS_MAGFPYRAMIDALQUAD */
-                                                                /* | D3DPTFILTERCAPS_MAGFGAUSSIANQUAD */ : 0;
+                                                                 : 0;
 
     pCaps->MaxVShaderInstructionsExecuted    = maxShaderModel >= 2 ? 4294967295 : 0;
     pCaps->MaxPShaderInstructionsExecuted    = maxShaderModel >= 2 ? 4294967295 : 0;
@@ -755,7 +614,6 @@ namespace dxvk {
     if (pFilter == nullptr)
       return 0;
 
-    // We don't offer any interlaced formats here so early out and avoid destroying mode cache.
     if (pFilter->ScanLineOrdering == D3DSCANLINEORDERING_INTERLACED)
       return 0;
 
@@ -782,9 +640,6 @@ namespace dxvk {
 
     CacheModes(format);
 
-    // We don't return any scanline orderings that aren't progressive,
-    // The format filtering is already handled for us by cache modes
-    // So we can early out here and then just index.
     if (pFilter->ScanLineOrdering == D3DSCANLINEORDERING_INTERLACED)
       return D3DERR_INVALIDCALL;
 
@@ -825,9 +680,6 @@ namespace dxvk {
     if (pLUID == nullptr)
       return D3DERR_INVALIDCALL;
 
-    // PHASE-E: Metal exposes no device LUID; synthesize one from the ordinal
-    // (same fallback DXVK uses when VkPhysicalDeviceIDProperties.deviceLUIDValid
-    // is false).
     *pLUID = dxvk::GetAdapterLUID(m_ordinal);
 
     return D3D_OK;
@@ -849,28 +701,20 @@ namespace dxvk {
   }
 
 
-  // PHASE-C7: CheckDeviceVkFormat(VkFormat,...) DROPPED — no VkFormat on Metal.
-  // CheckDeviceFormat now decides support directly from D3D9_MTL_FORMAT_MAPPING.
-
-
   void D3D9Adapter::CacheModes(D3D9Format Format) {
     if (!m_modes.empty() && m_modeCacheFormat == Format)
-      return; // We already cached the modes for this format. No need to do it again.
+      return;
 
     m_modes.clear();
     m_modeCacheFormat = Format;
 
-    // Skip unsupported formats
     if (!IsSupportedModeFormat(Format))
       return;
 
     auto& options = m_parent->GetOptions();
 
-    // Filter the modes considering the config option filters.
     FilterModesByFormat(Format, true);
 
-    // If no modes are returned based on the previous filtered
-    // search, then fall back to an unfiltered search.
     if (unlikely((!options.forceAspectRatio.empty()
                 || options.forceRefreshRate
                 || options.modeCountCompatibility) && !m_modes.size())) {
@@ -878,9 +722,6 @@ namespace dxvk {
       FilterModesByFormat(Format, false);
     }
 
-    // Sort display modes by width, height and refresh rate (descending), in that order.
-    // Some games rely on correct ordering, e.g. Prince of Persia (2008) expects the highest
-    // refresh rate to be listed first for a particular resolution.
     std::sort(m_modes.begin(), m_modes.end(),
       [](const D3DDISPLAYMODEEX& a, const D3DDISPLAYMODEEX& b) {
         if (a.Width < b.Width)   return true;
@@ -908,8 +749,6 @@ namespace dxvk {
       wsi::getDesktopDisplayMode(wsi::getDefaultMonitor(), &currentMode);
 
       if (likely(currentMode.width)) {
-        // Skip checking the compabilitiy refresh rate (60 Hz),
-        // if that's equal to the current desktop refresh rate.
         if (currentMode.refreshRate.numerator / currentMode.refreshRate.denominator != 60) {
           currentCompatibleMode = currentMode;
           currentCompatibleMode.refreshRate.numerator = 60;
@@ -920,18 +759,14 @@ namespace dxvk {
       }
     }
 
-    // Walk over all modes that the display supports and
-    // return those that match the requested format etc.
     wsi::WsiMode devMode = { };
 
     uint32_t modeIndex = 0;
 
     while (wsi::getDisplayMode(wsi::getDefaultMonitor(), modeIndex++, &devMode)) {
-      // Skip interlaced modes altogether
       if (devMode.interlaced)
         continue;
 
-      // Skip modes with incompatible formats
       if (devMode.bitsPerPixel != GetMonitorFormatBpp(Format))
         continue;
 
@@ -953,7 +788,6 @@ namespace dxvk {
         continue;
 
       D3DDISPLAYMODEEX mode = ConvertDisplayMode(devMode);
-      // Fix up the D3DFORMAT to match what we are enumerating
       mode.Format = static_cast<D3DFORMAT>(Format);
 
       if (std::count(m_modes.begin(), m_modes.end(), mode) == 0)
@@ -965,16 +799,12 @@ namespace dxvk {
   void D3D9Adapter::CacheIdentifierInfo() {
     auto& options = m_parent->GetOptions();
 
-    // PHASE-E: Metal exposes no VkPhysicalDeviceProperties/UUID. Seed identity
-    // from the synthetic MtlDeviceInfo (backend fills vendor/deviceId; name is
-    // the Metal device name). deviceGuid is derived from the ordinal + vendor.
     m_vendorId     = uint32_t(m_caps.vendor);
     m_deviceId     = m_caps.deviceId;
     m_deviceDesc   = m_caps.name[0] ? std::string(m_caps.name) : std::string("Metal Device");
     m_deviceGuid   = GUID{ m_deviceId, uint16_t(m_vendorId), uint16_t(m_ordinal),
                            { 0, 0, 0, 0, 0, 0, 0, 0 } };
 
-    // Custom Vendor ID / Device ID / Device Description
     if (options.customVendorId >= 0)
       m_vendorId = uint32_t(options.customVendorId);
 
@@ -997,25 +827,20 @@ namespace dxvk {
       const char*  fallbackDesc   = "Generic Graphics Card";
 
       if (!options.hideAmdGpu) {
-        // AMD RX 6700 XT
         fallbackVendor = uint32_t(MtlGpuVendor::Amd);
         fallbackDevice = 0x73df;
         fallbackDesc   = "AMD Radeon RX 6700 XT";
       } else if (!options.hideNvidiaGpu) {
-        // Nvidia RTX 3060
         fallbackVendor = uint32_t(MtlGpuVendor::Nvidia);
         fallbackDevice = 0x2487;
         fallbackDesc   = "NVIDIA GeForce RTX 3060";
       }
 
-      // PHASE-E: no VkDriverId on Metal; the actual GPU is never Nvidia here, so
-      // the nvidia-vs-nvk driver split collapses to the hideNvidiaGpu option.
       bool hideNvidiaGpu = options.hideNvidiaGpu;
 
       bool hideGpu = (m_vendorId == uint32_t(MtlGpuVendor::Nvidia) && hideNvidiaGpu)
                   || (m_vendorId == uint32_t(MtlGpuVendor::Amd) && options.hideAmdGpu)
                   || (m_vendorId == uint32_t(MtlGpuVendor::Intel) && options.hideIntelGpu)
-                  // Hide the GPU by default for other vendors (default to reporting AMD)
                   || isNonclassicalVendorId;
 
       if (hideGpu) {

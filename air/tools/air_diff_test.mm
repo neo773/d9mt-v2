@@ -1,23 +1,3 @@
-/*
- * air_diff_test: differential validation of the AIR backend.
- *
- * Renders the same draw through two (VS, PS) metallib pairs — the AIR
- * backend's output and the SPIR-V -> SPIRV-Cross -> MSL reference — and
- * pixel-compares the results. Bindings for each side come from the JSON
- * manifests air_compiler emits, so the two paths may use entirely
- * different binding models; only the math must match.
- *
- *   air_diff_test <name> <air_vs.mtl> <air_vs.json> <air_ps.mtl> <air_ps.json>
- *                        <ref_vs.mtl> <ref_vs.json> <ref_ps.mtl> <ref_ps.json>
- *
- * Fixed vertex layout (both paths): pos float4 @0 loc0, color float4 @16
- * loc1, uv float2 @32 loc2, stride 48, vertex buffer at index 27.
- * cF-style constant buffers get a deterministic nonzero pattern; all other
- * manifest buffers get zeros. 4x4 checkerboard at any manifest texture slot.
- *
- * Exit 0 = max per-channel diff within tolerance.
- */
-
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include <cstdio>
@@ -28,7 +8,7 @@ namespace {
 
 constexpr uint32_t kSize = 128;
 constexpr uint32_t kVertexBufferIndex = 27;
-constexpr int kTolerance = 2; /* per 8-bit channel; fast-math slop */
+constexpr int kTolerance = 2;
 
 struct ManifestBuffer {
   std::string name;
@@ -39,7 +19,7 @@ struct ManifestBuffer {
 struct ManifestResource {
   std::string name;
   uint32_t index;
-  std::string kind; /* "2d" | "cube" | "3d" | "depth2d" | "depthcube" */
+  std::string kind;
 };
 
 struct ManifestSpec {
@@ -59,7 +39,6 @@ struct Manifest {
   bool pointSize = false;
 };
 
-/* Spec-constant values under test, from --spec idx=value args */
 struct SpecValues {
   std::vector<std::pair<uint32_t, uint32_t>> values;
 };
@@ -98,7 +77,6 @@ bool loadManifest(const char* path, Manifest& m) {
   return true;
 }
 
-/* Deterministic nonzero float-constant pattern, same for both paths */
 id<MTLBuffer> makeConstantBuffer(id<MTLDevice> device, const ManifestBuffer& mb) {
   uint64_t size = mb.size ? (mb.size + 15u) & ~15ull : 16u;
   std::vector<float> data(size / 4u, 0.f);
@@ -117,7 +95,7 @@ id<MTLBuffer> makeConstantBuffer(id<MTLDevice> device, const ManifestBuffer& mb)
     options:MTLResourceStorageModeShared];
 }
 
-void fillCheckerPixels(uint8_t* pixels, uint32_t n /* 4x4 texels */) {
+void fillCheckerPixels(uint8_t* pixels, uint32_t n) {
   for (uint32_t y = 0; y < n; y++) {
     for (uint32_t x = 0; x < n; x++) {
       bool on = ((x ^ y) & 1u) != 0u;
@@ -128,9 +106,6 @@ void fillCheckerPixels(uint8_t* pixels, uint32_t n /* 4x4 texels */) {
   }
 }
 
-/* Checkerboard content matched to the texture kind the shader declares.
- * Depth kinds get a Depth32Float gradient (blit-filled: depth formats
- * reject replaceRegion). */
 id<MTLTexture> makeCheckerTexture(
         id<MTLDevice>       device,
         id<MTLCommandQueue> queue,
@@ -139,6 +114,7 @@ id<MTLTexture> makeCheckerTexture(
   fillCheckerPixels(pixels, 4);
 
   if (kind == "depth2d" || kind == "depthcube") {
+    // depth-format textures reject replaceRegion, so fill via blit instead
     MTLTextureDescriptor* td;
     if (kind == "depthcube") {
       td = [MTLTextureDescriptor
@@ -244,8 +220,6 @@ bool renderPath(
   if (!vsLib || !psLib)
     return false;
 
-  /* spec constants -> MTLFunctionConstantValues by index, same values
-   * on both paths (AIR function constants / SPIRV-Cross MSL constants) */
   auto loadFn = [&](id<MTLLibrary> lib, const Manifest& m) -> id<MTLFunction> {
     NSString* name = [NSString stringWithUTF8String:m.entry.c_str()];
     if (m.specConstants.empty())
@@ -332,7 +306,6 @@ bool renderPath(
   }
 
   float verts[] = {
-    /* pos                    color                 uv       pad */
     -1.f, -1.f, 0.5f, 1.f,    1.f, 0.f, 0.f, 1.f,   0.f, 0.f, 0.f, 0.f,
      3.f, -1.f, 0.5f, 1.f,    0.f, 1.f, 0.f, 1.f,   2.f, 0.f, 0.f, 0.f,
     -1.f,  3.f, 0.5f, 1.f,    0.f, 0.f, 1.f, 1.f,   0.f, 2.f, 0.f, 0.f,
@@ -390,7 +363,6 @@ bool renderPath(
     [enc setFragmentSamplerState:smp atIndex:s.index];
 
   if (depthOut) {
-    /* write-depth PSOs still need a depth-stencil state to write */
     MTLDepthStencilDescriptor* ds = [MTLDepthStencilDescriptor new];
     ds.depthCompareFunction = MTLCompareFunctionAlways;
     ds.depthWriteEnabled = YES;
@@ -402,9 +374,9 @@ bool renderPath(
     vertexStart:0 vertexCount:3];
   [enc endEncoding];
 
-  /* depth formats can't getBytes; stage through a blit */
   id<MTLBuffer> depthReadback = nil;
   if (depthOut) {
+    // Depth32Float textures don't support getBytes; stage through a blit
     depthReadback = [device newBufferWithLength:kSize * kSize * 4
       options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -426,7 +398,6 @@ bool renderPath(
     return false;
   }
 
-  /* all color attachments, concatenated */
   pixels.resize(kSize * kSize * 4 * rtCount);
   for (uint32_t rt = 0; rt < rtCount; rt++) {
     [targets[rt] getBytes:pixels.data() + size_t(rt) * kSize * kSize * 4
@@ -441,7 +412,7 @@ bool renderPath(
   return true;
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
   if (argc < 10) {
@@ -501,7 +472,6 @@ int main(int argc, char** argv) {
         badPixels++;
     }
 
-    /* depth output: compare as floats, small epsilon for fast-math slop */
     double maxDepthDiff = 0.0;
     for (size_t i = 0; i < airDepth.size(); i++) {
       double d = std::abs(double(airDepth[i]) - double(refDepth[i]));

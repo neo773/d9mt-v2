@@ -1,8 +1,5 @@
 #pragma once
 
-// PHASE-C5: DxvkContext -> MtlContext; Rc<DxvkQuery> -> Rc<MtlQuery>;
-// Rc<DxvkEvent> -> Rc<MtlEvent> (doc 05 §Queries: OCCLUSION -> visibility counter,
-// EVENT -> submission-serial compare). Begin/End take an MtlContext*.
 #include "d3d9_device_child.h"
 
 #include "../mtl/mtl_context.h"

@@ -10,7 +10,6 @@ namespace dxvk {
 
     public:
 
-    // Identity
     inline Matrix4() {
       data[0] = { 1, 0, 0, 0 };
       data[1] = { 0, 1, 0, 0 };
@@ -18,7 +17,6 @@ namespace dxvk {
       data[3] = { 0, 0, 0, 1 };
     }
 
-    // Produces a scalar matrix, x * Identity
     inline explicit Matrix4(float x) {
       data[0] = { x, 0, 0, 0 };
       data[1] = { 0, x, 0, 0 };

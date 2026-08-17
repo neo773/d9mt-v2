@@ -1,11 +1,3 @@
-/* d9mt v2 shader assembler: assembles D3D9 shader assembly text (vs_3_0 /
- * ps_3_0) into bytecode via D3DXAssembleShader and writes it to a file. Runs
- * under Wine in the bottle (which has d3dx9). Lets the test suite author shaders
- * with controlled outputs (explicit alpha, multiple render targets, cube
- * samplers) that no precompiled .vso/.pso provides.
- *
- *   asm_shader.exe <input.asm> <output.bin>
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3dx9.h>

@@ -4,14 +4,7 @@
 #ifndef __WINEMETAL_AIRCONV_THUNKS_H
 #define __WINEMETAL_AIRCONV_THUNKS_H
 
-// Slot numbers below MUST match the position of the corresponding
-// thunk_* entry in __wine_unix_call_funcs[] / __wine_unix_call_wow64_funcs[]
-// in src/winemetal/unix/winemetal_unix.c. The explicit `= N` anchors
-// each block to its current table position; entries inside a block
-// auto-increment from there. When upstream inserts new dispatcher
-// entries before a block, the anchor needs to move forward by the
-// same amount or every UNIX_CALL in the block routes to the wrong
-// thunk and silently fails.
+// slot numbers must match __wine_unix_call_funcs[]/__wine_unix_call_wow64_funcs[] in winemetal_unix.c or calls silently route to the wrong thunk.
 enum airconv_unixcalls {
   unix_sm50_initialize = 74,
   unix_sm50_destroy,
@@ -26,10 +19,6 @@ enum airconv_unixcalls {
   unix_sm50_compile_tessellation_hull,
   unix_sm50_compile_tessellation_domain,
   unix_sm50_get_arguments_info = 88,
-  // 148..152. Sits immediately after upstream's apitrace + sparse
-  // dispatcher entries (136..147) in winemetal_unix.c. Keep in lock-step with the
-  // thunk_DXSO* / thunk32_DXSO* positions in BOTH dispatch tables; if
-  // upstream inserts more entries above this block, move both forward.
   unix_dxso_initialize = 148,
   unix_dxso_destroy,
   unix_dxso_compile,

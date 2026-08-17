@@ -3,10 +3,6 @@
 #include "d3d9_device.h"
 #include "d3d9_util.h"
 
-// PHASE-C6 STAGE-2: ported off Vulkan onto the Mtl seam (doc 05 §Buffers).
-// Only CreateBuffer()/CreateStagingBuffer() are semantic rewrites — the Vulkan
-// usage/stage/access split dies here, folded into MtlBufferCreateInfo{usage,
-// cpuAccess}. Everything else is D3D9 logic copied byte-identical.
 
 namespace dxvk {
 
@@ -56,16 +52,11 @@ namespace dxvk {
     if (unlikely(pDesc->Size == 0))
       return D3DERR_INVALIDCALL;
 
-    // Neither vertex nor index buffers can be created in D3DPOOL_SCRATCH
-    // or in D3DPOOL_MANAGED with D3DUSAGE_DYNAMIC. On extended devices,
-    // D3DPOOL_MANAGED can not be used at all, regardless of usage flags.
     if (unlikely(pDesc->Pool == D3DPOOL_SCRATCH
              || (pDesc->Pool == D3DPOOL_MANAGED && (IsExtended ||
                                                     pDesc->Usage & D3DUSAGE_DYNAMIC))))
       return D3DERR_INVALIDCALL;
 
-    // D3DUSAGE_AUTOGENMIPMAP, D3DUSAGE_DEPTHSTENCIL and D3DUSAGE_RENDERTARGET
-    // are not permitted on index or vertex buffers.
     if (unlikely((pDesc->Usage & D3DUSAGE_AUTOGENMIPMAP)
               || (pDesc->Usage & D3DUSAGE_DEPTHSTENCIL)
               || (pDesc->Usage & D3DUSAGE_RENDERTARGET)))
@@ -100,8 +91,6 @@ namespace dxvk {
 
 
   Rc<MtlBuffer> D3D9CommonBuffer::CreateBuffer() const {
-    // doc 05 §Buffers row 1: DEFAULT-pool VB/IB. Vulkan usage/stage/access
-    // masks die; only the bind-slot usage + CPU storage mode survive.
     MtlBufferCreateInfo info;
     info.size      = m_desc.Size;
     info.usage     = MtlUsage::None;
@@ -109,30 +98,23 @@ namespace dxvk {
 
     if (m_desc.Type == D3DRTYPE_VERTEXBUFFER) {
       info.usage = info.usage | MtlUsage::VertexBuffer;
-      // PHASE-E: verify — SWVP emu writes VB via a GPU pass (was STORAGE_BUFFER +
-      // geometry-stage write). No Storage usage bit in the seam yet; VertexBuffer
-      // usage is blit/compute-capable on Metal so writes still land.
     }
     else if (m_desc.Type == D3DRTYPE_INDEXBUFFER) {
       info.usage = info.usage | MtlUsage::IndexBuffer;
     }
 
     if (m_mapMode == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT) {
-      // Directly-mapped dynamic buffer: shared storage with a CPU pointer.
-      // (HOST_VISIBLE|HOST_COHERENT[|HOST_CACHED] => Write; Read iff readable.)
       info.cpuAccess = MtlCpuAccess::Write;
 
       if ((m_desc.Usage & D3DUSAGE_WRITEONLY) == 0
         || DoPerDrawUpload()
         || m_parent->CanOnlySWVP()
         || m_parent->GetOptions()->cachedWriteOnlyBuffers) {
-        // Never use uncached memory on devices that support SWVP because we
-        // might end up reading from it.
+        // Uncached memory must be avoided here: SWVP-capable devices may read this buffer back.
         info.cpuAccess = MtlCpuAccess::Read;
       }
     }
     else {
-      // The device-local real buffer, fed through staging (DEVICE_LOCAL only).
       info.cpuAccess = MtlCpuAccess::None;
     }
 
@@ -141,7 +123,6 @@ namespace dxvk {
 
 
   Rc<MtlBuffer> D3D9CommonBuffer::CreateStagingBuffer() const {
-    // doc 05 §Buffers row 2: SYSTEMMEM/MANAGED backing the GPU never binds.
     MtlBufferCreateInfo info;
     info.size      = m_desc.Size;
     info.usage     = MtlUsage::Staging;

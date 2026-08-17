@@ -17,9 +17,6 @@
 
 namespace dxvk {
 
-  /**
-   * \brief Thread priority
-   */
   enum class ThreadPriority : int32_t {
     Normal,
     Lowest,
@@ -30,9 +27,6 @@ namespace dxvk {
   using ThreadProc = std::function<void()>;
 
 
-  /**
-   * \brief Thread object
-   */
   struct ThreadData {
     ThreadData(ThreadProc&& proc_)
     : proc(std::move(proc_)) { }
@@ -54,12 +48,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief Thread wrapper
-   *
-   * Drop-in replacement for std::thread
-   * using plain win32 threads.
-   */
   class thread {
 
   public:
@@ -133,12 +121,6 @@ namespace dxvk {
   }
 
 
-  /**
-   * \brief SRW-based mutex implementation
-   *
-   * Drop-in replacement for \c std::mutex that uses Win32
-   * SRW locks, which are implemented with \c futex in wine.
-   */
   class mutex {
 
   public:
@@ -173,9 +155,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief SRW-based shared mutex implementation
-   */
   class shared_mutex {
 
   public:
@@ -222,12 +201,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief Recursive mutex implementation
-   *
-   * Drop-in replacement for \c std::recursive_mutex that
-   * uses Win32 critical sections.
-   */
   class recursive_mutex {
 
   public:
@@ -268,12 +241,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief SRW-based condition variable implementation
-   *
-   * Drop-in replacement for \c std::condition_variable that
-   * uses Win32 condition variables on SRW locks.
-   */
   class condition_variable {
 
   public:

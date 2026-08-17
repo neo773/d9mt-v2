@@ -1,16 +1,5 @@
 #pragma once
 
-// PHASE-C5: ported off Vulkan onto the Mtl seam (doc 05 §Images).
-//   Rc<DxvkImage>     -> Rc<MtlTexture>
-//   Rc<DxvkImageView> -> Rc<MtlTextureView>
-//   Rc<DxvkBuffer>    -> Rc<MtlBuffer> ; DxvkBufferSlice -> MtlBufferSlice
-//   VkImageUsageFlags -> MtlTextureUsage ; VkImageLayout -> deleted (backend-owned)
-//   VkExtent3D/VkImageType/VkImageViewType/VkImageSubresource -> Mtl* PODs
-//   D3D9_VK_FORMAT_MAPPING -> D3D9_MTL_FORMAT_MAPPING
-// DROPPED: the ID3D9VkInterop* path (Vulkan interop, doc 02 §DROP) — GetVkInterop /
-// ExportImageInfo / D3D9VkInteropTexture removed. CreateView loses its VkImageLayout
-// argument; the backend picks layout/usage. Creation-site semantics (CreatePrimaryImage /
-// CreateResolveImage / CheckImageSupport) are rewritten in the .cpp per doc 05.
 #include "d3d9_format.h"
 #include "d3d9_util.h"
 #include "d3d9_caps.h"
@@ -24,19 +13,13 @@ namespace dxvk {
 
   class D3D9DeviceEx;
 
-  /**
-   * \brief Image memory mapping mode
-   */
   enum D3D9_COMMON_TEXTURE_MAP_MODE {
-    D3D9_COMMON_TEXTURE_MAP_MODE_NONE,      ///< No mapping available
-    D3D9_COMMON_TEXTURE_MAP_MODE_BACKED,    ///< Mapped image through buffer
-    D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM, ///< Only a buffer - no image
-    D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE,   ///< Host memory that can be unmapped
+    D3D9_COMMON_TEXTURE_MAP_MODE_NONE,
+    D3D9_COMMON_TEXTURE_MAP_MODE_BACKED,
+    D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM,
+    D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE,
   };
 
-  /**
-   * \brief Common texture description
-   */
   struct D3D9_COMMON_TEXTURE_DESC {
     UINT                Width;
     UINT                Height;
@@ -109,9 +92,6 @@ namespace dxvk {
       return m_mapMode;
     }
 
-    /**
-     * \brief The backend image (nullptr for SYSTEMMEM map mode)
-     */
     const Rc<MtlTexture>& GetImage() const {
       return m_image;
     }
@@ -129,9 +109,6 @@ namespace dxvk {
 
     MtlBufferSlice GetBufferSlice(UINT Subresource);
 
-    /**
-     * \brief Computes the image subresource from a subresource index
-     */
     MtlSubresourceLayers GetSubresourceFromIndex(
             MtlAspectMask         Aspect,
             UINT                  Subresource) const;
@@ -373,8 +350,8 @@ namespace dxvk {
 
     D3D9_MTL_FORMAT_MAPPING       m_mapping;
 
-    bool                          m_shadow; //< Depth Compare-ness
-    bool                          m_upgradedToD32f; // Dref Clamp
+    bool                          m_shadow;
+    bool                          m_upgradedToD32f;
     bool                          m_supportsFetch4;
 
     int64_t                       m_size = 0;

@@ -1,5 +1,3 @@
-// PHASE-C5 STAGE-1 probe TU: verifies the ported device-graph headers form a
-// closed, Vulkan-free compile unit on the Mtl seam. Not part of the shipped DLL.
 #include "d3d9_common_buffer.h"
 #include "d3d9_common_texture.h"
 #include "d3d9_resource.h"

@@ -1,16 +1,3 @@
-/*
- * bridge_smoke: host-side gate for the winemetal bridge fork.
- *
- * 1. dlopens build/bridge/winemetal.so, indexes __wine_unix_call_funcs.
- * 2. WMTCopyAllDevices -> device.
- * 3. Loads the AIR-generated vs/ps metallibs, creates MTLFunctions, and
- *    builds a render PSO through the NEW vertex-descriptor entry (code 153).
- * 4. AIR-thunk parity: compiles a serialized IR blob through the bridge's
- *    d9mtair entry AND through the standalone d9mtair.so; byte-compares.
- *
- * x86_64 host binary (the .so is wine-unix-side x86_64; runs under Rosetta).
- */
-
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -22,16 +9,12 @@
 #include "../winemetal_thunks.h"
 #include "../../airlib/d9mtair.h"
 
-/* front half: SM3 bytecode -> legalized serialized IR (same as loopback) */
 #include <ir/ir_builder.h>
 #include <ir/ir_legalize.h>
 #include <ir/ir_serialize.h>
 #include <sm3/sm3_converter.h>
 #include <util/util_byte_stream.h>
 
-/* wine-side imports resolved flat-namespace at load: under wine these come
- * from ntdll.so/winemac.so; for the host gate we provide inert stand-ins
- * (the smoke path never exercises them). */
 extern "C" __attribute__((visibility("default"))) int NtSetEvent(void*, void*) { return 0; }
 
 typedef int (*unix_fn)(void*);
@@ -105,7 +88,6 @@ int main(int argc, char** argv) {
   unix_fn* funcs = reinterpret_cast<unix_fn*>(dlsym(bridge, "__wine_unix_call_funcs"));
   if (!funcs) { fprintf(stderr, "FAIL: no call table\n"); return 1; }
 
-  /* --- device ------------------------------------------------------------ */
   struct unixcall_generic_obj_ret devs = {};
   funcs[4](&devs);
   struct unixcall_generic_obj_uint64_obj_ret dev0 = {};
@@ -115,7 +97,6 @@ int main(int argc, char** argv) {
   if (!dev0.ret) { fprintf(stderr, "FAIL: no Metal device\n"); return 1; }
   printf("device handle: ok\n");
 
-  /* --- PSO through the vertex-descriptor entry (code 153) ---------------- */
   obj_handle_t vs = getFunction(funcs, loadLibrary(funcs, dev0.ret, vsLib), "main");
   obj_handle_t ps = getFunction(funcs, loadLibrary(funcs, dev0.ret, psLib), "main");
 
@@ -123,7 +104,7 @@ int main(int argc, char** argv) {
   info.colors[0].pixel_format = WMTPixelFormatBGRA8Unorm;
   info.colors[0].write_mask = 0xf;
   info.rasterization_enabled = true;
-  info.max_tessellation_factor = 64;   /* Metal validation floor */
+  info.max_tessellation_factor = 64;
   info.raster_sample_count = 1;
   info.vertex_function = vs;
   info.fragment_function = ps;
@@ -148,20 +129,10 @@ int main(int argc, char** argv) {
   }
   printf("vertex-descriptor PSO: ok\n");
 
-  /* --- render-pass encode of the appended sampler/texture commands -------- *
-   * Drives WMTRenderCommandSetFragmentSamplerState / SetVertexTexture /
-   * SetVertexSamplerState (the per-slot sampler + VTF binds the upstream
-   * wmtcmd ABI lacks) through a real MTLRenderCommandEncoder: bind a sampler
-   * and a texture on both the fragment and vertex stages via a wmtcmd chunk
-   * chain, end the pass, commit, and require the command buffer to complete
-   * without error. No draw is issued (binds are independent of draw), so the
-   * trivial pass reuses the vertex-descriptor PSO created above. */
   {
-    /* queue + a 1x1 render-target texture (also shader-readable so it can
-     * double as the bound vertex/fragment texture) */
     struct unixcall_generic_obj_uint64_obj_ret queueCall = {};
     queueCall.handle = dev0.ret;
-    queueCall.arg = 1; /* maxCommandBufferCount */
+    queueCall.arg = 1;
     funcs[9](&queueCall);
     if (!queueCall.ret) { fprintf(stderr, "FAIL: newCommandQueue\n"); return 1; }
 
@@ -203,8 +174,6 @@ int main(int argc, char** argv) {
     funcs[19](&sampCall);
     if (!sampCall.ret) { fprintf(stderr, "FAIL: newSamplerState\n"); return 1; }
 
-    /* command buffer + render command encoder over a single clear-to-store
-     * BGRA8 attachment (matches the PSO's colors[0] format) */
     struct unixcall_generic_obj_obj_ret cbCall = {};
     cbCall.handle = queueCall.ret;
     funcs[11](&cbCall);
@@ -225,9 +194,6 @@ int main(int argc, char** argv) {
     funcs[32](&encCall);
     if (!encCall.ret) { fprintf(stderr, "FAIL: renderCommandEncoder\n"); return 1; }
 
-    /* wmtcmd chunk chain: SetPSO -> SetFragmentSampler -> SetVertexTexture ->
-     * SetVertexSampler. Linked via each command's `next` pointer; encodeCommands
-     * walks the chain and replays each through the encoder. */
     struct wmtcmd_render_setpso cPso = {};
     cPso.type = WMTRenderCommandSetPSO;
     cPso.pso = psoCall.ret_pso;
@@ -250,7 +216,6 @@ int main(int argc, char** argv) {
     cPso.next.set(&cFragSamp);
     cFragSamp.next.set(&cVtxTex);
     cVtxTex.next.set(&cVtxSamp);
-    /* cVtxSamp.next left null-terminated */
 
     struct unixcall_generic_obj_cmd_noret cmdCall = {};
     cmdCall.encoder = encCall.ret;
@@ -280,14 +245,6 @@ int main(int argc, char** argv) {
     printf("render-pass sampler/texture encode: ok (status completed)\n");
   }
 
-  /* --- Metal 4 surface (codes 157..200) ---------------------------------- *
-   * Drives the full MTL4 path present-less: queue + allocator + command buffer,
-   * an argument table, a residency set, an MTL4Compiler-built render PSO (entry
-   * 196) from the same vs/ps libraries, then a real render pass encoding ONE
-   * draw through an MTL4RenderCommandEncoder. Resources are made resident and
-   * argument-table addresses bound so the draw does not GPU-fault. Completion
-   * is observed by signaling a shared event on the queue after commit and
-   * waiting on it (MTL4 has no cmdbuf status). */
   {
     struct unixcall_generic_obj_obj_ret mk = {};
     mk.handle = dev0.ret; funcs[157](&mk);
@@ -320,7 +277,6 @@ int main(int argc, char** argv) {
     obj_handle_t resset = rsCall.ret;
     if (!resset) { fprintf(stderr, "FAIL: newResidencySet\n"); return 1; }
 
-    /* MTL4Compiler render PSO from the vs/ps libraries (entry 196) */
     obj_handle_t vsLibH = loadLibrary(funcs, dev0.ret, vsLib);
     obj_handle_t psLibH = loadLibrary(funcs, dev0.ret, psLib);
     const char* mainName = "main";
@@ -333,9 +289,7 @@ int main(int argc, char** argv) {
     p4.vertex_entry_name.set((void*)mainName);
     p4.fragment_entry_name.set((void*)mainName);
     p4.raster_sample_count = 1;
-    /* Unspecified: the AIR vertex shader writes [[point_size]], which Metal
-     * rejects against an explicit Triangle topology (matches the code-153
-     * classic path, which also leaves topology unspecified). */
+    /* left unspecified: the AIR vertex shader writes [[point_size]], which Metal rejects against an explicit Triangle topology. */
     p4.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
     p4.rasterization_enabled = 1;
     p4.vertex.num_attributes = 2;
@@ -361,10 +315,9 @@ int main(int argc, char** argv) {
     }
     printf("MTL4 compiler PSO: ok\n");
 
-    /* a resident buffer (bound at argument-table indices the shader reads) */
     WMTBufferInfo bufInfo = {};
     bufInfo.length = 65536;
-    bufInfo.options = (enum WMTResourceOptions)0; /* shared */
+    bufInfo.options = (enum WMTResourceOptions)0;
     struct unixcall_mtldevice_newbuffer bufCall = {};
     bufCall.device = dev0.ret; bufCall.info.set(&bufInfo); funcs[18](&bufCall);
     if (!bufCall.ret) { fprintf(stderr, "FAIL: newBuffer(mtl4)\n"); return 1; }
@@ -380,22 +333,18 @@ int main(int argc, char** argv) {
     t4Call.device = dev0.ret; t4Call.info.set(&t4); funcs[21](&t4Call);
     if (!t4Call.ret) { fprintf(stderr, "FAIL: newTexture(mtl4)\n"); return 1; }
 
-    /* residency: add buffer + texture, commit, request */
     struct unixcall_generic_obj_obj_noret addCall = {};
     addCall.handle = resset; addCall.arg = bufCall.ret; funcs[197](&addCall);
     addCall.handle = resset; addCall.arg = t4Call.ret; funcs[197](&addCall);
     struct unixcall_generic_obj_noret rsOp = {};
-    rsOp.handle = resset; funcs[198](&rsOp); /* commit */
-    rsOp.handle = resset; funcs[199](&rsOp); /* requestResidency */
+    rsOp.handle = resset; funcs[198](&rsOp);
+    rsOp.handle = resset; funcs[199](&rsOp);
 
-    /* begin command buffer + attach residency set */
     struct unixcall_generic_obj_obj_noret beginCall = {};
     beginCall.handle = cmdbuf4; beginCall.arg = allocator; funcs[164](&beginCall);
     struct unixcall_generic_obj_obj_noret useRs = {};
     useRs.handle = cmdbuf4; useRs.arg = resset; funcs[166](&useRs);
 
-    /* bind buffer address across the slots the shader may read (stage-in buf3,
-     * push buf20, plus 0..7) and the texture at texture slot 0 */
     for (uint64_t idx = 0; idx <= 20; idx++) {
       struct unixcall_mtl4_argtable_setaddress sa = {};
       sa.table = argtable; sa.gpu_address = bufAddr; sa.stride = 0; sa.index = idx;
@@ -407,7 +356,6 @@ int main(int argc, char** argv) {
       funcs[174](&st);
     }
 
-    /* render pass over the 4x4 RT */
     WMTRenderPassInfo pass4 = {};
     pass4.colors[0].texture = t4Call.ret;
     pass4.colors[0].load_action = WMTLoadActionClear;
@@ -432,9 +380,9 @@ int main(int argc, char** argv) {
     sc.encoder = enc4.ret; sc.rect = { 0, 0, 4, 4 }; funcs[180](&sc);
 
     struct unixcall_generic_obj_uint64_noret u1 = {};
-    u1.handle = enc4.ret; u1.arg = WMTCullModeNone; funcs[182](&u1);        /* setCullMode */
-    u1.handle = enc4.ret; u1.arg = WMTWindingClockwise; funcs[183](&u1);    /* setFrontFacingWinding */
-    u1.handle = enc4.ret; u1.arg = 0; funcs[186](&u1);                      /* setStencilReferenceValue */
+    u1.handle = enc4.ret; u1.arg = WMTCullModeNone; funcs[182](&u1);
+    u1.handle = enc4.ret; u1.arg = WMTWindingClockwise; funcs[183](&u1);
+    u1.handle = enc4.ret; u1.arg = 0; funcs[186](&u1);
     struct unixcall_mtl4_setdepthbias db = {};
     db.encoder = enc4.ret; funcs[184](&db);
     struct unixcall_mtl4_setblendcolor bc = {};
@@ -445,8 +393,6 @@ int main(int argc, char** argv) {
     draw.vertex_start = 0; draw.vertex_count = 3; draw.instance_count = 1; draw.base_instance = 0;
     funcs[187](&draw);
 
-    /* producer barrier (203): order this render pass's fragment writes ahead
-     * of all later queue stages — proves the barrier entry encodes cleanly. */
     struct unixcall_mtl4_barrier bar = {};
     bar.encoder = enc4.ret;
     bar.after_stages = WMTStageFragment;
@@ -455,7 +401,7 @@ int main(int argc, char** argv) {
     funcs[203](&bar);
 
     struct unixcall_generic_obj_noret endEnc = {};
-    endEnc.handle = enc4.ret; funcs[33](&endEnc); /* shared MTLCommandEncoder_endEncoding */
+    endEnc.handle = enc4.ret; funcs[33](&endEnc);
 
     struct unixcall_generic_obj_noret endCb = {};
     endCb.handle = cmdbuf4; funcs[165](&endCb);
@@ -465,7 +411,6 @@ int main(int argc, char** argv) {
     commit4.queue = queue4; commit4.cmdbufs.set(cbArray); commit4.count = 1;
     funcs[167](&commit4);
 
-    /* completion: signal a shared event on the queue after the commit, wait */
     struct unixcall_generic_obj_obj_ret evMk = {};
     evMk.handle = dev0.ret; funcs[15](&evMk);
     obj_handle_t event = evMk.ret;
@@ -475,9 +420,7 @@ int main(int argc, char** argv) {
       struct unixcall_mtlsharedevent_waituntilsignaledvalue wev = {};
       wev.event = event; wev.value = 1; wev.timeout_ms = 5000;
       funcs[130](&wev);
-      /* waitUntilSignaledValue returns YES when the value is reached (the
-       * unix side stores that return in ret_timeout, despite the name), NO on
-       * an actual timeout. */
+      /* ret_timeout actually holds waitUntilSignaledValue's YES/NO return, despite the field name. */
       if (!wev.ret_timeout) {
         fprintf(stderr, "FAIL: MTL4 command buffer did not complete (event timeout)\n");
         return 1;
@@ -487,12 +430,10 @@ int main(int argc, char** argv) {
       printf("MTL4 render pass draw + commit: ok (no crash; event unavailable)\n");
     }
 
-    /* MTL4CommandAllocator_reset (163) is safe once the buffer completed */
     struct unixcall_generic_obj_noret rst = {};
     rst.handle = allocator; funcs[163](&rst);
   }
 
-  /* --- AIR thunk parity --------------------------------------------------- */
   std::vector<uint8_t> irBlob = serializeSm3(sm3Bin);
 
   auto compileWith = [&](int (*fn)(d9mt_air_compile_params*))

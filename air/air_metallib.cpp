@@ -5,7 +5,6 @@ namespace d9mt::air {
 
 namespace {
 
-/* Little-endian byte stream */
 struct ByteStream {
   std::vector<uint8_t> bytes;
 
@@ -23,7 +22,6 @@ struct ByteStream {
 
   void fourcc(const char tag[5]) { raw(tag, 4u); }
 
-  /* NUL-terminated string */
   void cstr(const std::string& s) { raw(s.c_str(), s.size() + 1u); }
 
   void patchU16(size_t offset, uint16_t v) {
@@ -62,12 +60,11 @@ void writeFunctionTags(
   s.u16(8u);
   s.u64(bitcodeSize);
 
-  /* offsets within the public-md / private-md / bitcode sections */
   s.fourcc("OFFT");
   s.u16(24u);
   s.u64(publicMdOffset);
   s.u64(privateMdOffset);
-  s.u64(0u); /* bitcode shared, one module at offset 0 */
+  s.u64(0u);
 
   s.fourcc("VERS");
   s.u16(8u);
@@ -79,7 +76,6 @@ void writeFunctionTags(
   s.fourcc("ENDT");
 }
 
-/* VATT (names/locations) + VATY (type codes) records */
 void writeVertexAttributeRecords(
         ByteStream&                                  s,
         const std::vector<MetallibVertexAttribute>&  attrs) {
@@ -90,7 +86,6 @@ void writeVertexAttributeRecords(
 
   for (const auto& a : attrs) {
     s.cstr(a.name);
-    /* u16 bitfield: attribute:8 | reserved:5 | usage:2 | active:1 */
     s.u16(uint16_t(a.location) | uint16_t(1u << 15));
   }
 
@@ -104,8 +99,6 @@ void writeVertexAttributeRecords(
     s.u8(uint8_t(a.type));
 }
 
-/* CNST record: u16 size (incl. count), u16 count, then per constant:
- * name\0, u8 MTLDataType, u16 index, u8 active */
 void writeFunctionConstantRecord(
         ByteStream&                                  s,
         const std::vector<MetallibFunctionConstant>& constants) {
@@ -118,13 +111,13 @@ void writeFunctionConstantRecord(
     s.cstr(c.name);
     s.u8(uint8_t(c.type));
     s.u16(c.index);
-    s.u8(1u); /* active */
+    s.u8(1u);
   }
 
   s.patchU16(sizeFixup, uint16_t(s.tell() - sizeFixup - 2u));
 }
 
-} // namespace
+}
 
 std::vector<uint8_t> writeMetallib(
         const void*                           bitcode,
@@ -133,13 +126,11 @@ std::vector<uint8_t> writeMetallib(
         const MetallibVersions&               versions) {
   Sha256Digest hash = sha256(bitcode, bitcodeSize);
 
-  /* Build the three variable sections first so offsets are known. */
   ByteStream publicMd;
   ByteStream privateMd;
   ByteStream fnList;
 
   for (const auto& fn : functions) {
-    /* each entry: self-inclusive u32 size, then its tag stream */
     ByteStream tags;
     writeFunctionTags(tags, fn, hash, bitcodeSize,
       publicMd.tell(), privateMd.tell(), versions);
@@ -161,9 +152,7 @@ std::vector<uint8_t> writeMetallib(
   }
 
   constexpr uint64_t headerSize = 88u;
-  /* size counts the entries only, not the function-count u32 */
   uint64_t functionListSize = fnList.tell();
-  /* header | fn count | entries | ENDT | public | private | bitcode */
   uint64_t publicMdOffset = headerSize + 4u + fnList.tell() + 4u;
   uint64_t privateMdOffset = publicMdOffset + publicMd.tell();
   uint64_t bitcodeOffset = privateMdOffset + privateMd.tell();
@@ -181,7 +170,7 @@ std::vector<uint8_t> writeMetallib(
   out.u16(versions.osMajor);
   out.u16(versions.osMinor);
   out.u64(fileSize);
-  out.u64(headerSize);         /* function list offset */
+  out.u64(headerSize);
   out.u64(functionListSize);
   out.u64(publicMdOffset);
   out.u64(publicMd.tell());
@@ -200,4 +189,4 @@ std::vector<uint8_t> writeMetallib(
   return out.bytes;
 }
 
-} // namespace d9mt::air
+}

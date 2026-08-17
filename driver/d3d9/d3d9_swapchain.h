@@ -1,18 +1,5 @@
 #pragma once
 
-// PHASE-C6: swapchain REWRITE ported onto the MtlPresenter seam (doc 02 §4
-// "D3D9SwapChainEx REWRITE", doc 01 §1j / contract 3e). The D3D9 bookkeeping
-// (present params, back-buffer array, reset/format/fullscreen logic, frame-latency
-// counter) is KEPT verbatim; the Vulkan scan-out path is replaced:
-//   Rc<Presenter>            -> Rc<MtlPresenter>   (mtl_presenter.h)
-//   Rc<DxvkSwapchainBlitter> -> DROPPED (present blit lives in the presenter)
-//   Rc<DxvkDevice>           -> Rc<MtlDevice>
-//   VkExtent2D               -> MtlExtent2D
-//   Rc<DxvkLatencyTracker>   -> Rc<MtlLatencyTracker>
-//   VkSurfaceFormatKHR/VkExtent2D returns -> MtlFormat / MtlExtent2D
-// DROPPED: D3D9VkExtSwapchain (ID3D9VkExtSwapchain — Vulkan interop, VkColorSpaceKHR/
-//   VkHdrMetadataEXT), the HUD items (hud DROPPED), m_colorspace / m_hdrMetadata,
-//   CreateBlitter/GetSurfaceFormat's Vulkan payload.
 #include "d3d9_device_child.h"
 #include "d3d9_device.h"
 #include "d3d9_format.h"
@@ -137,9 +124,6 @@ namespace dxvk {
 
     std::vector<Com<D3D9Surface, false>> m_backBuffers;
 
-    // Single-sample present source when the app requested an MSAA backbuffer:
-    // Present resolves backbuffer 0 into this, then blits/copies it to the
-    // drawable (an MSAA -> non-MSAA texture copy is invalid in Metal).
     Com<D3D9Surface, false>   m_resolveBuffer;
 
     RECT                      m_srcRect;
@@ -154,17 +138,15 @@ namespace dxvk {
 
     wsi::DxvkWindowState      m_windowState;
 
-    // Borderless-fullscreen restyle state (wined3d fullscreen_style).
     HWND                      m_fullscreenWindow   = nullptr;
     LONG                      m_savedWindowStyle   = 0;
     LONG                      m_savedWindowExStyle = 0;
 
     double                    m_targetFrameRate = 0.0;
 
-    // DXVK's limiter: self-heals after a stall instead of burning down a
-    // backlog. Used in place of presentAfterMinimumDuration, which Apple
-    // documents as holding drawables longer than necessary — fatal here,
-    // because a held drawable never retires while the layer is uncomposited.
+    // Used instead of presentAfterMinimumDuration: Apple documents that API as
+    // holding drawables longer than necessary, which is fatal here since a held
+    // drawable never retires while the layer is uncomposited.
     FpsLimiter                m_fpsLimiter;
 
     double                    m_displayRefreshRate = 0.0;
@@ -224,8 +206,6 @@ namespace dxvk {
     bool IsDeviceReset(D3D9WindowContext* wctx);
 
     const Com<D3D9Surface, false>& GetFrontBuffer() const {
-      // Buffer 0 is the one that gets copied to the backbuffer.
-      // We rotate buffers after presenting, so buffer 0 becomes the last buffer in the vector.
       return m_backBuffers.back();
     }
 
@@ -233,8 +213,8 @@ namespace dxvk {
       if (m_presentParams.SwapEffect == D3DSWAPEFFECT_COPY)
         return false;
 
-      // Tests show that SWAPEEFFECT_DISCARD with 1 backbuffer in windowed mode behaves identically to SWAPEFFECT_COPY
-      // For SWAPEFFECT_COPY we don't swap buffers but do another blit to the front buffer instead.
+      // Empirically, DISCARD with 1 backbuffer in windowed mode behaves like
+      // COPY: blit to the front buffer again instead of swapping buffers.
       if (m_presentParams.SwapEffect == D3DSWAPEFFECT_DISCARD && m_presentParams.BackBufferCount == 1 && m_presentParams.Windowed)
         return false;
 

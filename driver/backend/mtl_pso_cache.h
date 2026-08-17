@@ -1,20 +1,4 @@
 #pragma once
-/*
- * Render-PSO memoization.
- *
- * Key design (doc 00 §1, doc 01 §5):
- *  - depth/stencil attachment formats are NOT part of the key (Metal 4
- *    removed them from the pipeline descriptor entirely).
- *  - vertex strides ARE part of the key (Metal bakes stride into the
- *    descriptor; the v2 stride bug made this explicit).
- *  - lookup must be cheap per draw: FNV over a packed POD key, memo of the
- *    last (key,pso) pair to skip the map entirely on same-material runs
- *    (v1's biggest PSO-path win).
- *
- * Builds go through MTL4Compiler_newRenderPipelineState (METAL 4 ONLY). The
- * stage functions are carried as (library handle + entry name "main"); the
- * caller passes the VS/PS metallib handles, not MTLFunction objects.
- */
 
 #include <cstdint>
 #include <cstring>
@@ -25,7 +9,7 @@
 namespace dxvk::backend {
 
   struct PsoVertexAttr {
-    uint32_t format = 0u;     /* WMTAttributeFormat */
+    uint32_t format = 0u;
     uint16_t offset = 0u;
     uint8_t  bufferIndex = 0u;
     uint8_t  pad = 0u;
@@ -33,13 +17,12 @@ namespace dxvk::backend {
 
   struct PsoVertexLayout {
     uint16_t stride = 0u;
-    uint8_t  stepFunction = 0u;  /* per-vertex / per-instance / constant */
+    uint8_t  stepFunction = 0u;
     uint8_t  pad = 0u;
   };
 
   struct PsoColorAttachment {
-    uint32_t pixelFormat = 0u;   /* WMTPixelFormat */
-    /* blend state, packed to match WMTColorAttachmentBlendInfo semantics */
+    uint32_t pixelFormat = 0u;
     uint8_t  blendEnabled = 0u;
     uint8_t  writeMask = 0xfu;
     uint8_t  rgbSrcFactor = 1u;
@@ -50,15 +33,15 @@ namespace dxvk::backend {
     uint8_t  alphaBlendOp = 0u;
   };
 
-  /* Packed POD; hashed/compared bytewise. Zero-init before filling. */
+  // Packed POD, hashed bytewise — must be zero-initialized before filling so
+  // padding bytes don't leak into the hash.
   struct RenderPsoKey {
-    uint64_t vsCookie = 0u;      /* shader identity incl. spec + linkage */
+    uint64_t vsCookie = 0u;
     uint64_t fsCookie = 0u;
 
-    // 20 (>= 18) so the fixed-function ubershader's full input signature fits:
-    // its stage_in declares all 18 FF vertex registers (Position0..BlendIndices),
-    // and Metal requires EVERY declared attribute to be present in the vertex
-    // descriptor (unlike Vulkan, which tolerates missing attributes).
+    // 20 slots: the fixed-function ubershader declares all 18 FF vertex
+    // registers, and Metal requires every declared attribute to be present
+    // in the vertex descriptor (unlike Vulkan, which tolerates gaps).
     PsoVertexAttr   attrs[20] = { };
     PsoVertexLayout layouts[20] = { };
     uint8_t attrCount = 0u;
@@ -68,10 +51,9 @@ namespace dxvk::backend {
     uint8_t colorCount = 0u;
 
     uint8_t sampleCount = 1u;
-    uint8_t topologyClass = 0u;  /* point/line/triangle — WMTPrimitiveTopologyClass */
+    uint8_t topologyClass = 0u;
     uint8_t alphaToCoverage = 0u;
 
-    /* Metal-3 only suffix (absent from the Metal 4 descriptor): */
     uint32_t depthFormat = 0u;
     uint32_t stencilFormat = 0u;
 
@@ -94,9 +76,6 @@ namespace dxvk::backend {
 
     explicit RenderPsoCache(obj_handle_t compiler);
 
-    /* Returns the PSO handle, building it synchronously on miss.
-     * vsLibrary/fsLibrary are MTLLibrary (metallib) handles (borrowed); the
-     * entry point is "main". Returns 0 on build failure (caller drops+logs). */
     obj_handle_t get(
             const RenderPsoKey& key,
             obj_handle_t        vsLibrary,
@@ -114,7 +93,6 @@ namespace dxvk::backend {
 
     obj_handle_t m_compiler;
 
-    /* one-entry memo: same-material draw runs skip the map */
     RenderPsoKey m_lastKey = { };
     obj_handle_t m_lastPso = 0u;
     bool m_hasLast = false;

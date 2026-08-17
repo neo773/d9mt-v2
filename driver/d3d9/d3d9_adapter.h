@@ -1,17 +1,5 @@
 #pragma once
 
-// PHASE-C6: ported off Vulkan onto the Mtl seam.
-//   Rc<DxvkInstance>       -> Rc<MtlInstance>
-//   Rc<DxvkAdapter>        -> Rc<MtlAdapter>
-//   DxvkDeviceCapabilities -> MtlDeviceInfo   (device caps read on the seam)
-//   const DxvkFormatInfo*  -> const MtlFormatInfo*
-//   D3D9_VK_FORMAT_MAPPING -> D3D9_MTL_FORMAT_MAPPING (d3d9_format.h)
-//   D3D9VkFormatTable      -> D3D9MtlFormatTable       (d3d9_format.h)
-//   include ../dxvk/dxvk_adapter.h -> ../mtl/mtl_device.h
-// DROPPED the CheckDeviceVkFormat(VkFormat,...) path — no VkFormat on Metal; the
-// D3D9Format-driven CheckDeviceFormat is the only entry point. D3D9ON12_ARGS is
-// kept (defined in KEEP d3d9_include.h), so the 9On12 signature shape survives even
-// though the 9on12/interop backends are dropped.
 #include "d3d9_include.h"
 
 #include "d3d9_options.h"
@@ -128,7 +116,6 @@ namespace dxvk {
 
   private:
 
-    // used as a global filter when mode count compatibility is enabled
     inline bool IsCountCompatibleMode(const wsi::WsiMode& wsiMode) {
       if (wsiMode.refreshRate.numerator / wsiMode.refreshRate.denominator != 60)
         return false;

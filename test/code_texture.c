@@ -1,11 +1,3 @@
-/* d9mt v2 texture test: a textured quad sampling a checkerboard through a real
- * SM3 vs/ps pair (texquad: transform + UV passthrough; tex2D sample of s0).
- *
- * Exercises Phase 1 item 2 (textures + samplers): D3D9 CreateTexture + Lock/
- * Unlock upload, SetTexture / SetSamplerState, and the bindless texture/sampler
- * heaps the translated shader samples through. The checkerboard makes correct
- * sampling visually obvious (a flat color would also pass a broken sampler).
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -85,7 +77,6 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  /* Full-screen-ish quad (two triangles), UV 0..1 across it. */
   static const struct Vertex verts[6] = {
       {-0.7f,  0.7f, 0.5f, 0.0f, 0.0f},
       { 0.7f,  0.7f, 0.5f, 1.0f, 0.0f},
@@ -104,7 +95,6 @@ int main(void) {
   memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
 
-  /* 8x8 ARGB checkerboard: white / magenta. */
   enum { TEX = 8 };
   IDirect3DTexture9 *tex = NULL;
   if (FAILED(IDirect3DDevice9_CreateTexture(dev, TEX, TEX, 1, 0, D3DFMT_A8R8G8B8,
@@ -115,7 +105,7 @@ int main(void) {
     for (int y = 0; y < TEX; y++) {
       DWORD *row = (DWORD *)((BYTE *)lr.pBits + y * lr.Pitch);
       for (int x = 0; x < TEX; x++)
-        row[x] = ((x ^ y) & 1) ? 0xFFE00000 : 0xFF0000E0;  /* red / blue checker */
+        row[x] = ((x ^ y) & 1) ? 0xFFE00000 : 0xFF0000E0;
     }
     IDirect3DTexture9_UnlockRect(tex, 0);
   }

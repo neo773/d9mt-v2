@@ -11,9 +11,6 @@
 #import <CoreFoundation/CFRunLoop.h>
 #import <Metal/Metal.h>
 #import <Metal/MTL4CommandQueue.h>
-/* d9mt addition: full Metal 4 surface (codes 157..200). Explicit MTL4 imports
- * so the bridge builds even where <Metal/Metal.h> does not umbrella every
- * MTL4 header on this SDK. */
 #import <Metal/MTL4CommandAllocator.h>
 #import <Metal/MTL4CommandBuffer.h>
 #import <Metal/MTL4ArgumentTable.h>
@@ -1798,10 +1795,6 @@ fill_texture_descriptor(MTLTextureDescriptor *desc, struct WMTTextureInfo *info)
       desc.placementSparsePageSize = MTLSparsePageSize64;
     }
   }
-  // No descriptor-baked swizzle. Per-bind format/swizzle aliasing
-  // happens through newTextureView (see _MTLTexture_newTextureView +
-  // to_metal_swizzle below) so the base texture stays a clean
-  // identity-swizzle Metal object.
 };
 
 void
@@ -2080,7 +2073,7 @@ _MTLDevice_newLibrary(void *obj) {
   id<MTLDevice> device = (id<MTLDevice>)params->device;
   NSError *err = NULL;
   params->ret_library = (obj_handle_t)[device newLibraryWithData:(dispatch_data_t)params->data error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && !err && params->ret_library) {
     const void *bytes = NULL;
@@ -2148,7 +2141,7 @@ _MTLDevice_newComputePipelineState(void *obj) {
       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
   params->ret_pso =
       (obj_handle_t)[device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   if (!err && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addComputePipelineFunctionsWithDescriptor:descriptor
                                                                                                       error:&err];
@@ -2209,10 +2202,7 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   return STATUS_SUCCESS;
 }
 
-// Current render pass's render-target extent, captured when the encoder is
-// created and read when a scissor rect is applied to clamp it into bounds.
-// The encode thread creates an encoder then replays that pass's commands in
-// order before the next, so a file-static is sufficient (no interleaving).
+/* render-target extent of the current pass, for scissor clamping; safe as a file-static since passes replay strictly in order on one thread. */
 static uint32_t g_dxmt_pass_rt_w = 0;
 static uint32_t g_dxmt_pass_rt_h = 0;
 
@@ -2221,18 +2211,8 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   struct WMTRenderPassInfo *info = (struct WMTRenderPassInfo *)params->arg;
   MTLRenderPassDescriptor *descriptor = [[MTLRenderPassDescriptor alloc] init];
+  /* a gap color slot must stay at the nil/DontCare descriptor default: stamping storeAction=Store on it trips MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS. */
   for (unsigned i = 0; i < 8; i++) {
-    // Skip color slots with no texture. D3D9 (and D3D11) permit binding
-    // render targets at non-contiguous indices (e.g. RT0 + RT2 with RT1
-    // unbound); the caller reports render_target_count as highest_bound+1,
-    // so the unbound gap slot reaches here with a nil texture. Leaving it
-    // at the MTLRenderPassDescriptor default (nil texture, DontCare load
-    // and store) keeps it an inert/unused attachment that Metal ignores.
-    // Configuring it from the blanket WMTRenderPassInfo defaults instead
-    // stamps storeAction=Store onto a textureless slot, which makes
-    // MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS treat it as a live attachment
-    // with an undefined load and assert. Matches the texture-guarded
-    // depth/stencil blocks below.
     if (!info->colors[i].texture)
       continue;
     descriptor.colorAttachments[i].clearColor = MTLClearColorMake(
@@ -2277,11 +2257,7 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   descriptor.renderTargetWidth = info->render_target_width;
   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
 
-  // Capture this pass's render-target extent so scissor commands can be clamped
-  // to it at apply time (see WMTRenderCommandSetScissorRect). D3D9 blit / resolve
-  // / mip-downsample paths can hand Metal a scissor sized for the source while
-  // the destination is a smaller mip level; Vulkan auto-clamps so DXVK never
-  // needs this, but Metal's debug layer aborts on an out-of-bounds scissor.
+  /* capture this pass's extent: an out-of-bounds scissor (e.g. from a mip-downsample blit) aborts Metal's debug layer, unlike Vulkan which auto-clamps. */
   {
     id<MTLTexture> c0 = (id<MTLTexture>)info->colors[0].texture;
     id<MTLTexture> dt = (id<MTLTexture>)info->depth.texture;
@@ -2369,8 +2345,6 @@ MTLMeshRenderPipelineDescriptor ()
 
 #endif
 
-/* d9mt addition: shared between the classic entry and the
- * vertex-descriptor-capable entry below. Body unchanged from upstream. */
 static MTLRenderPipelineDescriptor *
 _wm_render_pipeline_descriptor(const struct WMTRenderPipelineInfo *info) {
   MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
@@ -2432,7 +2406,7 @@ _MTLDevice_newRenderPipelineState(void *obj) {
                                                                                               options:options
                                                                                            reflection:nil
                                                                                                 error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   const BOOL pso_created = params->ret_pso != 0;
   if (pso_created && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
@@ -2534,7 +2508,7 @@ _MTLDevice_newRenderPipelineStateWithVertexDescriptor(void *obj) {
                                                                                               options:MTLPipelineOptionNone
                                                                                            reflection:nil
                                                                                                 error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   return STATUS_SUCCESS;
 }
 
@@ -2625,7 +2599,7 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
                                                                            options:options
                                                                         reflection:nil
                                                                              error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   const BOOL pso_created = params->ret_pso != 0;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
   if (@available(macOS 15, *)) {
@@ -3222,11 +3196,6 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandSetScissorRect: {
       struct wmtcmd_render_setscissorrect *body = (struct wmtcmd_render_setscissorrect *)next;
       struct WMTScissorRect r = body->scissor_rect;
-      // Clamp into the render-pass bounds. Metal treats an out-of-bounds
-      // scissor as undefined and the debug layer aborts; the d3d9 blit / mip
-      // paths can exceed a smaller mip-level target. MoltenVK clips every
-      // scissor at this same point (MVKCommandEncoder::clipToRenderArea).
-      // No-op for in-bounds rects.
       if (g_dxmt_pass_rt_w && g_dxmt_pass_rt_h) {
         if (r.x > g_dxmt_pass_rt_w)
           r.x = g_dxmt_pass_rt_w;
@@ -3608,9 +3577,6 @@ _MTLCommandBuffer_encodeSpatialScale(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* Metal 4 spatial scaler: descriptor shared with the MTL3 path, but the
- * scaler object is created against an MTL4Compiler and encodes into an
- * MTL4CommandBuffer. */
 static NTSTATUS
 _MTLDevice_newMTL4SpatialScaler(void *obj) {
   struct unixcall_mtldevice_new_mtl4fxspatialscaler *params = obj;
@@ -3721,8 +3687,6 @@ _MetalDrawable_texture(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* D9MT_WSILOG=1: trace the unix-side present path to stderr (counts + handles)
- * so we can tell whether PE-side calls actually arrive here. */
 static int d9mt_wsilog_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -3739,9 +3703,6 @@ static int d9mt_wsilog_enabled(void) {
 static NTSTATUS
 _MetalLayer_nextDrawable(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
-  /* nextDrawable returns an AUTORELEASED drawable; the handle crosses the
-   * PE boundary and is presented later from another thread — retain here,
-   * the driver releases it right after MetalDrawable_present. */
   params->ret = (obj_handle_t)[[(CAMetalLayer *)params->handle nextDrawable] retain];
   static _Atomic unsigned n_next;
   unsigned k = n_next++;
@@ -3769,25 +3730,14 @@ static NTSTATUS
 _MetalLayer_setProps(void *obj) {
   struct unixcall_generic_obj_constptr_noret *params = obj;
   CAMetalLayer *layer = (CAMetalLayer *)params->handle;
-  /* By-value copy: the block runs AFTER this call returns and the caller's
-   * params struct is gone. */
+  /* by-value copy: the block outlives this call, after the caller's params struct is gone. */
   const struct WMTLayerProps props = *(const struct WMTLayerProps *)params->arg.ptr;
-  /* ASYNC, never dispatch_sync: a synchronous hop to the main thread
-   * deadlocks during display-mode changes — wine's main thread is blocked
-   * SendMessage'ing WM_DISPLAYCHANGE to the app thread, which sits in
-   * Reset waiting for THIS call (device lock held). Layer props are
-   * configuration, not per-frame state; applying them a beat later is
-   * harmless. Manual retain: no ARC in this TU, the block must keep the
-   * layer alive until it runs. */
   [layer retain];
   void (^apply)(void) = ^{
     layer.device = (id<MTLDevice>)props.device;
     layer.opaque = props.opaque;
     dxmt_set_layer_background_black(layer);
     layer.framebufferOnly = props.framebuffer_only;
-    /* Zero means "leave untouched": layer geometry (contentsScale,
-     * drawableSize) is owned by the window system's view layout; callers
-     * that only configure device/format must not clobber it. */
     if (props.contents_scale > 0.0)
       layer.contentsScale = props.contents_scale;
     layer.displaySyncEnabled = props.display_sync_enabled;
@@ -3801,6 +3751,7 @@ _MetalLayer_setProps(void *obj) {
   if ([NSThread isMainThread])
     apply();
   else
+    /* never dispatch_sync here: wine's main thread can be blocked SendMessage'ing WM_DISPLAYCHANGE to the app thread, which sits in Reset waiting on this call with the device lock held. */
     dispatch_async(dispatch_get_main_queue(), apply);
   return STATUS_SUCCESS;
 }
@@ -3831,7 +3782,7 @@ typedef struct macdrv_opaque_window_data *macdrv_window_data;
 typedef struct opaque_window_surface *window_surface;
 typedef struct opaque_HWND *HWND;
 struct macdrv_win_data {
-  HWND hwnd; /* hwnd that this private data belongs to */
+  HWND hwnd;
   macdrv_window cocoa_window;
   macdrv_view cocoa_view;
   macdrv_view client_cocoa_view;
@@ -3890,24 +3841,7 @@ _CreateMetalViewFromHWND(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- window visibility (occlusion / Space) -------------------------------
- *
- * CoreAnimation stops retiring presented drawables once a layer is not
- * composited; the pool then drains and nextDrawable blocks ~1s per frame
- * (allowsNextDrawableTimeout default YES). The driver must therefore stop
- * acquiring drawables while the window is not visible, which needs a truthful
- * visibility signal.
- *
- * occlusionState / isOnActiveSpace are AppKit state and must be touched on the
- * main thread, but a synchronous hop from the render thread deadlocks (see
- * MetalLayer_setProps). So: observe the notifications on the main thread and
- * publish into an atomic the caller reads lock-free. A few ms of staleness is
- * harmless — this gates frame acquisition, not correctness.
- *
- * Apple counts "a Mission Control space where the user isn't working" as
- * hidden, which is why the Space swipe must be covered by isOnActiveSpace and
- * not by occlusionState alone.
- */
+/* CoreAnimation stops retiring drawables once a layer is uncomposited (occluded/different Space), so nextDrawable then blocks ~1s/frame unless gated on visibility read via this main-thread-fed atomic. */
 static _Atomic(void *) g_vis_view;
 static _Atomic uint64_t g_vis_flags;
 static _Atomic int g_vis_observing;
@@ -3924,8 +3858,6 @@ dxmt_vis_refresh(NSView *view) {
     if (win.isMiniaturized)
       flags |= WMT_VISIBILITY_MINIATURIZED;
   } else {
-    /* No window yet (view not installed): report visible so startup frames are
-     * not suppressed. */
     flags = WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE;
   }
   atomic_store(&g_vis_flags, flags);
@@ -3945,7 +3877,6 @@ _MetalView_visibility(void *obj) {
     atomic_store(&g_vis_observing, 0);
 
   if (atomic_exchange(&g_vis_observing, 1) == 0) {
-    /* Seed optimistically so the first frames are not gated on the async hop. */
     atomic_store(&g_vis_flags,
       WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE);
 
@@ -3964,8 +3895,6 @@ _MetalView_visibility(void *obj) {
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification
                         object:win queue:[NSOperationQueue mainQueue] usingBlock:update];
       }
-      /* Space changes do not post a window notification; isOnActiveSpace must
-       * be re-read when the active Space changes. */
       [[[NSWorkspace sharedWorkspace] notificationCenter]
         addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
                     object:nil queue:[NSOperationQueue mainQueue] usingBlock:update];
@@ -4429,14 +4358,6 @@ sm50_compilation_argument32_free(struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *f
   }
 }
 
-/* DXSO compilation argument chain: same shape as SM50's 32-bit
-   chain conversion (sm50_compilation_argument32_convert). DXSO has
-   its own enum + struct family so the d3d9 caller picks the right
-   types at compile time, but the wire-form is byte-identical to
-   SM50's so we reuse the same UInt32ToPtr unpack pattern. The IA
-   layout's `elements` pointer points at app-side memory: already
-   in the wow64 32-bit address space: so it round-trips through
-   UInt32ToPtr without further translation. */
 struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 {
   uint32_t next;
   enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
@@ -4743,7 +4664,7 @@ static NTSTATUS
 thunk32_AirconvUnsupportedGetArgumentsInfo(void *args) {
   return STATUS_SUCCESS;
 }
-#endif /* DXMT_NATIVE */
+#endif
 
 static NTSTATUS
 _MTLCommandBuffer_error(void *obj) {
@@ -4869,8 +4790,8 @@ _WMTGetSecondaryDisplayId(void *obj) {
 }
 
 typedef struct icc_XYZ_t {
-  uint32_t sig;      // 0x205a5958
-  uint32_t reserved; // 0
+  uint32_t sig;
+  uint32_t reserved;
   int32_t x;
   int32_t y;
   int32_t z;
@@ -5000,7 +4921,7 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
   }
 
   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && params->ret && !err) {
     pthread_mutex_lock(&dxmt_apitrace_lock);
@@ -5113,7 +5034,6 @@ _MTLSharedEvent_setWin32EventAtValue(void *obj) {
       notifyListener:q->shared_listener
              atValue:params->value
                block:^(id<MTLSharedEvent> _e, uint64_t _v) {
-                 // NOTE: must ensure no more notification comes after listener been destroyed.
                  while (!atomic_load_explicit(&q->runloop_ref, memory_order_acquire)) {
 #if defined(__x86_64__)
                    _mm_pause();
@@ -5135,7 +5055,6 @@ _SharedEventListener_start(void *obj) {
   shared_event_listener_t q = (shared_event_listener_t)params->handle;
   CFRunLoopRef uninited = NULL;
   if (q && atomic_compare_exchange_strong(&q->runloop_ref, &uninited, CFRunLoopGetCurrent())) {
-    /* Add a dummy source so the runloop stays running */
     CFRunLoopSourceContext source_context = {0};
     CFRunLoopSourceRef source = CFRunLoopSourceCreate(NULL, 0, &source_context);
     CFRunLoopAddSource(q->runloop_ref, source, kCFRunLoopCommonModes);
@@ -5173,7 +5092,6 @@ _SharedEventListener_destroy(void *obj) {
 #else
 static NTSTATUS
 _MTLSharedEvent_setWin32EventAtValue(void *obj) {
-  // nop
   return STATUS_SUCCESS;
 }
 
@@ -5256,7 +5174,7 @@ _MTLDevice_newBinaryArchive(void *obj) {
   }
   NSError *err = NULL;
   params->ret_archive = (obj_handle_t)[(id<MTLDevice>)params->device newBinaryArchiveWithDescriptor:desc error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   [desc release];
   if (url)
     [url release];
@@ -5272,7 +5190,7 @@ _MTLBinaryArchive_serialize(void *obj) {
   NSURL *url = [[NSURL alloc] initFileURLWithPath:path_str];
   NSError *err = NULL;
   [(id<MTLBinaryArchive>)params->archive serializeToURL:url error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   [url release];
   [path_str release];
   return STATUS_SUCCESS;
@@ -5280,14 +5198,8 @@ _MTLBinaryArchive_serialize(void *obj) {
 
 static NTSTATUS
 _DispatchData_alloc_init(void *obj) {
+  /* explicit malloc+memcpy, not libdispatch's copy-on-DEFAULT: the latter has produced flaky AGX XPC failures at PSO link time. */
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
-  // dispatch_data_create with destructor=NULL is documented as
-  // "DISPATCH_DATA_DESTRUCTOR_DEFAULT" and copies the bytes, but the
-  // copy semantics across libdispatch versions and wine's loader
-  // surface have given us flaky AGX XPC failures at PSO link time on
-  // the d3d9 path. Explicitly malloc + memcpy + DISPATCH_DATA_DESTRUCTOR_FREE
-  // makes ownership unambiguous: the dispatch_data owns the buffer
-  // outright and frees via free(3) on last release.
   void *copy = malloc(params->arg);
   memcpy(copy, (void *)params->handle, params->arg);
   params->ret = (obj_handle_t)dispatch_data_create(
@@ -5322,7 +5234,7 @@ _MTLDevice_newSharedTexture(void *obj) {
     MTLSharedTextureHandle *handle = [ret newSharedTextureHandle];
     params->ret = (obj_handle_t)ret;
     info->gpu_resource_id = [ret gpuResourceID]._impl;
-    info->mach_port = [handle createMachPort]; // implicitly add ref to underlying IOSurface
+    info->mach_port = [handle createMachPort];
     [handle release];
     [desc release];
   }
@@ -5330,7 +5242,6 @@ _MTLDevice_newSharedTexture(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* Private API to register a mach port with the bootstrap server */
 extern kern_return_t bootstrap_register2(mach_port_t bp, name_t service_name, mach_port_t sp, int flags);
 
 static NTSTATUS
@@ -5378,12 +5289,10 @@ _MTLSharedEvent_createMachPort(void *obj) {
   id<MTLSharedEvent> event = (id<MTLSharedEvent>)params->event;
   MTLSharedEventHandle *handle = [event newSharedEventHandle];
   mach_port_t port = [handle eventPort];
-  
-  // The eventPort method returns a send right that's owned by the handle.
-  // We need to add our own send right since we're keeping the port but releasing the handle.
-  // This increments the send right count so the port remains valid.
+
+  /* eventPort's send right is owned by the handle; add our own so the port stays valid once the handle is released below. */
   mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1);
-  
+
   params->ret_mach_port = port;
   [handle release];
   return STATUS_SUCCESS;
@@ -5537,7 +5446,7 @@ _MTLDevice_newTileRenderPipelineState(void *obj) {
                                                                                                   options:options
                                                                                                reflection:nil
                                                                                                     error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   const BOOL pso_created = params->ret_pso != 0;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
   if (@available(macOS 15, *)) {
@@ -5699,9 +5608,6 @@ static NTSTATUS _WMTApitraceCommandBufferCommit(void *obj) { (void)obj; return S
 static NTSTATUS _WMTApitracePresentDrawable(void *obj) { (void)obj; return STATUS_SUCCESS; }
 #endif
 
-/*
- * Definition from cache.c
- */
 
 NTSTATUS _CacheReader_alloc_init(void *obj);
 NTSTATUS _CacheReader_get(void *obj);
@@ -5709,10 +5615,6 @@ NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
-/* d9mt addition: AIR shader-compile thunks (D3D9 SM3 -> AIR), backed by the
- * d9mtair compile core (AirBuilder + LLVM), linked into this dylib. Params are
- * all 8-byte/arch-invariant, so the 64-bit thunks are wow64 byte-compatible
- * (see DXSODestroy note pattern). */
 struct d9mt_air_version_params;
 struct d9mt_air_compile_params;
 struct d9mt_air_free_params;
@@ -5727,7 +5629,6 @@ thunk_D9MTAirVersion(void *args) {
 
 static NTSTATUS
 thunk_D9MTAirCompile(void *args) {
-  /* status travels inside the param struct; the call itself succeeds */
   d9mtair_compile(args);
   return STATUS_SUCCESS;
 }
@@ -5738,12 +5639,7 @@ thunk_D9MTAirFree(void *args) {
   return STATUS_SUCCESS;
 }
 
-/* ===================================================================== *
- * d9mt addition: the full Metal 4 surface (dispatch codes 157..200).
- * Obj-C (MRC, like the rest of this file). Handles are id<...> casts.
- * ===================================================================== */
 
-/* --- device factories (157..162) ------------------------------------- */
 static NTSTATUS
 _MTLDevice_newMTL4CommandQueue(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
@@ -5812,7 +5708,6 @@ _MTLDevice_newResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- command allocator (163) ----------------------------------------- */
 static NTSTATUS
 _MTL4CommandAllocator_reset(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -5820,7 +5715,6 @@ _MTL4CommandAllocator_reset(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- command buffer (164..166) --------------------------------------- */
 static NTSTATUS
 _MTL4CommandBuffer_beginCommandBuffer(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
@@ -5842,14 +5736,11 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- command queue (167..171) ---------------------------------------- */
 static NTSTATUS
 _MTL4CommandQueue_commit(void *obj) {
   struct unixcall_mtl4_queue_commit *params = obj;
   const obj_handle_t *handles = params->cmdbufs.ptr;
   NSUInteger count = (NSUInteger)params->count;
-  /* obj_handle_t is a uint64 id-bitpattern; MTL4 commit wants a contiguous
-   * id<MTL4CommandBuffer>[] — reinterpret the handle array in place. */
   if (getenv("D9MT_WSILOG")) {
     static _Atomic unsigned n_commit;
     unsigned k = n_commit++;
@@ -5896,7 +5787,6 @@ _MTL4CommandQueue_waitForEvent(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- argument table (172..175) --------------------------------------- */
 static NTSTATUS
 _MTL4ArgumentTable_setAddress(void *obj) {
   struct unixcall_mtl4_argtable_setaddress *params = obj;
@@ -5929,7 +5819,6 @@ _MTL4ArgumentTable_setSamplerState(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- render command encoder (176..188) ------------------------------- */
 static MTL4RenderPassDescriptor *
 _wm_mtl4_render_pass_descriptor(const struct WMTRenderPassInfo *info) {
   MTL4RenderPassDescriptor *descriptor = [[MTL4RenderPassDescriptor alloc] init];
@@ -6097,7 +5986,6 @@ _MTL4RenderCommandEncoder_drawIndexedPrimitives(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- compute command encoder (189..195) ------------------------------ */
 static NTSTATUS
 _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
@@ -6200,7 +6088,6 @@ _MTL4ComputeCommandEncoder_generateMipmaps(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- compiler + render pipeline (196) -------------------------------- */
 static NTSTATUS
 _MTL4Compiler_newRenderPipelineState(void *obj) {
   struct unixcall_mtl4_newrenderpso *params = obj;
@@ -6264,12 +6151,11 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:nil
                                                                                                    error:&err];
-  params->ret_error = (obj_handle_t)[err retain];   /* +1 across the boundary; PE releases */
+  params->ret_error = (obj_handle_t)[err retain];
   [descriptor release];
   return STATUS_SUCCESS;
 }
 
-/* --- residency set (197..200) ---------------------------------------- */
 static NTSTATUS
 _MTLResidencySet_addAllocation(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
@@ -6305,7 +6191,6 @@ _MTLResidencySet_removeAllAllocations(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- drawable present (201) ------------------------------------------ */
 static NTSTATUS
 _MetalDrawable_present(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -6324,7 +6209,6 @@ _MetalDrawable_presentAfterMinimumDuration(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- render encoder visibility mode (202) ---------------------------- */
 static NTSTATUS
 _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
   struct unixcall_mtl4_setvisibilitymode *params = obj;
@@ -6333,11 +6217,6 @@ _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- cross-encoder producer barrier (203) --------------------------- *
- * -[MTL4CommandEncoder barrierAfterStages:beforeQueueStages:visibilityOptions:]
- * is declared on the MTL4CommandEncoder protocol both the render and compute
- * encoders adopt, so one thunk orders either encoder's writes ahead of later
- * queue stages (SOURCE_OF_TRUTH §4c). */
 static NTSTATUS
 _MTL4CommandEncoder_barrier(void *obj) {
   struct unixcall_mtl4_barrier *params = obj;
@@ -6348,9 +6227,6 @@ _MTL4CommandEncoder_barrier(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- drawable residency + queue-level attach (205..207) -------------- *
- * The layer's residencySet is read-only and layer-owned: return it
- * BORROWED (no retain — attaching it to the queue retains it unix-side). */
 static NTSTATUS
 _MetalLayer_residencySet(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
@@ -6372,14 +6248,6 @@ _MTL4CommandQueue_removeResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- MTL4 render command stream (208) --------------------------------- *
- * One crossing per batch: replays the PE-built wmtcmd_mtl4_* chain natively
- * (the Metal-4 counterpart of _MTLRenderCommandEncoder_encodeCommands
- * above). Argument-table commands carry their own table handle —
- * MTL4ArgumentTable is not an encoder object — so table writes and the
- * draws that read them stay in one ordered stream. Every payload is a
- * record-time snapshot; nothing is resolved here. The pooled dispatch
- * wrapper's autoreleasepool covers the whole replay. */
 static NTSTATUS
 _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
@@ -6502,15 +6370,7 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* --- autorelease-pool dispatch wrappers --------------------------------- *
- * Wine threads have no NSAutoreleasePool, so every autoreleased object a
- * Metal/CA call produces on this side would leak for the process lifetime
- * (objc "MISSING POOLS ... just leaking"). Each unix call therefore runs
- * inside its own pool. Returned handles survive the drain by convention:
- * creation calls return +1 references and property getters return objects
- * owned by longer-lived parents (drawable.texture, layer.residencySet).
- * NSObject_retain/release stay unwrapped: pure refcount ops, no autorelease,
- * and they are the hottest entries. */
+/* wine threads have no NSAutoreleasePool, so each unix call wraps its own; returned handles must survive the drain (creation calls return +1, getters return objects owned by a longer-lived parent). */
 #define D9MT_POOLED(fn) \
   static NTSTATUS fn##_pooled(void *obj) { \
     NTSTATUS status; \
@@ -6881,8 +6741,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers_pooled,
     &_MTLCommandBuffer_property_pooled,
     &_MTLDevice_newTileRenderPipelineState_pooled,
-    // Upstream apitrace block: indices 136..142 (UNIX_CALL hard-codes
-    // these in winemetal_thunks.c WMTApitrace*).
+    /* indices in this and the apitrace/DXSO blocks below are hard-coded by UNIX_CALL in winemetal_thunks.c and unix_dxso_* in airconv_thunks.h; insertions above must move those in lock-step. */
     &_WMTApitraceSessionEnsureOpen_pooled,
     &_WMTApitraceSessionClose_pooled,
     &_WMTApitraceSetCurrentD3DSequence_pooled,
@@ -6895,79 +6754,71 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newPlacementHeap_pooled,
     &_MTLDevice_updateSparseTextureMappings_pooled,
     &_WMTApitraceSessionFlush_pooled,
-    // DXSO block: indices 148..152, must match unix_dxso_* in
-    // airconv_thunks.h. It sits immediately after upstream's apitrace +
-    // sparse entries; if upstream inserts more above this line, move both
-    // this block and the airconv_thunks.h anchor forward in lock-step.
     &thunk_DXSOInitialize_pooled,
     &thunk_DXSODestroy_pooled,
     &thunk_DXSOCompile_pooled,
     &thunk_DXSOGetCompiledBitcode_pooled,
     &thunk_DXSODestroyBitcode_pooled,
-    /* d9mt additions: codes 153..156, lock-step in both tables.
-       All param layouts are 8-byte/arch-invariant: shared thunks. */
     &_MTLDevice_newRenderPipelineStateWithVertexDescriptor_pooled,
     &thunk_D9MTAirVersion_pooled,
     &thunk_D9MTAirCompile_pooled,
     &thunk_D9MTAirFree_pooled,
-    /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step in both
-       tables. All param layouts are 8-byte/arch-invariant: shared thunks. */
-    &_MTLDevice_newMTL4CommandQueue_pooled,                        /* 157 */
-    &_MTLDevice_newCommandAllocator_pooled,                        /* 158 */
-    &_MTLDevice_newMTL4CommandBuffer_pooled,                       /* 159 */
-    &_MTLDevice_newArgumentTable_pooled,                           /* 160 */
-    &_MTLDevice_newMTL4Compiler_pooled,                            /* 161 */
-    &_MTLDevice_newResidencySet_pooled,                            /* 162 */
-    &_MTL4CommandAllocator_reset_pooled,                           /* 163 */
-    &_MTL4CommandBuffer_beginCommandBuffer_pooled,                 /* 164 */
-    &_MTL4CommandBuffer_endCommandBuffer_pooled,                   /* 165 */
-    &_MTL4CommandBuffer_useResidencySet_pooled,                    /* 166 */
-    &_MTL4CommandQueue_commit_pooled,                              /* 167 */
-    &_MTL4CommandQueue_waitForDrawable_pooled,                     /* 168 */
-    &_MTL4CommandQueue_signalDrawable_pooled,                      /* 169 */
-    &_MTL4CommandQueue_signalEvent_pooled,                         /* 170 */
-    &_MTL4CommandQueue_waitForEvent_pooled,                        /* 171 */
-    &_MTL4ArgumentTable_setAddress_pooled,                         /* 172 */
-    &_MTL4ArgumentTable_setAddressWithStride_pooled,               /* 173 */
-    &_MTL4ArgumentTable_setTexture_pooled,                         /* 174 */
-    &_MTL4ArgumentTable_setSamplerState_pooled,                    /* 175 */
-    &_MTL4CommandBuffer_renderCommandEncoder_pooled,               /* 176 */
-    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,            /* 177 */
-    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,      /* 178 */
-    &_MTL4RenderCommandEncoder_setViewport_pooled,                 /* 179 */
-    &_MTL4RenderCommandEncoder_setScissorRect_pooled,              /* 180 */
-    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,        /* 181 */
-    &_MTL4RenderCommandEncoder_setCullMode_pooled,                 /* 182 */
-    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,       /* 183 */
-    &_MTL4RenderCommandEncoder_setDepthBias_pooled,                /* 184 */
-    &_MTL4RenderCommandEncoder_setBlendColor_pooled,               /* 185 */
-    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,    /* 186 */
-    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,              /* 187 */
-    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,       /* 188 */
-    &_MTL4CommandBuffer_computeCommandEncoder_pooled,              /* 189 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,     /* 190 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,    /* 191 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,   /* 192 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,    /* 193 */
-    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,                 /* 194 */
-    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,            /* 195 */
-    &_MTL4Compiler_newRenderPipelineState_pooled,                  /* 196 */
-    &_MTLResidencySet_addAllocation_pooled,                        /* 197 */
-    &_MTLResidencySet_commit_pooled,                               /* 198 */
-    &_MTLResidencySet_requestResidency_pooled,                     /* 199 */
-    &_MTLResidencySet_removeAllAllocations_pooled,                 /* 200 */
-    &_MetalDrawable_present_pooled,                                /* 201 */
-    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,     /* 202 */
-    &_MTL4CommandEncoder_barrier_pooled,                           /* 203 */
-    &_MTLResidencySet_removeAllocation_pooled,                     /* 204 */
-    &_MetalLayer_residencySet_pooled,                              /* 205 */
-    &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
-    &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
-    &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
+    &_MTLDevice_newMTL4CommandQueue_pooled,
+    &_MTLDevice_newCommandAllocator_pooled,
+    &_MTLDevice_newMTL4CommandBuffer_pooled,
+    &_MTLDevice_newArgumentTable_pooled,
+    &_MTLDevice_newMTL4Compiler_pooled,
+    &_MTLDevice_newResidencySet_pooled,
+    &_MTL4CommandAllocator_reset_pooled,
+    &_MTL4CommandBuffer_beginCommandBuffer_pooled,
+    &_MTL4CommandBuffer_endCommandBuffer_pooled,
+    &_MTL4CommandBuffer_useResidencySet_pooled,
+    &_MTL4CommandQueue_commit_pooled,
+    &_MTL4CommandQueue_waitForDrawable_pooled,
+    &_MTL4CommandQueue_signalDrawable_pooled,
+    &_MTL4CommandQueue_signalEvent_pooled,
+    &_MTL4CommandQueue_waitForEvent_pooled,
+    &_MTL4ArgumentTable_setAddress_pooled,
+    &_MTL4ArgumentTable_setAddressWithStride_pooled,
+    &_MTL4ArgumentTable_setTexture_pooled,
+    &_MTL4ArgumentTable_setSamplerState_pooled,
+    &_MTL4CommandBuffer_renderCommandEncoder_pooled,
+    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,
+    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,
+    &_MTL4RenderCommandEncoder_setViewport_pooled,
+    &_MTL4RenderCommandEncoder_setScissorRect_pooled,
+    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,
+    &_MTL4RenderCommandEncoder_setCullMode_pooled,
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,
+    &_MTL4RenderCommandEncoder_setDepthBias_pooled,
+    &_MTL4RenderCommandEncoder_setBlendColor_pooled,
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,
+    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,
+    &_MTL4CommandBuffer_computeCommandEncoder_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,
+    &_MTL4Compiler_newRenderPipelineState_pooled,
+    &_MTLResidencySet_addAllocation_pooled,
+    &_MTLResidencySet_commit_pooled,
+    &_MTLResidencySet_requestResidency_pooled,
+    &_MTLResidencySet_removeAllAllocations_pooled,
+    &_MetalDrawable_present_pooled,
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,
+    &_MTL4CommandEncoder_barrier_pooled,
+    &_MTLResidencySet_removeAllocation_pooled,
+    &_MetalLayer_residencySet_pooled,
+    &_MTL4CommandQueue_addResidencySet_pooled,
+    &_MTL4CommandQueue_removeResidencySet_pooled,
+    &_MTL4RenderCommandEncoder_encodeCommands_pooled,
     &_MTLDevice_newMTL4SpatialScaler_pooled,
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
-    &_MetalDrawable_presentAfterMinimumDuration_pooled,            /* 211 */
-    &_MetalView_visibility_pooled,                                 /* 212 */
+    &_MetalDrawable_presentAfterMinimumDuration_pooled,
+    &_MetalView_visibility_pooled,
 
 };
 
@@ -7109,8 +6960,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers_pooled,
     &_MTLCommandBuffer_property_pooled,
     &_MTLDevice_newTileRenderPipelineState_pooled,
-    // Upstream apitrace block: indices 136..142, lock-step with the
-    // 64-bit table above.
+    /* this array must stay index-lock-step with __wine_unix_call_funcs above and unix_dxso_* in airconv_thunks.h. */
     &_WMTApitraceSessionEnsureOpen_pooled,
     &_WMTApitraceSessionClose_pooled,
     &_WMTApitraceSetCurrentD3DSequence_pooled,
@@ -7123,83 +6973,72 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newPlacementHeap_pooled,
     &_MTLDevice_updateSparseTextureMappings_pooled,
     &_WMTApitraceSessionFlush_pooled,
-    // DXSO block: indices 148..152, lock-step with __wine_unix_call_funcs
-    // above and with unix_dxso_* in airconv_thunks.h. Sits immediately
-    // after the apitrace + sparse entries (136..147).
     &thunk32_DXSOInitialize_pooled,
-    /* dxso_destroy_params holds only sm50_ptr64_t (always 8 bytes), so
-       the 64-bit thunk is byte-compatible: no thunk32 needed. */
+    /* dxso_destroy_params and dxso_destroy_bitcode_params are sm50_ptr64_t-only, so the 64-bit thunk is byte-compatible here: no thunk32 needed. */
     &thunk_DXSODestroy_pooled,
     &thunk32_DXSOCompile_pooled,
     &thunk32_DXSOGetCompiledBitcode_pooled,
-    /* dxso_destroy_bitcode_params is sm50_ptr64_t-only, see DXSODestroy
-       comment above. */
     &thunk_DXSODestroyBitcode_pooled,
-    /* d9mt additions: codes 153..156, lock-step in both tables.
-       All param layouts are 8-byte/arch-invariant: shared thunks. */
     &_MTLDevice_newRenderPipelineStateWithVertexDescriptor_pooled,
     &thunk_D9MTAirVersion_pooled,
     &thunk_D9MTAirCompile_pooled,
     &thunk_D9MTAirFree_pooled,
-    /* d9mt additions: full Metal 4 surface, codes 157..200, lock-step with
-       __wine_unix_call_funcs above. Params are 8-byte/arch-invariant, so the
-       64-bit thunks are byte-compatible for wow64: shared, no thunk32 twins. */
-    &_MTLDevice_newMTL4CommandQueue_pooled,                        /* 157 */
-    &_MTLDevice_newCommandAllocator_pooled,                        /* 158 */
-    &_MTLDevice_newMTL4CommandBuffer_pooled,                       /* 159 */
-    &_MTLDevice_newArgumentTable_pooled,                           /* 160 */
-    &_MTLDevice_newMTL4Compiler_pooled,                            /* 161 */
-    &_MTLDevice_newResidencySet_pooled,                            /* 162 */
-    &_MTL4CommandAllocator_reset_pooled,                           /* 163 */
-    &_MTL4CommandBuffer_beginCommandBuffer_pooled,                 /* 164 */
-    &_MTL4CommandBuffer_endCommandBuffer_pooled,                   /* 165 */
-    &_MTL4CommandBuffer_useResidencySet_pooled,                    /* 166 */
-    &_MTL4CommandQueue_commit_pooled,                              /* 167 */
-    &_MTL4CommandQueue_waitForDrawable_pooled,                     /* 168 */
-    &_MTL4CommandQueue_signalDrawable_pooled,                      /* 169 */
-    &_MTL4CommandQueue_signalEvent_pooled,                         /* 170 */
-    &_MTL4CommandQueue_waitForEvent_pooled,                        /* 171 */
-    &_MTL4ArgumentTable_setAddress_pooled,                         /* 172 */
-    &_MTL4ArgumentTable_setAddressWithStride_pooled,               /* 173 */
-    &_MTL4ArgumentTable_setTexture_pooled,                         /* 174 */
-    &_MTL4ArgumentTable_setSamplerState_pooled,                    /* 175 */
-    &_MTL4CommandBuffer_renderCommandEncoder_pooled,               /* 176 */
-    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,            /* 177 */
-    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,      /* 178 */
-    &_MTL4RenderCommandEncoder_setViewport_pooled,                 /* 179 */
-    &_MTL4RenderCommandEncoder_setScissorRect_pooled,              /* 180 */
-    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,        /* 181 */
-    &_MTL4RenderCommandEncoder_setCullMode_pooled,                 /* 182 */
-    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,       /* 183 */
-    &_MTL4RenderCommandEncoder_setDepthBias_pooled,                /* 184 */
-    &_MTL4RenderCommandEncoder_setBlendColor_pooled,               /* 185 */
-    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,    /* 186 */
-    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,              /* 187 */
-    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,       /* 188 */
-    &_MTL4CommandBuffer_computeCommandEncoder_pooled,              /* 189 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,     /* 190 */
-    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,    /* 191 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,   /* 192 */
-    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,    /* 193 */
-    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,                 /* 194 */
-    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,            /* 195 */
-    &_MTL4Compiler_newRenderPipelineState_pooled,                  /* 196 */
-    &_MTLResidencySet_addAllocation_pooled,                        /* 197 */
-    &_MTLResidencySet_commit_pooled,                               /* 198 */
-    &_MTLResidencySet_requestResidency_pooled,                     /* 199 */
-    &_MTLResidencySet_removeAllAllocations_pooled,                 /* 200 */
-    &_MetalDrawable_present_pooled,                                /* 201 */
-    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,     /* 202 */
-    &_MTL4CommandEncoder_barrier_pooled,                           /* 203 */
-    &_MTLResidencySet_removeAllocation_pooled,                     /* 204 */
-    &_MetalLayer_residencySet_pooled,                              /* 205 */
-    &_MTL4CommandQueue_addResidencySet_pooled,                     /* 206 */
-    &_MTL4CommandQueue_removeResidencySet_pooled,                  /* 207 */
-    &_MTL4RenderCommandEncoder_encodeCommands_pooled,              /* 208 */
+    &_MTLDevice_newMTL4CommandQueue_pooled,
+    &_MTLDevice_newCommandAllocator_pooled,
+    &_MTLDevice_newMTL4CommandBuffer_pooled,
+    &_MTLDevice_newArgumentTable_pooled,
+    &_MTLDevice_newMTL4Compiler_pooled,
+    &_MTLDevice_newResidencySet_pooled,
+    &_MTL4CommandAllocator_reset_pooled,
+    &_MTL4CommandBuffer_beginCommandBuffer_pooled,
+    &_MTL4CommandBuffer_endCommandBuffer_pooled,
+    &_MTL4CommandBuffer_useResidencySet_pooled,
+    &_MTL4CommandQueue_commit_pooled,
+    &_MTL4CommandQueue_waitForDrawable_pooled,
+    &_MTL4CommandQueue_signalDrawable_pooled,
+    &_MTL4CommandQueue_signalEvent_pooled,
+    &_MTL4CommandQueue_waitForEvent_pooled,
+    &_MTL4ArgumentTable_setAddress_pooled,
+    &_MTL4ArgumentTable_setAddressWithStride_pooled,
+    &_MTL4ArgumentTable_setTexture_pooled,
+    &_MTL4ArgumentTable_setSamplerState_pooled,
+    &_MTL4CommandBuffer_renderCommandEncoder_pooled,
+    &_MTL4RenderCommandEncoder_setArgumentTable_pooled,
+    &_MTL4RenderCommandEncoder_setRenderPipelineState_pooled,
+    &_MTL4RenderCommandEncoder_setViewport_pooled,
+    &_MTL4RenderCommandEncoder_setScissorRect_pooled,
+    &_MTL4RenderCommandEncoder_setDepthStencilState_pooled,
+    &_MTL4RenderCommandEncoder_setCullMode_pooled,
+    &_MTL4RenderCommandEncoder_setFrontFacingWinding_pooled,
+    &_MTL4RenderCommandEncoder_setDepthBias_pooled,
+    &_MTL4RenderCommandEncoder_setBlendColor_pooled,
+    &_MTL4RenderCommandEncoder_setStencilReferenceValue_pooled,
+    &_MTL4RenderCommandEncoder_drawPrimitives_pooled,
+    &_MTL4RenderCommandEncoder_drawIndexedPrimitives_pooled,
+    &_MTL4CommandBuffer_computeCommandEncoder_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromBufferToBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromBufferToTexture_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromTextureToTexture_pooled,
+    &_MTL4ComputeCommandEncoder_copyFromTextureToBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_fillBuffer_pooled,
+    &_MTL4ComputeCommandEncoder_generateMipmaps_pooled,
+    &_MTL4Compiler_newRenderPipelineState_pooled,
+    &_MTLResidencySet_addAllocation_pooled,
+    &_MTLResidencySet_commit_pooled,
+    &_MTLResidencySet_requestResidency_pooled,
+    &_MTLResidencySet_removeAllAllocations_pooled,
+    &_MetalDrawable_present_pooled,
+    &_MTL4RenderCommandEncoder_setVisibilityResultMode_pooled,
+    &_MTL4CommandEncoder_barrier_pooled,
+    &_MTLResidencySet_removeAllocation_pooled,
+    &_MetalLayer_residencySet_pooled,
+    &_MTL4CommandQueue_addResidencySet_pooled,
+    &_MTL4CommandQueue_removeResidencySet_pooled,
+    &_MTL4RenderCommandEncoder_encodeCommands_pooled,
     &_MTLDevice_newMTL4SpatialScaler_pooled,
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
-    &_MetalDrawable_presentAfterMinimumDuration_pooled,            /* 211 */
-    &_MetalView_visibility_pooled,                                 /* 212 */
+    &_MetalDrawable_presentAfterMinimumDuration_pooled,
+    &_MetalView_visibility_pooled,
 
 };
 #endif

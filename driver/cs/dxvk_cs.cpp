@@ -4,23 +4,18 @@
 #include "../util/util_error.h"
 #include "../util/log/log.h"
 
-// PHASE-C: DXVK's per-chunk stat counters (m_device/m_context->addStatCtr with
-// DxvkStatCounter::Cs*) are pure profiling and were stripped here — they are not
-// part of the load-bearing deferred-recording model (doc 01 §2). Reintroduce
-// against MtlDevice/MtlContext profiling if/when the driver grows a stat system.
-
 namespace dxvk {
-  
+
   DxvkCsChunk::DxvkCsChunk() {
-    
+
   }
-  
-  
+
+
   DxvkCsChunk::~DxvkCsChunk() {
     this->reset();
   }
-  
-  
+
+
   void DxvkCsChunk::init(DxvkCsChunkFlags flags) {
     m_flags = flags;
   }
@@ -28,10 +23,10 @@ namespace dxvk {
 
   void DxvkCsChunk::executeAll(MtlContext* ctx) {
     auto cmd = m_head;
-    
+
     if (m_flags.test(DxvkCsChunkFlag::SingleUse)) {
       m_commandOffset = 0;
-      
+
       while (cmd != nullptr) {
         auto next = cmd->next();
         cmd->exec(ctx);
@@ -48,8 +43,8 @@ namespace dxvk {
       }
     }
   }
-  
-  
+
+
   void DxvkCsChunk::reset() {
     auto cmd = m_head;
 
@@ -58,71 +53,71 @@ namespace dxvk {
       cmd->~DxvkCsCmd();
       cmd = next;
     }
-    
+
     m_head = nullptr;
     m_next = &m_head;
 
     m_commandOffset = 0;
   }
-  
-  
+
+
   DxvkCsChunkPool::DxvkCsChunkPool() {
-    
+
   }
-  
-  
+
+
   DxvkCsChunkPool::~DxvkCsChunkPool() {
     for (DxvkCsChunk* chunk : m_chunks)
       delete chunk;
   }
-  
-  
+
+
   DxvkCsChunk* DxvkCsChunkPool::allocChunk(DxvkCsChunkFlags flags) {
     DxvkCsChunk* chunk = nullptr;
 
     { std::lock_guard<dxvk::mutex> lock(m_mutex);
-      
+
       if (m_chunks.size() != 0) {
         chunk = m_chunks.back();
         m_chunks.pop_back();
       }
     }
-    
+
     if (!chunk)
       chunk = new DxvkCsChunk();
-    
+
     chunk->init(flags);
     return chunk;
   }
-  
-  
+
+
   void DxvkCsChunkPool::freeChunk(DxvkCsChunk* chunk) {
     chunk->reset();
-    
+
     std::lock_guard<dxvk::mutex> lock(m_mutex);
     m_chunks.push_back(chunk);
   }
-  
-  
+
+
   DxvkCsThread::DxvkCsThread(
     const Rc<MtlDevice>&   device,
     const Rc<MtlContext>&  context)
   : m_device(device), m_context(context),
     m_thread([this] { threadFunc(); }) {
-    
+
   }
-  
-  
+
+
   DxvkCsThread::~DxvkCsThread() {
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
       m_stopped.store(true);
     }
-    
+
     m_condOnAdd.notify_one();
     m_thread.join();
   }
-  
-  
+
+
   uint64_t DxvkCsThread::dispatchChunk(DxvkCsChunkRef&& chunk) {
     uint64_t seq;
 
@@ -135,7 +130,7 @@ namespace dxvk {
 
       m_condOnAdd.notify_one();
     }
-    
+
     return seq;
   }
 
@@ -156,8 +151,6 @@ namespace dxvk {
       m_condOnAdd.notify_one();
 
       if (queue == DxvkCsQueue::HighPriority) {
-        // Worker will check this flag after executing any
-        // chunk without causing additional lock contention
         m_hasHighPrio.store(true);
       }
     }
@@ -173,12 +166,7 @@ namespace dxvk {
 
 
   void DxvkCsThread::synchronize(uint64_t seq) {
-    // Avoid locking if we know the sync is a no-op, may
-    // reduce overhead if this is being called frequently
     if (seq > m_seqOrdered.load()) {
-      // We don't need to lock the queue here, if synchronization
-      // happens while another thread is submitting then there is
-      // an inherent race anyway
       if (seq == SynchronizeAll)
         seq = m_queueOrdered.seqDispatch;
 
@@ -187,16 +175,13 @@ namespace dxvk {
           return m_seqOrdered.load() >= seq;
         });
       }
-      // PHASE-C: CsSyncCount / CsSyncTicks stat counters stripped.
     }
   }
-  
-  
+
+
   void DxvkCsThread::threadFunc() {
     env::setThreadName("dxvk-cs");
 
-    // Local chunk queues, we use two queues and swap between
-    // them in order to potentially reduce lock contention.
     std::vector<DxvkCsQueuedChunk> ordered;
     std::vector<DxvkCsQueuedChunk> highPrio;
 
@@ -214,7 +199,6 @@ namespace dxvk {
             m_condOnAdd.wait(lock, [&] {
               return pred();
             });
-            // PHASE-C: CsIdleTicks stat counter stripped.
           }
 
           std::swap(ordered, m_queueOrdered.queue);
@@ -227,8 +211,6 @@ namespace dxvk {
         size_t highPrioIndex = 0u;
 
         while (highPrioIndex < highPrio.size() || orderedIndex < ordered.size()) {
-          // Re-fill local high-priority queue if the app has queued anything up
-          // in the meantime, we want to reduce possible synchronization delays.
           if (highPrioIndex >= highPrio.size() && m_hasHighPrio.load()) {
             highPrio.clear();
             highPrioIndex = 0u;
@@ -239,16 +221,12 @@ namespace dxvk {
             m_hasHighPrio.store(false);
           }
 
-          // Drain high-priority queue first
           bool isHighPrio = highPrioIndex < highPrio.size();
           auto& entry = isHighPrio ? highPrio[highPrioIndex++] : ordered[orderedIndex++];
 
-          // PHASE-C: CsChunkCount stat counter stripped.
           entry.chunk->executeAll(m_context.ptr());
 
           if (entry.seq) {
-            // Use a separate mutex for the chunk counter, this will only
-            // ever be contested if synchronization is actually necessary.
             std::lock_guard lock(m_counterMutex);
 
             auto& counter = isHighPrio ? m_seqHighPrio : m_seqOrdered;
@@ -257,8 +235,6 @@ namespace dxvk {
             m_condOnSync.notify_one();
           }
 
-          // Immediately free the chunk to release
-          // references to any resources held by it
           entry.chunk = DxvkCsChunkRef();
         }
 
@@ -270,5 +246,5 @@ namespace dxvk {
       Logger::err(e.message());
     }
   }
-  
+
 }

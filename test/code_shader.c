@@ -1,14 +1,3 @@
-/* d9mt v2 programmable-shader test: a colored triangle drawn through real
- * SM3 vertex/pixel shaders (not fixed-function), a vertex declaration, shader
- * constant registers, and a non-indexed DrawPrimitive.
- *
- * Isolates the programmable-shader path (Phase 1 item 1) from index buffers
- * (item 3): geometry is an unindexed triangle list, so only the runtime
- * dxso -> SPIR-V -> MSL translation + constant binding + vertex declaration
- * are exercised. The bytecode is fxc-compiled vs_3_0/ps_3_0 matching the
- * declaration below (POSITION float3, COLOR d3dcolor) with an identity mvp in
- * vs c0-c3 and a white tint in ps c0.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -89,9 +78,9 @@ int main(void) {
     return 1;
 
   static const struct Vertex verts[3] = {
-      {0.0f, 0.6f, 0.5f, 0xFFFF0000},   /* top, red */
-      {0.6f, -0.6f, 0.5f, 0xFF00FF00},  /* right, green */
-      {-0.6f, -0.6f, 0.5f, 0xFF0000FF}, /* left, blue */
+      {0.0f, 0.6f, 0.5f, 0xFFFF0000},
+      {0.6f, -0.6f, 0.5f, 0xFF00FF00},
+      {-0.6f, -0.6f, 0.5f, 0xFF0000FF},
   };
 
   IDirect3DVertexBuffer9 *vb = NULL;

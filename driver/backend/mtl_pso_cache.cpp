@@ -1,11 +1,3 @@
-/*
- * RenderPsoCache — synchronous render-PSO build through MTL4Compiler
- * (decision 9, METAL 4 ONLY). MTL4Compiler_newRenderPipelineState takes a
- * WMTMtl4RenderPipelineInfo carrying the VS/PS metallib handles + entry
- * names, colour formats+blend, sample count and the vertex descriptor — no
- * depth/stencil format, no tessellation. We include the bridge header FIRST
- * so its superset definitions win (shared _WINEMETAL_H guard).
- */
 #include "../../bridge/winemetal.h"
 
 #include "mtl_pso_cache.h"
@@ -20,8 +12,6 @@
 namespace dxvk::backend {
 
   namespace {
-    /* D3D9/Vk colour write mask (R=1,G=2,B=4,A=8) -> WMTColorWriteMask
-     * (R=8,G=4,B=2,A=1). */
     uint8_t wmtWriteMask(uint8_t v) {
       uint8_t m = 0u;
       if (v & 0x1u) m |= WMTColorWriteMaskRed;
@@ -38,18 +28,12 @@ namespace dxvk::backend {
   obj_handle_t RenderPsoCache::get(
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
     const char* vsEntry, const char* fsEntry) {
-    /* DIAGNOSTIC: D9MT_NOPSOCACHE forces a fresh build with the LIVE shader
-     * libraries every draw (drops the memo + any cached entry for this key).
-     * Tests whether a stale/collided cached PSO — e.g. a reused vs/fs library
-     * handle mapping to the same key — is rendering wrong (block artwork). Slow;
-     * for diagnosis only. */
     static const bool s_noPsoCache = std::getenv("D9MT_NOPSOCACHE") != nullptr;
     if (s_noPsoCache) {
       m_hasLast = false;
       m_cache.erase(key);
     }
 
-    /* one-entry memo: same-material draw runs skip the map entirely */
     if (m_hasLast && m_lastKey == key)
       return m_lastPso;
 
@@ -61,8 +45,6 @@ namespace dxvk::backend {
       return m_lastPso;
     }
 
-    /* PROF: a cache miss here is a SYNCHRONOUS pipeline compile on the draw
-     * hot path (CS thread) — correlates with frame-time dips. */
     prof::bump(prof::CntPsoMiss);
     obj_handle_t pso = build(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
     if (!pso)
@@ -82,11 +64,7 @@ namespace dxvk::backend {
     WMTMtl4RenderPipelineInfo info = {};
     info.vertex_library            = vsLibrary;
     info.fragment_library          = fsLibrary;
-    /* AIR entry point is "main" for MSC-compiled app shaders (air_builder +
-     * air_render_test); the hand-authored fixed-function ubershaders carry
-     * their own entry names ("ffVsMain"/"ffFsMain") since Metal reserves
-     * "main". Fragment is optional (depth-only passes); leave its name null
-     * when no PS. */
+    // Metal reserves the name "main"; hand-authored FF ubershaders use custom entry names instead.
     info.vertex_entry_name.set(vsEntry ? vsEntry : "main");
     info.fragment_entry_name.set(fsLibrary ? (fsEntry ? fsEntry : "main") : nullptr);
     if (vsEntry && vsEntry[0] == 'f' && vsEntry[1] == 'f') {
@@ -128,7 +106,7 @@ namespace dxvk::backend {
     uint32_t numLayouts = 0u;
     for (uint8_t i = 0u; i < key.layoutCount && i < 31u; i++) {
       const PsoVertexLayout& k = key.layouts[i];
-      uint32_t idx = k.pad;                 /* pad repurposed as buffer index */
+      uint32_t idx = k.pad;
       if (idx >= 31u)
         continue;
       WMTVertexBufferLayoutInfo& l = vinfo.layouts[idx];
@@ -141,11 +119,7 @@ namespace dxvk::backend {
     }
     vinfo.num_layouts = numLayouts;
 
-    /* D3D9 sm3 vertex shaders always declare a point-size output; Metal
-     * rejects that against an explicit primitive-topology class, so the
-     * pipeline's topology class stays Unspecified (matches the classic
-     * vertex-descriptor path). Per-draw primitive type is set on the
-     * encoder, not baked into the PSO. */
+    // D3D9 sm3 VS always declares point-size output; Metal rejects that against an explicit topology class.
     info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
 
     obj_handle_t err = 0u;
@@ -157,7 +131,7 @@ namespace dxvk::backend {
         obj_handle_t desc = NSObject_description(err);
         if (desc) {
           NSString_getCString(desc, buf, sizeof(buf) - 1u, WMTUTF8StringEncoding);
-          NSObject_release(desc);   /* description crosses the bridge as +1 */
+          NSObject_release(desc);
         }
         Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
         NSObject_release(err);

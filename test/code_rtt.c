@@ -1,12 +1,3 @@
-/* d9mt v2 render-to-texture test: clears an offscreen render target to red,
- * then draws a quad over a dark-blue backbuffer that samples that render
- * target. Correct RTT shows a red quad on dark blue; if the offscreen pass or
- * the target switch is broken, the quad is not red (garbage or the backbuffer
- * colour).
- *
- * Exercises render-pass-per-target: SetRenderTarget redirects rendering to the
- * RT texture, then back to the backbuffer where the RT is sampled.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -100,7 +91,6 @@ int main(void) {
   memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
 
-  /* Full-screen render target texture + its surface. */
   IDirect3DTexture9 *rtTex = NULL;
   if (FAILED(IDirect3DDevice9_CreateTexture(dev, 800, 600, 1,
                                             D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
@@ -131,12 +121,10 @@ int main(void) {
       DispatchMessageA(&msg);
     }
 
-    /* Pass 1: render into the offscreen target — clear it to red. */
     IDirect3DDevice9_SetRenderTarget(dev, 0, rtSurf);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET,
                            D3DCOLOR_XRGB(220, 0, 0), 1.0f, 0);
 
-    /* Pass 2: back to the backbuffer; sample the render target onto a quad. */
     IDirect3DDevice9_SetRenderTarget(dev, 0, backBuffer);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET,
                            D3DCOLOR_XRGB(24, 24, 40), 1.0f, 0);

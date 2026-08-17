@@ -4,12 +4,6 @@
 
 namespace dxvk {
 
-  /**
-   * \brief Lazy-initialized object
-   * 
-   * Creates an object on demand with
-   * the given constructor arguments.
-   */
   template<typename T>
   class Lazy {
 

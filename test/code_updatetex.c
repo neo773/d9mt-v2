@@ -1,13 +1,3 @@
-/* d9mt v2 UpdateTexture test: GTA IV-style texture delivery — fill a
- * D3DPOOL_SYSTEMMEM texture via LockRect, UpdateTexture() it into a
- * D3DPOOL_DEFAULT texture, draw a quad sampling it, and READ BACK the
- * center pixel (GetRenderTargetData path). Covers the SYSTEMMEM->DEFAULT
- * upload path the ladder never exercises (code_texture uses MANAGED).
- *
- * Case A: A8R8G8B8 solid green via UpdateTexture -> expect green center.
- * Case B: DXT5 solid red   via UpdateTexture -> expect red center.
- * Prints CASE lines and exits.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -47,13 +37,13 @@ static DWORD read_center(IDirect3DDevice9 *dev) {
   return c;
 }
 
-/* one DXT5 block: solid color (alpha 0xFF, both color endpoints = c565) */
+/* one solid-color DXT5 block: both endpoints = c565, alpha = 0xFF, all indices 0. */
 static void fill_dxt5_block(BYTE *b, WORD c565) {
-  b[0] = 0xFF; b[1] = 0xFF;                    /* alpha endpoints */
-  b[2] = b[3] = b[4] = b[5] = b[6] = b[7] = 0; /* alpha indices   */
+  b[0] = 0xFF; b[1] = 0xFF;
+  b[2] = b[3] = b[4] = b[5] = b[6] = b[7] = 0;
   b[8] = (BYTE)(c565 & 0xFF); b[9] = (BYTE)(c565 >> 8);
   b[10] = (BYTE)(c565 & 0xFF); b[11] = (BYTE)(c565 >> 8);
-  b[12] = b[13] = b[14] = b[15] = 0;           /* color indices -> c0 */
+  b[12] = b[13] = b[14] = b[15] = 0;
 }
 
 static void draw_and_report(IDirect3DDevice9 *dev, const char *name, DWORD expect_mask) {
@@ -62,7 +52,6 @@ static void draw_and_report(IDirect3DDevice9 *dev, const char *name, DWORD expec
   IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 2);
   IDirect3DDevice9_EndScene(dev);
   DWORD c = read_center(dev);
-  /* pass = expected channel dominant */
   DWORD r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
   int pass = expect_mask == 0x00FF00 ? (g > 0xC0 && r < 0x40 && b < 0x40)
                                      : (r > 0xC0 && g < 0x40 && b < 0x40);
@@ -134,7 +123,6 @@ int main(void) {
   D3DLOCKED_RECT lr;
   HRESULT hr;
 
-  /* CASE A: A8R8G8B8 UpdateTexture, solid green */
   {
     IDirect3DTexture9 *sysTex = NULL, *defTex = NULL;
     IDirect3DDevice9_CreateTexture(dev, TEX, TEX, 1, 0, D3DFMT_A8R8G8B8,
@@ -157,7 +145,6 @@ int main(void) {
     IDirect3DTexture9_Release(defTex);
   }
 
-  /* CASE B: DXT5 UpdateTexture, solid red (c565 = 0xF800) */
   {
     IDirect3DTexture9 *sysTex = NULL, *defTex = NULL;
     IDirect3DDevice9_CreateTexture(dev, TEX, TEX, 1, 0, D3DFMT_DXT5,

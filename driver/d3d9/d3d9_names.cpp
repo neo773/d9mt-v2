@@ -1,7 +1,5 @@
 #include "d3d9_format.h"
 
-// PHASE-C include fix: ENUM_NAME/ENUM_DEFAULT (util_enum.h) previously arrived
-// transitively through the old d3d9_format -> dxvk include chain, now severed.
 #include "../util/util_enum.h"
 
 namespace dxvk {
@@ -76,7 +74,6 @@ namespace dxvk {
       ENUM_NAME(D3D9Format::A2B10G10R10_XR_BIAS);
       ENUM_NAME(D3D9Format::BINARYBUFFER);
 
-      // Driver Hacks / Unofficial Formats
       ENUM_NAME(D3D9Format::ATI1);
       ENUM_NAME(D3D9Format::ATI2);
       ENUM_NAME(D3D9Format::INST);
@@ -104,7 +101,6 @@ namespace dxvk {
       ENUM_NAME(D3D9Format::YV12);
       ENUM_NAME(D3D9Format::OPAQUE_420);
 
-      // Not supported but exist
       ENUM_NAME(D3D9Format::AI44);
       ENUM_NAME(D3D9Format::IA44);
       ENUM_NAME(D3D9Format::CENT);

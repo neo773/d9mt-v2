@@ -3,7 +3,7 @@
 namespace d9mt::metal {
 
   MetalDevice::MetalDevice() {
-    // CreateSystemDefaultDevice returns a +1 reference we own (metal-cpp rule 1).
+    // CreateSystemDefaultDevice returns a +1 reference we own.
     m_device = MTL::CreateSystemDefaultDevice();
     if (m_device != nullptr)
       m_queue = m_device->newCommandQueue();

@@ -15,9 +15,6 @@
 
 namespace dxvk {
 
-  /**
-   * \brief Unmappable memory statistics
-   */
   struct DxvkMemoryFileStats {
     uint64_t memoryAllocated = 0u;
     uint64_t memoryUsed = 0u;
@@ -25,13 +22,6 @@ namespace dxvk {
   };
 
 #ifdef DXVK_USE_UNMAPPABLE_MEMORY
-  /**
-   * \brief Unmappable memory chunk
-   *
-   * Provides a file mapping that can be mapped into virtual
-   * address space. Mappings are not cached and must respect
-   * the system's minimum mapping granularity.
-   */
   class MemoryFile {
 
   public:
@@ -45,34 +35,12 @@ namespace dxvk {
 
     ~MemoryFile();
 
-    /**
-     * \brief Mapping granularity, in bytes
-     *
-     * Offset and size must be multiples of this when mapping the
-     * file, except for size when offset + size is equal to the
-     * file size.
-     */
     size_t granularity() const;
 
-    /**
-     * \brief Maps file to virtual address space
-     *
-     * \param [in] offset Offset, in bytes
-     * \param [in] size Size, in bytes
-     * \returns Pointer to mapped memory region
-     */
     void* map(size_t offset, size_t size);
 
-    /**
-     * \brief Unmaps file
-     * \param [in] ptr Pointer to mapped memory region
-     */
     void unmap(void* ptr);
 
-    /**
-     * \brief Checks whether the file is valid
-     * \returns \c true for a valid file
-     */
     explicit operator bool () const {
       return m_data.size != 0u;
     }
@@ -98,11 +66,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief Unmappable memory allocator
-   *
-   * Manages unmappable memory files.
-   */
   class MemoryFilePool {
     static constexpr size_t DefaultChunkSize = 16ull << 20u;
   public:
@@ -114,45 +77,14 @@ namespace dxvk {
     MemoryFilePool(const MemoryFilePool&) = delete;
     MemoryFilePool& operator = (const MemoryFilePool&) = delete;
 
-    /**
-     * \brief Allocates unmappable memory
-     *
-     * \param [in] size Size, in bytes
-     * \returns Allocation index, or -1 on error
-     */
     int32_t alloc(size_t size);
 
-    /**
-     * \brief Frees unmappable memory
-     * \returns Allocation index
-     */
     void free(int32_t allocation);
 
-    /**
-     * \brief Maps memory into address space
-     *
-     * \param [in] allocation Allocation index
-     * \returns Pointer to mapped memory region
-     */
     void* map(int32_t allocation);
 
-    /**
-     * \brief Unmaps previously mapped memory
-     *
-     * \param [in] allocation Allocation index
-     * \returns Pointer to mapped memory region
-     */
     void unmap(int32_t allocation);
 
-    /**
-     * \brief Queries memory allocation statistics
-     *
-     * Note that this may not return consistent results, e.g. used
-     * memory may be greater than allocated if there is a data race.
-     * This is somewhat intended since some use benefit from not
-     * locking the object and don't care about minor issues.
-     * \returns Memory usage statistics
-     */
     DxvkMemoryFileStats getStats() const {
       DxvkMemoryFileStats result = {};
       result.memoryAllocated = m_memoryAllocated.load(std::memory_order_relaxed);
@@ -204,9 +136,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief RAII wrapper around unmappable memory
-   */
   class MemoryFileRegion {
 
   public:
@@ -238,10 +167,6 @@ namespace dxvk {
       return *this;
     }
 
-    /**
-     * \brief Maps or retrieves mapped pointer
-     * \returns Pointer to mapped memory region
-     */
     void* map() {
       if (!m_mapPtr && m_allocation >= 0)
         m_mapPtr = m_pool->map(m_allocation);
@@ -249,9 +174,6 @@ namespace dxvk {
       return m_mapPtr;
     }
 
-    /**
-     * \brief Unmaps memory
-     */
     void unmap() {
       if (m_mapPtr) {
         m_pool->unmap(m_allocation);
@@ -259,18 +181,10 @@ namespace dxvk {
       }
     }
 
-    /**
-     * \brief Checks whether memory is currently mapped
-     * \returns \c true if memory is currently mapped
-     */
     bool isMapped() const {
       return m_mapPtr != nullptr;
     }
 
-    /**
-     * \brief Checks whether allocation is valid
-     * \returns \c true if allocation is valid
-     */
     explicit operator bool () const {
       return m_allocation > 0;;
     }
@@ -292,9 +206,6 @@ namespace dxvk {
 
   };
 #else
-  /**
-   * \brief Dummy memory file pool
-   */
   class MemoryFilePool {
 
   public:
@@ -305,12 +216,6 @@ namespace dxvk {
 
   };
 
-  /**
-   * \brief RAII wrapper around memory allocation
-   *
-   * No need to unmap on 64-bit platforms, so
-   * just allocate and free memory directly.
-   */
   class MemoryFileRegion {
 
   public:

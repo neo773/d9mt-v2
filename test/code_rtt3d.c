@@ -1,22 +1,3 @@
-/* d9mt v2 — RENDER-TO-TEXTURE debug demo (GTA-shaped).
- *
- * GTA IV is a deferred renderer: it draws the 3D world into render-target
- * TEXTURES, then composites those textures to the screen. The cube/texture
- * demos never do that. This probes exactly that path:
- *
- *   PASS 1 (offscreen): SetRenderTarget(rtTex surface) + own depth surface,
- *                       clear, draw the spinning colored cube INTO the texture.
- *   PASS 2 (screen):    restore backbuffer RT+depth, draw a fullscreen quad
- *                       that SAMPLES the rtTex, so the cube reaches the screen
- *                       only if render->sample works.
- *
- * The render->sample transition (residency of a just-written RT, TBDR store,
- * barrier before the texture read) is the prime suspect for GTA's black world.
- *
- * Instrumentation: readback asserts the final screen is non-background AND
- * spatially varied (the cube's colors, sampled through the RT, actually land).
- * NOSAMPLE: skip pass 2, readback the RT directly (isolates render vs sample).
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -103,12 +84,10 @@ int main(void) {
   if (!dev) { LOG("FAIL device"); return 1; }
   LOG("device %dx%d, RT texture %dx%d", W, H, RT, RT);
 
-  /* backbuffer RT + depth (saved to restore after the offscreen pass) */
   IDirect3DSurface9 *backRT=NULL, *backDepth=NULL;
   CHECK(IDirect3DDevice9_GetRenderTarget(dev, 0, &backRT));
   CHECK(IDirect3DDevice9_GetDepthStencilSurface(dev, &backDepth));
 
-  /* the render-target texture + its own depth-stencil */
   IDirect3DTexture9 *rtTex=NULL; IDirect3DSurface9 *rtSurf=NULL, *rtDepth=NULL;
   CHECK(IDirect3DDevice9_CreateTexture(dev, RT, RT, 1, D3DUSAGE_RENDERTARGET,
         D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &rtTex, NULL));
@@ -116,7 +95,6 @@ int main(void) {
   CHECK(IDirect3DDevice9_CreateDepthStencilSurface(dev, RT, RT, D3DFMT_D24S8,
         D3DMULTISAMPLE_NONE, 0, TRUE, &rtDepth, NULL));
 
-  /* shaders: colored cube (pass1) + textured fullscreen quad (pass2) */
   IDirect3DVertexShader9 *cvs=NULL,*qvs=NULL; IDirect3DPixelShader9 *cps=NULL,*qps=NULL;
   CHECK(IDirect3DDevice9_CreateVertexShader(dev,(const DWORD*)shadertri_vs_bytecode,&cvs));
   CHECK(IDirect3DDevice9_CreatePixelShader (dev,(const DWORD*)shadertri_ps_bytecode,&cps));
@@ -139,7 +117,6 @@ int main(void) {
     {-0.5f,-0.5f, 0.5f,0xFFFF00FF},{ 0.5f,-0.5f, 0.5f,0xFF00FFFF},
     { 0.5f, 0.5f, 0.5f,0xFFFFFFFF},{-0.5f, 0.5f, 0.5f,0xFF808080}};
   static const WORD cidx[36] = {0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1, 3,2,6,3,6,7, 1,5,6,1,6,2, 0,3,7,0,7,4};
-  /* fullscreen quad in clip space (identity mvp), uv 0..1 */
   static const struct TVert quad[4] = {
     {-1,-1,0, 0,1},{ 1,-1,0, 1,1},{ 1, 1,0, 1,0},{-1, 1,0, 0,0}};
   static const WORD qidx[6] = {0,1,2, 0,2,3};
@@ -165,9 +142,8 @@ int main(void) {
     m_rot_y(ry,a); m_rot_x(rx,a*0.5f); m_mul(world,rx,ry); m_mul(wv,world,view); m_mul(mvp,wv,proj);
     if (!getenv("NOTR")) transpose(mvp);
 
-    /* ---- PASS 1: render cube into the RT texture ---- */
     if (!getenv("KEEPTEX"))
-      IDirect3DDevice9_SetTexture(dev, 0, NULL);  /* unbind RT-as-SRV to avoid feedback loop */
+      IDirect3DDevice9_SetTexture(dev, 0, NULL); /* avoid RT read/write feedback loop */
     CHECK(IDirect3DDevice9_SetRenderTarget(dev, 0, rtSurf));
     CHECK(IDirect3DDevice9_SetDepthStencilSurface(dev, rtDepth));
     CHECK(IDirect3DDevice9_Clear(dev,0,NULL,D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER,D3DCOLOR_XRGB(30,10,10),1.0f,0));
@@ -184,11 +160,9 @@ int main(void) {
     CHECK(IDirect3DDevice9_DrawIndexedPrimitive(dev,D3DPT_TRIANGLELIST,0,0,8,0,12));
     CHECK(IDirect3DDevice9_EndScene(dev));
 
-    /* ---- restore screen RT+depth ---- */
     CHECK(IDirect3DDevice9_SetRenderTarget(dev, 0, backRT));
     CHECK(IDirect3DDevice9_SetDepthStencilSurface(dev, backDepth));
 
-    /* ---- PASS 2: composite RT texture to screen as a fullscreen quad ---- */
     CHECK(IDirect3DDevice9_Clear(dev,0,NULL,D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER,D3DCOLOR_XRGB(16,16,40),1.0f,0));
     CHECK(IDirect3DDevice9_BeginScene(dev));
     if (!nosample) {

@@ -2,7 +2,7 @@
 
 #include "wsi_window.h"
 
-#include <string>   // std::string (WsiBootstrap::name) — was transitive in DXVK
+#include <string>
 #include <vector>
 
 namespace dxvk::wsi {
@@ -12,10 +12,8 @@ namespace dxvk::wsi {
     virtual ~WsiDriver() {
     }
 
-    // Platform
     virtual std::vector<const char *> getInstanceExtensions() = 0;
 
-    // Monitor
     virtual HMONITOR getDefaultMonitor() = 0;
 
     virtual HMONITOR enumMonitors(uint32_t index) = 0;
@@ -44,8 +42,6 @@ namespace dxvk::wsi {
             WsiMode*         pMode) = 0;
 
     virtual WsiEdidData getMonitorEdid(HMONITOR hMonitor) = 0;
-
-    // Window
 
     virtual void getWindowSize(
             HWND      hWindow,
@@ -99,8 +95,6 @@ namespace dxvk::wsi {
             HMONITOR hMonitor,
             HWND     hWindow,
             bool     forceTopmost) = 0;
-
-    // PHASE-C: createSurface() removed (Vulkan WSI). Metal present via CAMetalLayer.
   };
 
   struct WsiBootstrap {

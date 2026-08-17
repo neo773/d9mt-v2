@@ -1,22 +1,3 @@
-/* d9mt v2 — minimal, LOUD TEXTURED 3D debug demo.
- *
- * A spinning textured cube. Same skeleton as code_cube3d.c (perspective, depth,
- * indexed draw, one draw call/frame) but the color now comes from SAMPLING a
- * texture at s0, not from vertex colors. This isolates the texture path:
- * CreateTexture -> LockRect upload -> SetTexture(0) -> sampler states ->
- * ps_3_0 texld s0. That path is the prime suspect for GTA's black world.
- *
- * texquad shaders: vs input = POSITION float3 + TEXCOORD0 float2, mvp in c0..c3.
- *                  ps = tex2D(s0, uv). No tint constant.
- *
- * The texture is a procedural gradient+checker (R=u, G=v, B=checker) so that
- * three independent failures are visually + numerically distinguishable:
- *   - sampler/binding dead   -> flat black or one flat color everywhere
- *   - UV not interpolated    -> whole face one texel's color
- *   - UV axis swapped/flipped -> gradient runs the wrong way
- * Per frame we read back a few pixels and ASSERT the surface is non-background
- * AND spatially varying (proves real sampling, not a flat fill).
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -42,7 +23,6 @@ static const unsigned char texquad_ps_bytecode[] = {
 
 struct Vertex { float x, y, z; float u, v; };
 
-/* ---- 4x4 row-major matrix math (D3D row-vector convention: v' = v*M) ---- */
 typedef float mat4[16];
 static void m_identity(mat4 m) {
   for (int i = 0; i < 16; i++) m[i] = 0.0f;
@@ -74,7 +54,6 @@ static void m_translate(mat4 m, float x, float y, float z) {
   m_identity(m);
   m[12] = x; m[13] = y; m[14] = z;
 }
-/* D3DXMatrixPerspectiveFovLH, row-vector */
 static void m_persp(mat4 m, float fovy, float aspect, float zn, float zf) {
   for (int i = 0; i < 16; i++) m[i] = 0.0f;
   float ys = 1.0f / tanf(fovy * 0.5f);
@@ -86,7 +65,6 @@ static void m_persp(mat4 m, float fovy, float aspect, float zn, float zf) {
   m[14] = -zn * zf / (zf - zn);
 }
 
-/* readback one pixel of the current RT (BGRA in memory -> return 0x00RRGGBB) */
 static DWORD read_px(IDirect3DDevice9 *dev, UINT x, UINT y) {
   IDirect3DSurface9 *rt = NULL, *sys = NULL;
   D3DSURFACE_DESC d;
@@ -99,7 +77,7 @@ static DWORD read_px(IDirect3DDevice9 *dev, UINT x, UINT y) {
     if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(dev, rt, sys)) &&
         SUCCEEDED(IDirect3DSurface9_LockRect(sys, &lr, NULL, D3DLOCK_READONLY))) {
       DWORD raw = ((DWORD *)((BYTE *)lr.pBits + y * lr.Pitch))[x];
-      c = raw & 0x00ffffff;   /* drop X/A */
+      c = raw & 0x00ffffff;
       IDirect3DSurface9_UnlockRect(sys);
     }
     IDirect3DSurface9_Release(sys);
@@ -156,14 +134,13 @@ int main(void) {
   IDirect3DVertexDeclaration9 *vdecl = NULL;
   CHECK(IDirect3DDevice9_CreateVertexDeclaration(dev, decl, &vdecl));
 
-  /* 24 vertices: 4 per face so each face carries a full 0..1 UV square. */
   static const struct Vertex verts[24] = {
-    /* -Z */ {-0.5f,-0.5f,-0.5f, 0,1},{ 0.5f,-0.5f,-0.5f, 1,1},{ 0.5f, 0.5f,-0.5f, 1,0},{-0.5f, 0.5f,-0.5f, 0,0},
-    /* +Z */ { 0.5f,-0.5f, 0.5f, 0,1},{-0.5f,-0.5f, 0.5f, 1,1},{-0.5f, 0.5f, 0.5f, 1,0},{ 0.5f, 0.5f, 0.5f, 0,0},
-    /* -X */ {-0.5f,-0.5f, 0.5f, 0,1},{-0.5f,-0.5f,-0.5f, 1,1},{-0.5f, 0.5f,-0.5f, 1,0},{-0.5f, 0.5f, 0.5f, 0,0},
-    /* +X */ { 0.5f,-0.5f,-0.5f, 0,1},{ 0.5f,-0.5f, 0.5f, 1,1},{ 0.5f, 0.5f, 0.5f, 1,0},{ 0.5f, 0.5f,-0.5f, 0,0},
-    /* +Y */ {-0.5f, 0.5f,-0.5f, 0,1},{ 0.5f, 0.5f,-0.5f, 1,1},{ 0.5f, 0.5f, 0.5f, 1,0},{-0.5f, 0.5f, 0.5f, 0,0},
-    /* -Y */ {-0.5f,-0.5f, 0.5f, 0,1},{ 0.5f,-0.5f, 0.5f, 1,1},{ 0.5f,-0.5f,-0.5f, 1,0},{-0.5f,-0.5f,-0.5f, 0,0},
+    {-0.5f,-0.5f,-0.5f, 0,1},{ 0.5f,-0.5f,-0.5f, 1,1},{ 0.5f, 0.5f,-0.5f, 1,0},{-0.5f, 0.5f,-0.5f, 0,0},
+    { 0.5f,-0.5f, 0.5f, 0,1},{-0.5f,-0.5f, 0.5f, 1,1},{-0.5f, 0.5f, 0.5f, 1,0},{ 0.5f, 0.5f, 0.5f, 0,0},
+    {-0.5f,-0.5f, 0.5f, 0,1},{-0.5f,-0.5f,-0.5f, 1,1},{-0.5f, 0.5f,-0.5f, 1,0},{-0.5f, 0.5f, 0.5f, 0,0},
+    { 0.5f,-0.5f,-0.5f, 0,1},{ 0.5f,-0.5f, 0.5f, 1,1},{ 0.5f, 0.5f, 0.5f, 1,0},{ 0.5f, 0.5f,-0.5f, 0,0},
+    {-0.5f, 0.5f,-0.5f, 0,1},{ 0.5f, 0.5f,-0.5f, 1,1},{ 0.5f, 0.5f, 0.5f, 1,0},{-0.5f, 0.5f, 0.5f, 0,0},
+    {-0.5f,-0.5f, 0.5f, 0,1},{ 0.5f,-0.5f, 0.5f, 1,1},{ 0.5f,-0.5f,-0.5f, 1,0},{-0.5f,-0.5f,-0.5f, 0,0},
   };
   WORD idx[36];
   for (int f = 0; f < 6; f++) {
@@ -182,7 +159,6 @@ int main(void) {
   { void *p = NULL; CHECK(IDirect3DIndexBuffer9_Lock(ib, 0, sizeof(idx), &p, 0));
     memcpy(p, idx, sizeof(idx)); IDirect3DIndexBuffer9_Unlock(ib); }
 
-  /* ---- procedural texture: R=u*255, G=v*255, B=checker; A=255 ---- */
   IDirect3DTexture9 *tex = NULL;
   CHECK(IDirect3DDevice9_CreateTexture(dev, TEX, TEX, 1, 0, D3DFMT_A8R8G8B8,
                                        D3DPOOL_MANAGED, &tex, NULL));
@@ -191,10 +167,10 @@ int main(void) {
     for (int ty = 0; ty < TEX; ty++) {
       DWORD *row = (DWORD *)((BYTE *)lr.pBits + ty * lr.Pitch);
       for (int tx = 0; tx < TEX; tx++) {
-        BYTE r = (BYTE)tx;                              /* gradient along U */
-        BYTE g = (BYTE)ty;                              /* gradient along V */
-        BYTE b = (((tx >> 5) ^ (ty >> 5)) & 1) ? 240 : 40;  /* 8x8 checker */
-        row[tx] = 0xFF000000u | ((DWORD)r << 16) | ((DWORD)g << 8) | b; /* ARGB */
+        BYTE r = (BYTE)tx;
+        BYTE g = (BYTE)ty;
+        BYTE b = (((tx >> 5) ^ (ty >> 5)) & 1) ? 240 : 40;
+        row[tx] = 0xFF000000u | ((DWORD)r << 16) | ((DWORD)g << 8) | b;
       }
     }
     IDirect3DTexture9_UnlockRect(tex, 0);
@@ -230,12 +206,12 @@ int main(void) {
     mat4 rx, ry, world, wv, mvp;
     float ang = (getenv("FREEZE") ? (float)atoi(getenv("FREEZE")) : (float)f) * 0.03f;
     m_rot_y(ry, ang);
-    m_rot_x(rx, ang * 0.5f);              /* tumble on two axes -> more faces */
+    m_rot_x(rx, ang * 0.5f);
     m_mul(world, rx, ry);
     m_mul(wv, world, view);
     m_mul(mvp, wv, proj);
 
-    /* Transpose: HLSL vs default column-major reads c0..c3 as columns. */
+    /* HLSL constant registers are read column-major; transpose to match. */
     if (!getenv("NOTR")) {
       mat4 t;
       for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) t[c*4+r] = mvp[r*4+c];
@@ -252,8 +228,6 @@ int main(void) {
 
     if (getenv("NORB")) continue;
 
-    /* Sample the face: center + 4 offsets. Assert non-bg AND that the samples
-     * are not all identical (spatial variation == real texture sampling). */
     DWORD bg = 0x101028;
     DWORD c  = read_px(dev, W/2,     H/2);
     DWORD s1 = read_px(dev, W/2 - 120, H/2 - 120);
@@ -275,7 +249,7 @@ int main(void) {
           (unsigned long)s3, on, distinct, changed);
     prev_center = c;
 
-    if (f == 240) {   /* enough frames to judge; summarize and stop measuring */
+    if (f == 240) {
       LOG("======== SUMMARY (first 240 frames) ========");
       LOG("visible=%d varied=%d changed=%d", pass_visible, pass_varied, pass_changed);
       LOG("RESULT: %s", (pass_visible > 200 && pass_varied > 100 && pass_changed > 100)

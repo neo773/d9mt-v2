@@ -6,9 +6,6 @@
 
 namespace dxvk {
 
-  /**
-   * \brief Simplest ratio helper
-   */
   template <typename T>
   class Ratio {
 

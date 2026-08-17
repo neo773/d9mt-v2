@@ -166,8 +166,7 @@ struct unixcall_mtldevice_newrenderpso {
   obj_handle_t ret_pso;
 };
 
-/* d9mt addition: all members 8-byte / arch-invariant, so the 64-bit thunk is
-   byte-compatible for wow64 (see DXSODestroy note pattern). */
+/* all members must stay 8-byte/arch-invariant so the 64-bit thunk is byte-compatible under wow64 and needs no 32-bit twin. */
 struct unixcall_mtldevice_newrenderpso_vtx {
   obj_handle_t device;
   struct WMTConstMemoryPointer info;
@@ -241,20 +240,18 @@ struct unixcall_mtldevice_newfxspatialscaler {
   obj_handle_t ret;
 };
 
-/* MTL4FX spatial scaler (Metal 4 command buffers; the MTL3 variant above
- * cannot encode into an MTL4CommandBuffer). */
 struct unixcall_mtldevice_new_mtl4fxspatialscaler {
   obj_handle_t device;
   obj_handle_t compiler;
-  struct WMTConstMemoryPointer info;   /* WMTFXSpatialScalerInfo */
+  struct WMTConstMemoryPointer info;
   obj_handle_t ret;
 };
 
 struct unixcall_mtl4commandbuffer_spatial_scale {
-  obj_handle_t cmdbuf;                 /* MTL4CommandBuffer */
-  obj_handle_t scaler;                 /* MTL4FXSpatialScaler */
-  obj_handle_t color;                  /* input texture */
-  obj_handle_t output;                 /* output texture */
+  obj_handle_t cmdbuf;
+  obj_handle_t scaler;
+  obj_handle_t color;
+  obj_handle_t output;
 };
 
 struct unixcall_mtlcommandbuffer_temporal_scale {
@@ -432,22 +429,6 @@ struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers {
   uint64_t num_attachments;
   obj_handle_t ret;
 };
-
-/* ===================================================================== *
- * d9mt addition: Metal 4 surface param structs (dispatch codes 157..200).
- * Every member is 8-byte / arch-invariant, so each 64-bit unix thunk is
- * wow64 byte-compatible (shared thunk, no thunk32 twin). Device factories
- * and single-handle ops reuse the generic unixcall_* structs above:
- *   newMTL4CommandQueue/newCommandAllocator/newMTL4CommandBuffer/
- *   newMTL4Compiler + computeCommandEncoder  -> unixcall_generic_obj_obj_ret
- *   renderCommandEncoder                     -> unixcall_generic_obj_uint64_obj_ret
- *   reset/endCommandBuffer/RS commit/req/removeAll -> unixcall_generic_obj_noret
- *   beginCommandBuffer/useResidencySet/setPSO/setDepthStencil/
- *   RS addAllocation/generateMipmaps/queue wait+signal drawable
- *                                            -> unixcall_generic_obj_obj_noret
- *   setCullMode/setFrontFacingWinding/setStencilRef -> unixcall_generic_obj_uint64_noret
- *   queue signalEvent/waitForEvent           -> unixcall_generic_obj_obj_uint64_noret
- * ===================================================================== */
 
 struct unixcall_mtl4_new_from_desc {
   obj_handle_t device;

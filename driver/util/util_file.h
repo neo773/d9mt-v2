@@ -11,9 +11,6 @@
 
 namespace dxvk::util {
 
-  /**
-   * \brief File flags
-   */
   enum class FileFlag : uint32_t {
     AllowRead       = 0,
     AllowWrite      = 1,
@@ -24,9 +21,6 @@ namespace dxvk::util {
   using FileFlags = Flags<FileFlag>;
 
 
-  /**
-   * \brief Platform-specific file interface
-   */
   class FileIface {
 
   public:
@@ -61,13 +55,6 @@ namespace dxvk::util {
   };
 
 
-  /**
-   * \brief Generic file interface
-   *
-   * Provides a basic API for exclusive file I/O, which is
-   * not (yet) available in the cpp standard library.
-   * Note that this file API is not thread-safe.
-   */
   class File {
 
   public:

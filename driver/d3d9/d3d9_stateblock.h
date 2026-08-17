@@ -222,7 +222,7 @@ namespace dxvk {
               vbo.offset,
               vbo.stride);
           } else {
-            // For whatever reason, D3D9 doesn't capture the stream offset
+            // D3D9 state blocks don't capture the stream offset, only the stride.
             dst->SetStreamSourceWithoutOffset(
               idx,
               vbo.vertexBuffer.ptr(),

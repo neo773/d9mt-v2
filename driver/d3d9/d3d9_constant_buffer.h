@@ -1,15 +1,5 @@
 #pragma once
 
-// PHASE-C6: ported off Vulkan onto the Mtl seam (doc 05 §Buffers — constant-buffer
-// ring row: usage UniformBuffer, cpuAccess Write).
-//   Rc<DxvkBuffer>             -> Rc<MtlBuffer>
-//   Rc<DxvkResourceAllocation> -> Rc<MtlAllocation>   (the Discard rename ring)
-//   VkDeviceSize               -> MtlDeviceSize
-//   VkBufferUsageFlags         -> MtlUsage
-//   VkShaderStageFlags         -> MtlStageMask
-//   VkMemoryPropertyFlags      -> MtlCpuAccess
-// The Determine*() bodies (d3d9_constant_buffer.cpp) do the semantic rewrite; this
-// header is a pure token retype. Removed from the Vulkan-gate whitelist.
 #include "../mtl/mtl_device.h"
 
 #include "../util/util_math.h"
@@ -21,9 +11,6 @@ namespace dxvk {
 
   class D3D9DeviceEx;
 
-  /**
-   * \brief Constant buffer
-   */
   class D3D9ConstantBuffer {
     static constexpr MtlDeviceSize ShaderConstSize = 1024ull << 10;
     static constexpr MtlDeviceSize MiscSize        = 1024ull << 10;
@@ -44,45 +31,17 @@ namespace dxvk {
 
     ~D3D9ConstantBuffer();
 
-    /**
-     * \brief Queries alignment
-     *
-     * Useful to pad copies with initialized data.
-     * \returns Data alignment
-     */
     MtlDeviceSize GetAlignment() const {
       return m_align;
     }
 
-    /**
-     * \brief Allocates a given amount of memory
-     *
-     * \note: Requires that all data is written to the buffer before
-     * submitting the next set of commands to the CS chunk, otherwise
-     * the GPU may read stale data.
-     * \param [in] size Number of bytes to allocate
-     * \returns Map pointer of the allocated region
-     */
     void* Alloc(MtlDeviceSize size);
 
-    /**
-     * \brief Allocates typed data
-     *
-     * \param [in] count Number of items to allocate
-     * \returns Allocated data slice
-     */
     template<typename T>
     T* AllocTyped(size_t Count) {
       return reinterpret_cast<T*>(Alloc(Count * sizeof(T)));
     }
 
-    /**
-     * \brief Resets current stream command
-     *
-     * This \e must unconditionally be called when the
-     * device's current CS chunk gets submitted to the
-     * worker to avoid accessing stale data.
-     */
     void ResetStreamCommand() {
       m_streamCmd = nullptr;
     }

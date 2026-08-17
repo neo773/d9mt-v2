@@ -8,102 +8,59 @@
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
 
-// ---------------------------------------------------------------------------
-// mtl_presenter.h — thin present seam for the D3D9 swapchain REWRITE track
-// (doc 01 §1j, contract 3e; doc 02 §4 "D3D9SwapChainEx REWRITE").
-//
-// This is the Metal-first replacement for DXVK's `Rc<Presenter>` +
-// `DxvkSwapchainBlitter`. The D3D9 swapchain keeps all of its D3D9 bookkeeping
-// (present params, back-buffer array, reset/format logic, frame-latency counter)
-// and drives the actual scan-out through this interface, whose real impl is a
-// CAMetalLayer + drawable present via winemetal.
-//
-// PHASE-D: no CAMetalLayer / winemetal plumbing here — this header defines the
-// contract, and mtl_presenter_stub.cpp is a log-and-return implementation so the
-// swapchain compiles and links against the seam. Contract 3e (frame-latency
-// signalling) is deadlock-class: the real impl must drive the latency signal from
-// the drawable-present completion handler, never stub it live.
-// ---------------------------------------------------------------------------
-
 namespace dxvk {
 
-  class MtlDevice;   // defined in mtl_context.h; the impl (stub) includes it.
+  class MtlDevice;
 
-  // Acquired scan-out target for a frame: the drawable's backing texture plus the
-  // acquire/release sync tokens the command buffer must wait/signal on (contract 3e).
   struct MtlAcquiredDrawable {
-    Rc<MtlTexture>  texture = nullptr;      // CAMetalDrawable.texture
-    Rc<MtlTextureView> view = nullptr;      // full-image view (scaled present blit dst)
+    Rc<MtlTexture>  texture = nullptr;
+    Rc<MtlTextureView> view = nullptr;
     MtlObjectHandle drawable = MtlNullHandle;
-    MtlPresenterSync sync   = { };          // acquire (wait) / release (signal) / frameId
+    MtlPresenterSync sync   = { };
     uint32_t        imageIndex = 0u;
-    bool            valid   = false;        // false => acquire failed (e.g. occluded)
+    bool            valid   = false;
   };
 
-  // Present configuration the swapchain hands the presenter on (re)create/reset.
   struct MtlPresenterDesc {
-    MtlExtent2D imageExtent  = { };         // drawable size in RT pixels
+    MtlExtent2D imageExtent  = { };
     MtlFormat   imageFormat  = MtlFormat::BGRA8Unorm;
-    uint32_t    imageCount   = 3u;          // triple-buffer default
-    bool        vsync        = true;        // displaySyncEnabled
-    intptr_t    hwnd         = 0;           // D3D9 focus window (CAMetalLayer host)
+    uint32_t    imageCount   = 3u;
+    bool        vsync        = true;
+    intptr_t    hwnd         = 0;
   };
 
-  /**
-   * \brief Metal-first present interface (was Rc<Presenter>)
-   *
-   * The swapchain REWRITE calls only these; the impl owns the CAMetalLayer, the
-   * drawable pool, and the frame-latency shared event. Retina/backing-scale is
-   * applied HERE (doc 01 §6.1) — the frontend viewports stay in RT-pixel coords.
-   */
   class MtlPresenter : public RcObject {
 
   public:
 
     virtual ~MtlPresenter() { }
 
-    // (Re)configure the layer for a new back-buffer size/format/mode. Called on
-    // swapchain create and on D3D9 Reset.
     virtual void recreate(const MtlPresenterDesc& desc) = 0;
 
-    // Presentation interval, 0 = vsync off. Driven per-Present from the D3D9
-    // present params.
     virtual void setSyncInterval(uint32_t syncInterval) = 0;
 
-    // Re-size the layer to clientSize x the layer's LIVE contentsScale.
-    //
     // Must be called every Present: macdrv resizes the NSView asynchronously,
-    // so any size latched at create/Reset is stale for an unknown number of
-    // frames afterwards. Sizing from the backbuffer instead of the live scale
+    // so a size latched at create/Reset goes stale for an unknown number of
+    // frames, and sizing from the backbuffer instead of the live contentsScale
     // renders into the top-left quarter on Retina (scale 2).
     virtual void syncLayerGeometry(uint32_t clientWidth, uint32_t clientHeight) = 0;
 
-    // Acquire the next drawable (CAMetalLayer nextDrawable). May block on the
-    // frame-latency semaphore to throttle to imageCount frames in flight.
     virtual MtlAcquiredDrawable acquireNextImage(uint64_t frameId) = 0;
 
-    // Present the acquired drawable (presentDrawable:), wiring the release token as
-    // the drawable-signal on the submitted command buffer.
     virtual void present(const MtlAcquiredDrawable& image) = 0;
 
-    // Frame-latency signal (contract 3e) — posted from the present completion
-    // handler; the swapchain's frame-limiter waits on it. Deadlock-class if stubbed.
     virtual void signalFrameLatency(uint64_t frameId) = 0;
 
-    // Current drawable size (post backing-scale) so the swapchain can size its
-    // back buffers / blit target.
     virtual MtlExtent2D getImageExtent() const = 0;
 
-    // False when macOS is not compositing the layer (occluded, other Space,
-    // miniaturized). Acquiring a drawable then drains the pool — presented
-    // drawables never retire while uncomposited — and nextDrawable starts
-    // blocking ~1s per frame, which persists as a backlog after the window
-    // returns. Win32 focus is NOT a substitute: it does not track Spaces.
+    // False when macOS isn't compositing the layer (occluded, other Space,
+    // miniaturized): presented drawables never retire while uncomposited, so
+    // acquiring anyway drains the pool and nextDrawable starts blocking ~1s
+    // per frame, a backlog that persists after the window returns. Win32
+    // focus doesn't substitute for this — it doesn't track Spaces.
     virtual bool isVisible() = 0;
   };
 
-  // Factory — PHASE-D returns the logging stub (mtl_presenter_stub.cpp). The real
-  // impl takes a HWND / CAMetalLayer + MtlDevice.
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc);
 
 }

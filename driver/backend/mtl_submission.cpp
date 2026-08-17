@@ -20,7 +20,6 @@ SubmissionTracker::~SubmissionTracker() {
 void SubmissionTracker::drainAndStopPump() {
   { std::lock_guard<std::mutex> lock(m_retireMutex);
     if (m_stop) {
-      /* Already stopped (explicit teardown gate ran) — nothing to join. */
       return;
     }
     m_stop = true;
@@ -28,11 +27,7 @@ void SubmissionTracker::drainAndStopPump() {
   m_retireCond.notify_all();
   m_pump.join();
 
-  /* GPU drain, then run EVERY remaining retirement on this thread — after
-   * the drain nothing is in flight, and a retirement stamped with the
-   * recording-but-never-committed serial would otherwise be destroyed
-   * uncalled, dropping its captured Rcs after the residency tracker (which
-   * their destructors reach into) is already gone. */
+  // Drain the GPU, then run every remaining retirement here: dropping one would leak captured Rcs after the residency tracker is gone.
   waitFor(lastSubmittedSerial());
 
   std::vector<Retirement> remaining;
@@ -50,8 +45,6 @@ uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
 }
 
 uint64_t SubmissionTracker::completedSerial() {
-  /* signaledValue is a unixlib round-trip; cache monotonically (readers on
-   * app, CS and pump threads — CAS keeps the cache from going backwards). */
   uint64_t value = MTLSharedEvent_signaledValue(m_event.handle());
 
   uint64_t cached = m_completedCache.load(std::memory_order_acquire);
@@ -71,17 +64,10 @@ void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> relea
   { std::lock_guard<std::mutex> lock(m_retireMutex);
     m_retirements.push_back({ serial, std::move(release) });
   }
-  /* Wake the pump so completion is observed without depending on any
-   * future frontend/CS activity (deadlock class: app thread blocked on a
-   * fence that only a retirement callback signals). */
   m_retireCond.notify_one();
 }
 
 void SubmissionTracker::processRetirements() {
-  /* Callable from the CS thread (submit/endFrame), the pump thread, AND an
-   * allocation-starved app thread (MtlDeviceImpl host-memory retry) — take
-   * the ready callbacks out under the lock, run them outside it (they do
-   * unix calls). Each callback is moved out exactly once. */
   std::vector<std::function<void()>> ready;
   {
     std::lock_guard<std::mutex> lock(m_retireMutex);
@@ -121,9 +107,6 @@ void SubmissionTracker::pumpThread() {
     if (m_stop)
       return;
 
-    /* Lowest pending serial — the next completion boundary that releases
-     * anything. Serials only grow, so a bounded event wait then re-scan is
-     * race-free (a lower serial can never be enqueued later). */
     uint64_t target = ~0ull;
     for (const Retirement& r : m_retirements)
       target = r.serial < target ? r.serial : target;
@@ -142,10 +125,7 @@ void SubmissionTracker::pumpThread() {
 void SubmissionTracker::waitFor(uint64_t serial) {
   if (isComplete(serial))
     return;
-  /* Real blocking wait on the GPU-signaled shared event — NOT a yield spin
-   * (a spin pinned a core and starved the CS thread). Bounded so a
-   * faulted/never-signalled command buffer degrades to a logged stall
-   * instead of an unkillable hang. Retry in 2s slices up to ~10s. */
+  // Bounded blocking wait, not a spin, so a never-signalled command buffer degrades to a logged stall instead of a hang.
   for (int i = 0; i < 5; i++) {
     if (MTLSharedEvent_waitUntilSignaledValue(m_event.handle(), serial, 2000u)) {
       completedSerial();
@@ -161,4 +141,4 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     serial, " (completed ", completedSerial(), ") — abandoning wait"));
 }
 
-} // namespace dxvk::backend
+}

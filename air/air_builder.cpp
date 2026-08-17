@@ -29,10 +29,9 @@ const char* kDataLayout =
 
 const char* kTriple = "air64-apple-macosx15.0.0";
 
-/* address spaces */
 constexpr unsigned kAsConstant = 2u;
-constexpr unsigned kAsTexture = 1u;   /* texture/depth handle pointers */
-constexpr unsigned kAsSampler = 2u;   /* sampler handle pointers */
+constexpr unsigned kAsTexture = 1u;
+constexpr unsigned kAsSampler = 2u;
 
 [[noreturn]] void unsupported(const std::string& what) {
   throw std::runtime_error("AirBuilder: unsupported " + what);
@@ -43,19 +42,17 @@ std::string opCodeName(ir::OpCode code) {
 }
 
 
-/* Per-entry-output record */
 struct OutputVar {
   ir::SsaDef def = {};
   ir::BuiltIn builtin = ir::BuiltIn::ePosition;
   bool isBuiltin = false;
-  uint32_t location = 0u;    /* user outputs */
-  uint32_t orderKey = 0u;    /* return-struct member order */
+  uint32_t location = 0u;
+  uint32_t orderKey = 0u;
   AllocaInst* storage = nullptr;
   Type* type = nullptr;
-  int32_t retIndex = -1;     /* index in the entry return struct */
+  int32_t retIndex = -1;
 };
 
-/* Per-spec-constant record (DclSpecConstant -> AIR function constant) */
 struct SpecVar {
   ir::SsaDef def = {};
   uint32_t specId = 0u;
@@ -64,64 +61,51 @@ struct SpecVar {
   GlobalVariable* initGlobal = nullptr;
 };
 
-/* Per-stage-in-input record */
 struct InputVar {
   ir::SsaDef def = {};
   uint32_t location = 0u;
-  uint32_t argIndex = 0u;    /* entry parameter index */
+  uint32_t argIndex = 0u;
   Type* type = nullptr;
-  /* stage-in builtin ([[point_coord]] etc.) instead of a user location */
   bool isBuiltin = false;
   ir::BuiltIn builtin = ir::BuiltIn::ePosition;
 };
 
-/* Per-constant-buffer record: buffer-backed legacy builtins and DclCbv */
 struct BufferVar {
   ir::SsaDef def = {};
   ir::BuiltIn builtin = ir::BuiltIn::eLegacyConstFloat;
-  bool isCbv = false;        /* DclCbv rather than a legacy builtin */
-  bool isPushData = false;   /* the flat push-constant block (buffer slot 20) */
-  uint32_t regIndex = 0u;    /* DclCbv register index */
+  bool isCbv = false;
+  bool isPushData = false;
+  uint32_t regIndex = 0u;
   uint32_t bufferIndex = 0u;
   uint32_t argIndex = 0u;
-  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
-  Type* type = nullptr;      /* pointee */
+  int32_t abWord = -1;
+  Type* type = nullptr;
   std::string name;
 };
 
-/* Per-SRV (texture) record */
 struct TextureVar {
   ir::SsaDef def = {};
   ir::ResourceKind kind = ir::ResourceKind::eImage2D;
-  uint32_t slot = 0u;        /* Metal [[texture(slot)]] */
+  uint32_t slot = 0u;
   uint32_t argIndex = 0u;
-  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
-  Type* handleType = nullptr; /* opaque %struct._texture_*_t */
+  int32_t abWord = -1;
+  Type* handleType = nullptr;
   std::string name;
 };
 
-/* Per-sampler record */
 struct SamplerVar {
   ir::SsaDef def = {};
-  uint32_t slot = 0u;        /* Metal [[sampler(slot)]] */
+  uint32_t slot = 0u;
   uint32_t argIndex = 0u;
-  int32_t abWord = -1;       /* argument-buffer word index (AB mode) */
+  int32_t abWord = -1;
   std::string name;
 };
 
-/* Push-data block layout contract (mirrors upstream
- * DxvkPushDataBlock::computeBlockOffsetForStage and the backend's
- * MtlContextImpl::pushData, kPushSharedBlockSize): each stage's push buffer
- * (buffer slot 20) starts with the multi-stage "shared" block at byte 0,
- * reserving 32 bytes, followed by that stage's private block at byte 32.
- * A DclPushData with an EMPTY stage mask is the shared block; a single-stage
- * mask is the per-stage block and must be shifted past the reservation. */
 constexpr uint32_t kPushSharedBlockSize = 32u;
 
-} // namespace
+}
 
 
-/* The whole build lives in one impl object so state stays together. */
 struct AirBuilderImpl {
 
   const ir::Builder& ir;
@@ -134,23 +118,18 @@ struct AirBuilderImpl {
   ir::ShaderStage stage = ir::ShaderStage::eVertex;
   ir::SsaDef entryDef;
 
-  std::unordered_map<uint32_t, Value*> values;         /* SsaDef id -> value */
-  std::unordered_map<uint32_t, Function*> functions;   /* Function def -> fn */
-  std::unordered_map<uint32_t, BasicBlock*> blocks;    /* Label def -> block */
+  std::unordered_map<uint32_t, Value*> values;
+  std::unordered_map<uint32_t, Function*> functions;
+  std::unordered_map<uint32_t, BasicBlock*> blocks;
 
-  /* Phis referencing back-edge values are wired after the whole function
-   * body is emitted (forward references are legal across blocks). */
+  /* back-edge phi operands may reference forward defs, so they are wired
+   * only after the whole function body has been emitted */
   std::vector<std::pair<PHINode*, const ir::Op*>> pendingPhis;
 
-  /* DclScratch: indexable private arrays; one alloca per (function, decl) */
-  std::unordered_map<uint32_t, Type*> scratchTypes;    /* decl id -> type */
+  std::unordered_map<uint32_t, Type*> scratchTypes;
   std::unordered_map<uint64_t, AllocaInst*> scratchAllocas;
 
-  /* Buffer-backed builtins used inside helper functions become hidden
-   * trailing parameters (a function cannot reference the entry point's
-   * arguments). Per function: buffer decl id -> llvm arg index. */
   std::unordered_map<uint32_t, std::vector<uint32_t>> fnHiddenBuffers;
-  /* push data: one flat block, per-decl byte offsets, canonical buffer def */
   bool m_havePush = false;
   uint32_t m_pushBytes = 0u;
   ir::SsaDef m_pushDef;
@@ -164,21 +143,12 @@ struct AirBuilderImpl {
   std::vector<SamplerVar> samplers;
   std::vector<SpecVar>    specs;
 
-  /* Argument-buffer binding model (Options::useArgumentBuffer): every
-   * texture, sampler and non-push buffer becomes one 8-byte handle word in
-   * abStruct, bound as a single constant pointer at
-   * [[buffer(AirBuilder::kAbTableIndex)]]. Word order: buffers (decl scan
-   * order, push excluded), textures, samplers — the reflection blob reports
-   * each word so the driver writes handles CPU-side with no per-slot
-   * argument-table calls. Helpers thread ONE hidden AB pointer under the
-   * kAbDeclId sentinel instead of one hidden param per resource. */
   bool useAB = false;
   StructType* abStruct = nullptr;
   uint32_t abWordCount = 0u;
   uint32_t entryAbArgIndex = ~0u;
   static constexpr uint32_t kAbDeclId = 0xFFFFFFFEu;
 
-  /* air intrinsic declarations, cached by name */
   std::unordered_map<std::string, Function*> airIntrinsics;
 
   Function* entryFn = nullptr;
@@ -199,9 +169,6 @@ struct AirBuilderImpl {
     b->setFastMathFlags(fmf);
   }
 
-
-  /* ---- type mapping ---- */
-
   Type* mapScalarType(ir::ScalarType t, bool inMemory) {
     switch (t) {
       case ir::ScalarType::eVoid: return Type::getVoidTy(ctx);
@@ -214,7 +181,7 @@ struct AirBuilderImpl {
       case ir::ScalarType::eMinI16:
       case ir::ScalarType::eMinU16: return Type::getInt16Ty(ctx);
       case ir::ScalarType::eI8:
-      case ir::ScalarType::eU8: return Type::getInt8Ty(ctx);   /* D3DCOLOR unpack lanes */
+      case ir::ScalarType::eU8: return Type::getInt8Ty(ctx);
       case ir::ScalarType::eF16: return Type::getHalfTy(ctx);
       case ir::ScalarType::eF32: return Type::getFloatTy(ctx);
       default:
@@ -229,8 +196,6 @@ struct AirBuilderImpl {
       : scalar;
   }
 
-  /* Full type; inMemory selects the buffer-layout representation
-   * (bool -> i32) used for buffer-backed builtins. */
   Type* mapType(const ir::Type& t, bool inMemory) {
     Type* base = nullptr;
 
@@ -243,7 +208,7 @@ struct AirBuilderImpl {
       SmallVector<Type*, 8> members;
       for (uint32_t i = 0u; i < t.getStructMemberCount(); i++)
         members.push_back(mapBasicType(t.getBaseType(i), inMemory));
-      base = StructType::get(ctx, members, /* packed */ false);
+      base = StructType::get(ctx, members,  false);
     }
 
     for (uint32_t i = 0u; i < t.getArrayDimensions(); i++)
@@ -251,9 +216,6 @@ struct AirBuilderImpl {
 
     return base;
   }
-
-
-  /* ---- constants & values ---- */
 
   Constant* mapConstant(const ir::Op& op) {
     const ir::Type& t = op.getType();
@@ -337,7 +299,6 @@ struct AirBuilderImpl {
     return ir::SsaDef(op.getOperand(idx));
   }
 
-  /* Constant u32 referenced as an address operand; ~0u if null def. */
   uint32_t constantAddress(ir::SsaDef def) {
     if (!def)
       return ~0u;
@@ -346,9 +307,6 @@ struct AirBuilderImpl {
       unsupported("non-constant address");
     return uint32_t(op.getOperand(0u));
   }
-
-
-  /* ---- declaration scan ---- */
 
   void scanDeclarations() {
     auto [declBegin, declEnd] = ir.getDeclarations();
@@ -376,12 +334,11 @@ struct AirBuilderImpl {
         case ir::OpCode::eDclInputBuiltIn: {
           auto builtin = ir::BuiltIn(op.getOperand(1u));
           if (isStageInBuiltin(builtin)) {
-            /* raster-produced value passed as an entry parameter */
             InputVar in;
             in.def = op.getDef();
             in.isBuiltin = true;
             in.builtin = builtin;
-            in.location = 0x10000u + uint32_t(builtin); /* sort after users */
+            in.location = 0x10000u + uint32_t(builtin);
             in.type = mapType(op.getType(), false);
             inputs.push_back(in);
           } else {
@@ -413,7 +370,6 @@ struct AirBuilderImpl {
             case ir::BuiltIn::ePosition:     out.orderKey = 0u; break;
             case ir::BuiltIn::ePointSize:    out.orderKey = 1u; break;
             case ir::BuiltIn::eClipDistance: out.orderKey = 2u; break;
-            /* golden MSL places depth after the color outputs */
             case ir::BuiltIn::eDepth:        out.orderKey = 0x30000u; break;
             default:
               unsupported("output builtin #" +
@@ -460,15 +416,9 @@ struct AirBuilderImpl {
         } break;
 
         case ir::OpCode::eDclPushData: {
-          /* Operand 1 is the offset WITHIN the block; operand 2 (stage mask)
-           * selects the block: empty mask = shared block at byte 0,
-           * single-stage mask = the per-stage block past the shared
-           * reservation (kPushSharedBlockSize contract, see above). The
-           * frontend writes with the same rule (MtlContextImpl::pushData),
-           * so dropping the stage operand here aliased the per-stage block
-           * onto the shared one: a VS reading cFSize at byte 0 got the
-           * shared fogColor/alphaRef bytes instead (invisible skinned/
-           * palette-deformed meshes in GTA IV). */
+          /* stage mask selects the block: empty = shared (byte 0),
+           * single-stage = per-stage block past the shared reservation;
+           * must match the frontend's rule or the two blocks alias */
           uint32_t off = uint32_t(op.getOperand(1u));
           if (uint32_t(op.getOperand(2u)) != 0u)
             off += kPushSharedBlockSize;
@@ -485,14 +435,10 @@ struct AirBuilderImpl {
           break;
 
         default:
-          /* Constant/Undef/Semantic/DebugName/SetFpMode/DclParam:
-           * either on demand or irrelevant to AIR */
           break;
       }
     }
 
-    /* stable orders: inputs by location; outputs = position first,
-     * then user outputs by location */
     std::sort(inputs.begin(), inputs.end(),
       [](const InputVar& a, const InputVar& b) {
         return a.location < b.location;
@@ -511,16 +457,13 @@ struct AirBuilderImpl {
       buffers.push_back(buf);
     }
 
-    /* buffer index assignment: ConstFloat -> 0, other builtins 1.. in
-     * declaration order; CBVs take their register index offset past the
-     * builtin range (with no builtins present, cbv N -> buffer(N)) */
     uint32_t nextIndex = 1u;
     bool haveBuiltins = false;
     for (const auto& buf : buffers)
       haveBuiltins |= !buf.isCbv;
     for (auto& buf : buffers) {
       if (buf.isPushData)
-        buf.bufferIndex = 20u;   /* backend kPushConstantIndex */
+        buf.bufferIndex = 20u;
       else if (buf.isCbv)
         buf.bufferIndex = (haveBuiltins ? 8u : 0u) + buf.regIndex;
       else if (buf.builtin == ir::BuiltIn::eLegacyConstFloat)
@@ -529,8 +472,6 @@ struct AirBuilderImpl {
         buf.bufferIndex = nextIndex++;
     }
 
-    /* AB mode: assign handle-word indices — non-push buffers in scan order,
-     * then textures, then samplers. Push data keeps its own buffer slot. */
     if (useAB) {
       uint32_t word = 0u;
       for (auto& buf : buffers) {
@@ -545,7 +486,6 @@ struct AirBuilderImpl {
     }
   }
 
-  /* DebugName attached to a declaration, or the fallback */
   std::string declDebugName(ir::SsaDef def, const std::string& fallback) {
     auto [a, b] = ir.getUses(def);
     for (auto i = a; i != b; i++) {
@@ -558,10 +498,9 @@ struct AirBuilderImpl {
   static bool isStageInBuiltin(ir::BuiltIn builtin) {
     return builtin == ir::BuiltIn::ePointCoord ||
            builtin == ir::BuiltIn::eIsFrontFace ||
-           builtin == ir::BuiltIn::ePosition; /* PS vPos */
+           builtin == ir::BuiltIn::ePosition;
   }
 
-  /* air metadata key for a stage-in builtin input */
   static const char* stageInBuiltinMdName(ir::BuiltIn builtin) {
     switch (builtin) {
       case ir::BuiltIn::ePointCoord:  return "air.point_coord";
@@ -587,10 +526,6 @@ struct AirBuilderImpl {
     }
   }
 
-
-  /* ---- texture kinds ---- */
-
-  /* SM3 image kinds only; the rest is not reachable from the sm3 front-end */
   static const char* textureKindSuffix(ir::ResourceKind kind, bool depth) {
     switch (kind) {
       case ir::ResourceKind::eImage2D:   return depth ? "depth_2d"   : "texture_2d";
@@ -604,7 +539,6 @@ struct AirBuilderImpl {
     return kind == ir::ResourceKind::eImage2D ? 2u : 3u;
   }
 
-  /* 3d textures take <3 x i32> offsets, cube none, 2d <2 x i32> */
   static bool textureHasOffsetParams(ir::ResourceKind kind) {
     return kind != ir::ResourceKind::eImageCube;
   }
@@ -629,7 +563,6 @@ struct AirBuilderImpl {
     }
   }
 
-  /* Opaque AIR handle type, e.g. %struct._texture_2d_t */
   StructType* getOpaqueStruct(const std::string& name) {
     if (StructType* existing = StructType::getTypeByName(ctx, name))
       return existing;
@@ -648,9 +581,6 @@ struct AirBuilderImpl {
     return PointerType::get(getOpaqueStruct("struct._sampler_t"), kAsSampler);
   }
 
-  /* Golden-dump AB member types: MSL wraps each handle in a one-member
-   * struct (metal::texture2d = { %struct._texture_2d_t addrspace(1)* }).
-   * Mirror that so the AB struct layout matches what metalfe emits. */
   StructType* wrapperStruct(const std::string& name, Type* inner) {
     if (StructType* existing = StructType::getTypeByName(ctx, name))
       return existing;
@@ -661,8 +591,7 @@ struct AirBuilderImpl {
     const char* suffix = textureKindSuffix(kind, false);
     if (!suffix)
       unsupported("texture kind #" + std::to_string(uint32_t(kind)));
-    /* struct._texture_2d_t -> struct.metal::texture2d etc. */
-    std::string msl = suffix;                       /* "texture_2d" */
+    std::string msl = suffix;
     msl.erase(std::remove(msl.begin(), msl.end(), '_'), msl.end());
     return wrapperStruct("struct.metal::" + msl,
       textureHandleType(kind, false));
@@ -672,7 +601,6 @@ struct AirBuilderImpl {
     return wrapperStruct("struct.metal::sampler", samplerHandleType());
   }
 
-  /* The AB struct: one 8-byte member per handle word, in abWord order. */
   StructType* argumentBufferType() {
     if (abStruct)
       return abStruct;
@@ -705,7 +633,6 @@ struct AirBuilderImpl {
     return nullptr;
   }
 
-  /* Declared air.* intrinsic with golden-dump attributes */
   Function* getAirIntrinsic(
           const std::string&  name,
           Type*               retType,
@@ -727,13 +654,6 @@ struct AirBuilderImpl {
     return fn;
   }
 
-
-  /* ---- function creation ---- */
-
-  /* Entry signature: [stage-in inputs..., constant buffers...] ->
-   * packed struct of outputs (or single value). AB mode: [stage-in
-   * inputs..., push buffer?, AB pointer?] — every other resource is a
-   * handle word inside the AB struct. */
   void createEntryFunction() {
     SmallVector<Type*, 8> params;
 
@@ -745,7 +665,6 @@ struct AirBuilderImpl {
 
     int32_t abArgIndex = -1;
     if (useAB) {
-      /* push data keeps its own [[buffer(20)]] argument */
       for (auto& buf : buffers) {
         if (!buf.isPushData)
           continue;
@@ -782,7 +701,7 @@ struct AirBuilderImpl {
     if (retMembers.size() == 1u) {
       retType = retMembers[0];
     } else {
-      entryRetType = StructType::get(ctx, retMembers, /* packed */ true);
+      entryRetType = StructType::get(ctx, retMembers,  true);
       retType = entryRetType;
     }
 
@@ -858,7 +777,6 @@ struct AirBuilderImpl {
     return nullptr;
   }
 
-  /* LLVM type of the hidden trailing param forwarding this declaration */
   Type* hiddenParamType(ir::SsaDef declDef) {
     if (useAB && declDef.getId() == kAbDeclId)
       return PointerType::get(argumentBufferType(), kAsConstant);
@@ -869,14 +787,12 @@ struct AirBuilderImpl {
     if (findSampler(declDef))
       return samplerHandleType();
     if (const OutputVar* out = findOutput(declDef))
-      return PointerType::get(out->type, 0u); /* entry output alloca */
+      return PointerType::get(out->type, 0u);
     if (const InputVar* in = findInput(declDef))
-      return in->type; /* stage-in input threaded by value */
+      return in->type;
     unsupported("hidden param for unknown declaration");
   }
 
-  /* Hidden-param id a resource declaration threads under: AB members all
-   * collapse onto the single kAbDeclId pointer in AB mode. */
   uint32_t hiddenIdForDecl(ir::SsaDef declDef) {
     if (!useAB)
       return declDef.getId();
@@ -889,8 +805,6 @@ struct AirBuilderImpl {
     return declDef.getId();
   }
 
-  /* Fixpoint over the call graph: which buffer decls does each
-   * function touch, directly or through callees. */
   void computeHiddenBuffers() {
     auto [codeBegin, codeEnd] = ir.getCode();
 
@@ -918,16 +832,9 @@ struct AirBuilderImpl {
         if (op.getOpCode() == ir::OpCode::eInputLoad) {
           if (const BufferVar* buf = findBuffer(operandDef(op, 0u)))
             addUse(hiddenIdForDecl(buf->def));
-          /* Stage-in inputs (air.position, fog, user interpolants) live as
-           * entry-point arguments. A helper (dxbc-spirv fog/clip functions load
-           * these directly) cannot reach the entry's args, so thread the loaded
-           * value in as a hidden param — the entry never needs this (currentFnDef
-           * == entry is filtered by addUse's owner check below). */
           else if (const InputVar* in = findInput(operandDef(op, 0u)))
             addUse(in->def.getId());
         } else if (op.getOpCode() == ir::OpCode::eOutputStore) {
-          /* outputs written from helper functions arrive as pointers to
-           * the entry's output allocas */
           if (findOutput(operandDef(op, 0u)))
             addUse(operandDef(op, 0u).getId());
         } else if (op.getOpCode() == ir::OpCode::eDescriptorLoad) {
@@ -945,7 +852,6 @@ struct AirBuilderImpl {
     }
   }
 
-  /* Pre-create every function so calls can reference later definitions. */
   void createFunctions() {
     computeHiddenBuffers();
 
@@ -958,11 +864,8 @@ struct AirBuilderImpl {
 
       if (op.getDef() == entryDef) {
         createEntryFunction();
-        /* entry accesses resources (and stage-in inputs) through its own args */
         auto& argMap = fnBufferArgs[entryDef.getId()];
         if (useAB) {
-          /* AB members are reached through the single AB pointer arg;
-           * only push data keeps a direct argument. */
           for (const auto& buf : buffers) {
             if (buf.isPushData)
               argMap.emplace(buf.def.getId(), buf.argIndex);
@@ -988,16 +891,12 @@ struct AirBuilderImpl {
         params.push_back(mapType(param.getType(), false));
       }
 
-      /* hidden trailing resource params (buffers, textures, samplers) */
       auto& argMap = fnBufferArgs[op.getDef().getId()];
       for (uint32_t declId : fnHiddenBuffers[op.getDef().getId()]) {
         argMap.emplace(declId, uint32_t(params.size()));
         params.push_back(hiddenParamType(ir::SsaDef(declId)));
       }
 
-      // Named by walk order, not SSA id: ir_serialize densely remaps ids on
-      // round-trip, and byte-identical output across serialize boundaries is
-      // a loopback-test invariant (internal linkage; name is otherwise free).
       Function* fn = Function::Create(
         FunctionType::get(mapType(op.getType(), false), params, false),
         GlobalValue::InternalLinkage,
@@ -1006,9 +905,6 @@ struct AirBuilderImpl {
       functions.emplace(op.getDef().getId(), fn);
     }
   }
-
-
-  /* ---- body emission ---- */
 
   Function* currentFn = nullptr;
   const ir::Op* currentFnOp = nullptr;
@@ -1026,7 +922,6 @@ struct AirBuilderImpl {
       currentFn = functions.at(op.getDef().getId());
       isEntry = op.getDef() == entryDef;
 
-      /* pre-create blocks for all labels in this function */
       blocks.clear();
       bool first = true;
       for (auto scan = iter; scan != codeEnd; ++scan) {
@@ -1039,7 +934,6 @@ struct AirBuilderImpl {
         }
       }
 
-      /* emit ops until FunctionEnd */
       bool entrySetupDone = false;
       for (++iter; iter != codeEnd; ++iter) {
         const ir::Op& code = *iter;
@@ -1058,12 +952,10 @@ struct AirBuilderImpl {
         emitInstruction(code);
       }
 
-      /* back-edge phi operands exist now */
       resolvePendingPhis();
     }
   }
 
-  /* output allocas */
   void emitEntryPrologue() {
     for (auto& out : outputs) {
       out.storage = b->CreateAlloca(out.type);
@@ -1113,7 +1005,6 @@ struct AirBuilderImpl {
           getValue(operandDef(op, 2u))));
         return;
 
-      /* float arithmetic */
       case ir::OpCode::eFAdd: return emitFBin(op, Instruction::FAdd);
       case ir::OpCode::eFSub: return emitFBin(op, Instruction::FSub);
       case ir::OpCode::eFMul: return emitFBin(op, Instruction::FMul);
@@ -1163,7 +1054,6 @@ struct AirBuilderImpl {
             getValue(operandDef(op, 2u)) }));
         return;
 
-      /* transcendentals: golden air.fast_* intrinsics (scratchpad alu.ll) */
       case ir::OpCode::eFSin:   return emitAirMathUnary(op, "air.fast_sin");
       case ir::OpCode::eFCos:   return emitAirMathUnary(op, "air.fast_cos");
       case ir::OpCode::eFExp2:  return emitAirMathUnary(op, "air.fast_exp2");
@@ -1174,13 +1064,10 @@ struct AirBuilderImpl {
       case ir::OpCode::eFPow:   return emitAirMathBinary(op, "air.fast_pow");
 
       case ir::OpCode::eFIsNan:
-        /* unordered self-compare; under fast-math both backends fold alike */
         setValue(op, b->CreateFCmpUNO(
           getValue(operandDef(op, 0u)), getValue(operandDef(op, 0u))));
         return;
 
-      /* integer min/max/abs: air.{max,min}.{s,u}.i32 / air.abs.s.i32;
-       * the sm3 pipeline scalarizes, so scalar i32 is the only shape */
       case ir::OpCode::eSMax: return emitAirIntBinary(op, "air.max.s.i32");
       case ir::OpCode::eSMin: return emitAirIntBinary(op, "air.min.s.i32");
       case ir::OpCode::eUMax: return emitAirIntBinary(op, "air.max.u.i32");
@@ -1204,7 +1091,6 @@ struct AirBuilderImpl {
           getValue(operandDef(op, 0u)), getValue(operandDef(op, 1u))));
         return;
 
-      /* width conversions + reinterpret casts (plain LLVM; golden matches) */
       case ir::OpCode::eConvertFtoF: {
         Value* v = getValue(operandDef(op, 0u));
         Type* dst = mapType(op.getType(), false);
@@ -1230,16 +1116,13 @@ struct AirBuilderImpl {
           getValue(operandDef(op, 0u)), mapType(op.getType(), false)));
         return;
 
-      /* indexable private arrays */
       case ir::OpCode::eScratchLoad:  return emitScratchLoad(op);
       case ir::OpCode::eScratchStore: return emitScratchStore(op);
 
-      /* constant buffers (DclCbv path, post io-lowering) */
       case ir::OpCode::eBufferLoad:   return emitBufferLoad(op);
       case ir::OpCode::ePushDataLoad:  return emitPushDataLoad(op);
-      case ir::OpCode::eDclPushData:   return;   /* handled in decl scan */
+      case ir::OpCode::eDclPushData:   return;
 
-      /* resources */
       case ir::OpCode::eDescriptorLoad:  return emitDescriptorLoad(op);
       case ir::OpCode::eImageSample:     return emitImageSample(op);
       case ir::OpCode::eImageGather:     return emitImageGather(op);
@@ -1264,7 +1147,6 @@ struct AirBuilderImpl {
         return;
       }
 
-      /* float compare (ordered; FNe unordered-ne per D3D semantics) */
       case ir::OpCode::eFEq: return emitFCmp(op, CmpInst::FCMP_OEQ);
       case ir::OpCode::eFNe: return emitFCmp(op, CmpInst::FCMP_UNE);
       case ir::OpCode::eFLt: return emitFCmp(op, CmpInst::FCMP_OLT);
@@ -1272,7 +1154,6 @@ struct AirBuilderImpl {
       case ir::OpCode::eFGt: return emitFCmp(op, CmpInst::FCMP_OGT);
       case ir::OpCode::eFGe: return emitFCmp(op, CmpInst::FCMP_OGE);
 
-      /* integer */
       case ir::OpCode::eIAdd: return emitIBin(op, Instruction::Add);
       case ir::OpCode::eISub: return emitIBin(op, Instruction::Sub);
       case ir::OpCode::eIMul: return emitIBin(op, Instruction::Mul);
@@ -1303,14 +1184,12 @@ struct AirBuilderImpl {
       case ir::OpCode::eSGt: return emitICmp(op, CmpInst::ICMP_SGT);
       case ir::OpCode::eSGe: return emitICmp(op, CmpInst::ICMP_SGE);
 
-      /* bool */
       case ir::OpCode::eBAnd: return emitIBin(op, Instruction::And);
       case ir::OpCode::eBOr:  return emitIBin(op, Instruction::Or);
       case ir::OpCode::eBNot:
         setValue(op, b->CreateNot(getValue(operandDef(op, 0u))));
         return;
 
-      /* conversions */
       case ir::OpCode::eConvertItoF: {
         const ir::Op& src = this->ir.getOpForOperand(op, 0u);
         bool isSigned =
@@ -1331,7 +1210,6 @@ struct AirBuilderImpl {
         return;
       }
 
-      /* handled elsewhere / no-ops in AIR terms */
       case ir::OpCode::eConstant:
       case ir::OpCode::eUndef:
         return;
@@ -1344,8 +1222,6 @@ struct AirBuilderImpl {
   void emitFBin(const ir::Op& op, Instruction::BinaryOps kind) {
     Value* v = b->CreateBinOp(kind,
       getValue(operandDef(op, 0u)), getValue(operandDef(op, 1u)));
-    /* precise ops keep default (fast) flags off contract-sensitive math is
-     * already expressed structurally by the legalizer; leave as emitted */
     setValue(op, v);
   }
 
@@ -1354,9 +1230,6 @@ struct AirBuilderImpl {
       getValue(operandDef(op, 0u)), getValue(operandDef(op, 1u))));
   }
 
-  /* OpBitFieldU/SExtract: extract `count` bits at `offset`, zero/sign filled.
-   * Double-shift form (folds to a shift+and for constant fields, e.g. the
-   * 8-bit D3DCOLOR lanes the legacy-input lowering emits). */
   void emitBitExtract(const ir::Op& op, bool sign) {
     Value* base   = getValue(operandDef(op, 0u));
     Value* offset = getValue(operandDef(op, 1u));
@@ -1369,13 +1242,11 @@ struct AirBuilderImpl {
     Value* shl   = b->CreateShl(base, left);
     Value* right = b->CreateSub(width, count);
     Value* res   = sign ? b->CreateAShr(shl, right) : b->CreateLShr(shl, right);
-    /* count == 0 => 0 (shift-by-width is UB in LLVM) */
+    /* count == 0 must map to 0: shift-by-width is undefined in LLVM */
     res = b->CreateSelect(b->CreateICmpEQ(count, zero), zero, res);
     setValue(op, res);
   }
 
-  /* OpBitFieldInsert: replace bits [offset, offset+count) of base with the
-   * low `count` bits of insert. */
   void emitBitInsert(const ir::Op& op) {
     Value* base   = getValue(operandDef(op, 0u));
     Value* insert = getValue(operandDef(op, 1u));
@@ -1384,12 +1255,11 @@ struct AirBuilderImpl {
     Type*  ty     = base->getType();
     Value* one    = ConstantInt::get(ty, 1u);
 
-    Value* countMask = b->CreateSub(b->CreateShl(one, count), one);   // (1<<count)-1
+    Value* countMask = b->CreateSub(b->CreateShl(one, count), one);
     Value* mask      = b->CreateShl(countMask, offset);
     Value* keep      = b->CreateAnd(base, b->CreateNot(mask));
     Value* ins       = b->CreateAnd(b->CreateShl(insert, offset), mask);
     Value* res       = b->CreateOr(keep, ins);
-    /* count == 0 => base unchanged */
     res = b->CreateSelect(
       b->CreateICmpEQ(count, ConstantInt::get(ty, 0u)), base, res);
     setValue(op, res);
@@ -1417,9 +1287,6 @@ struct AirBuilderImpl {
     return discardFn;
   }
 
-  /* Address operand -> GEP index list. Composite addresses (u32xN
-   * constants, e.g. sampler_state[s].member) become one index per
-   * component; runtime scalar indices (relative addressing) pass through. */
   void appendAddressIndices(ir::SsaDef addrDef, SmallVectorImpl<Value*>& idx) {
     const ir::Op& addrOp = this->ir.getOp(addrDef);
     ir::BasicType bt = addrOp.getType().getBaseType(0u);
@@ -1443,9 +1310,6 @@ struct AirBuilderImpl {
     ir::SsaDef decl = operandDef(op, 0u);
     ir::SsaDef addrDef = operandDef(op, 1u);
 
-    /* stage-in input? Resolve through the *current* function's arg map: the
-     * entry reads its own stage-in argument, a helper reads the value threaded
-     * to it as a hidden param (a function cannot reach the entry's args). */
     for (const auto& in : inputs) {
       if (in.def != decl)
         continue;
@@ -1458,8 +1322,6 @@ struct AirBuilderImpl {
       return;
     }
 
-    /* buffer-backed builtin, via the current function's buffer argument
-     * (AB mode: via its handle word in the argument buffer) */
     for (const auto& buf : buffers) {
       if (buf.def != decl)
         continue;
@@ -1484,7 +1346,6 @@ struct AirBuilderImpl {
         v = b->CreateLoad(elem, ptr);
       }
 
-      /* bool members are stored as i32 */
       const ir::Type& resType = op.getType();
       if (resType.isScalarType() &&
           resType.getBaseType(0u).getBaseType() == ir::ScalarType::eBool)
@@ -1502,7 +1363,6 @@ struct AirBuilderImpl {
     if (!out)
       unsupported("OutputStore to unknown declaration");
 
-    /* target: entry writes its alloca, helpers write the forwarded ptr */
     Value* target = out->storage;
     if (!isEntry) {
       const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
@@ -1515,7 +1375,6 @@ struct AirBuilderImpl {
     if (!addrDef) {
       b->CreateStore(value, target);
     } else if (out->type->isArrayTy()) {
-      /* ClipDistance and friends: element store, index may be dynamic */
       SmallVector<Value*, 2> idx;
       idx.push_back(b->getInt64(0));
       appendAddressIndices(addrDef, idx);
@@ -1552,8 +1411,6 @@ struct AirBuilderImpl {
     for (uint32_t i = 1u; i < op.getOperandCount(); i++)
       args.push_back(getValue(operandDef(op, i)));
 
-    /* forward the callee's hidden params: resources come from our own
-     * arg map; output allocas are passed directly when we are the entry */
     const auto& ownArgs = fnBufferArgs.at(currentFnOp->getDef().getId());
     for (uint32_t declId : fnHiddenBuffers[calleeDef.getId()]) {
       auto argIt = ownArgs.find(declId);
@@ -1582,7 +1439,6 @@ struct AirBuilderImpl {
       return;
     }
 
-    /* entry: gather outputs from allocas */
     SmallVector<Value*, 4> loaded;
     for (auto& out : outputs)
       loaded.push_back(b->CreateLoad(out.type, out.storage));
@@ -1613,8 +1469,6 @@ struct AirBuilderImpl {
   }
 
   void emitPhi(const ir::Op& op) {
-    /* Incoming values may be back-edge definitions not yet visited; wire
-     * the edges after the whole function body exists. */
     PHINode* phi = b->CreatePHI(
       mapType(op.getType(), false), op.getOperandCount() / 2u);
     setValue(op, phi);
@@ -1654,10 +1508,6 @@ struct AirBuilderImpl {
     setValue(op, v);
   }
 
-
-  /* ---- math intrinsics / scratch / cbv ---- */
-
-  /* Pure-math air.* function (readnone, unlike the texture intrinsics) */
   Function* getAirMathFn(
           const std::string&  name,
           Type*               retType,
@@ -1678,14 +1528,9 @@ struct AirBuilderImpl {
     return fn;
   }
 
-  /* The air.fast_* intrinsics are scalar .f32. The sm3 pipeline is mostly
-   * scalarized, but some shaders (e.g. GTA) reach here with a vector operand;
-   * decompose it into per-component scalar calls and reassemble.
-   *
-   * min16float shaders lower to `half`; there is no guaranteed half variant of
-   * these fast intrinsics and getAirMathFn caches by name, so a half operand
-   * would clash with the cached float(float) declaration. Compute in float
-   * (promote args, truncate result) — the .f32 intrinsic is always available. */
+  /* half operands compute in float and truncate the result: there is no
+   * guaranteed half variant of these fast intrinsics, and getAirMathFn
+   * caches by name, so a half call would collide with the cached f32 decl */
   Value* callScalarMath(const std::string& base, Type* scalarTy,
                         std::initializer_list<Value*> args) {
     const bool isHalf = scalarTy->isHalfTy();
@@ -1757,8 +1602,6 @@ struct AirBuilderImpl {
       { lo, getValue(operandDef(op, 2u)) }));
   }
 
-  /* One alloca per (current function, scratch decl), placed in the
-   * function's entry block. Golden: plain addrspace(0) alloca + GEPs. */
   AllocaInst* scratchAlloca(ir::SsaDef decl) {
     uint64_t key = (uint64_t(currentFnOp->getDef().getId()) << 32) |
       decl.getId();
@@ -1799,7 +1642,6 @@ struct AirBuilderImpl {
     b->CreateStore(getValue(operandDef(op, 2u)), ptr);
   }
 
-  /* BufferLoad reads through a DescriptorLoad of a DclCbv */
   void emitPushDataLoad(const ir::Op& op) {
     ir::SsaDef declDef = operandDef(op, 0u);
     uint32_t off = m_pushOffset.at(declDef.getId());
@@ -1810,16 +1652,12 @@ struct AirBuilderImpl {
       unsupported("PushDataLoad outside push arg map");
 
     Type* i8ty = Type::getInt8Ty(ctx);
-    Value* base = currentFn->getArg(it->second);   /* [N x i8] constant* */
+    Value* base = currentFn->getArg(it->second);
     Value* i8base = b->CreateBitCast(base, PointerType::get(i8ty, kAsConstant));
 
-    /* The address operand is a CONSTANT composite index into the declared
-     * ir type (struct member, then optional deeper indices), matching
-     * upstream SpirvBuilder::emitPushDataLoad. Resolve it to a byte offset
-     * through ir::Type::byteOffset — the ir layout is alignment-aware and
-     * heterogeneous (e.g. the shared block {u8x3, u8, f32, f32, f32} puts
-     * alphaRef at byte 3 and fogScale at byte 4), so scaling the member
-     * index by the LOAD size is wrong for anything but member 0. */
+    /* resolve via ir::Type::byteOffset, not member-index * load-size: the
+     * push layout is alignment-aware and heterogeneous, so scaling by the
+     * load size is wrong for any member past the first */
     Type* loadTy = mapType(op.getType(), false);
     ir::SsaDef addrDef = operandDef(op, 1u);
     if (addrDef) {
@@ -1835,11 +1673,9 @@ struct AirBuilderImpl {
     }
     Value* elem = b->CreateInBoundsGEP(i8ty, i8base, b->getInt64(off));
 
-    /* The push slice base is 256-aligned, so the largest power of two
-     * dividing the byte offset (capped at 4) is a safe load alignment;
-     * sub-word members (u8 alphaRef at byte 3, u16s at 2-byte offsets)
-     * must not claim align 4. */
-    uint64_t align = uint64_t(off | 4u) & -uint64_t(off | 4u);  /* lowest set bit, <= 4 */
+    /* largest power of two dividing the byte offset (capped at 4) is a
+     * safe load alignment; sub-word members must not claim align 4 */
+    uint64_t align = uint64_t(off | 4u) & -uint64_t(off | 4u);
     Value* typed = b->CreateBitCast(elem, PointerType::get(loadTy, kAsConstant));
     Value* v = b->CreateAlignedLoad(loadTy, typed, MaybeAlign(align));
 
@@ -1881,10 +1717,6 @@ struct AirBuilderImpl {
     setValue(op, v);
   }
 
-
-  /* ---- textures ---- */
-
-  /* Resolves an ImageSample/Gather descriptor operand back to its DclSrv. */
   const TextureVar& textureForDescriptor(ir::SsaDef descriptorLoadDef) {
     const ir::Op& load = this->ir.getOp(descriptorLoadDef);
     if (load.getOpCode() != ir::OpCode::eDescriptorLoad)
@@ -1895,7 +1727,6 @@ struct AirBuilderImpl {
     return *tex;
   }
 
-  /* AB pointer in the current function (entry arg or hidden param) */
   Value* abBasePointer() {
     const auto& argMap = fnBufferArgs.at(currentFnOp->getDef().getId());
     auto it = argMap.find(kAbDeclId);
@@ -1904,8 +1735,6 @@ struct AirBuilderImpl {
     return currentFn->getArg(it->second);
   }
 
-  /* Load one handle word out of the AB struct. Texture/sampler members are
-   * golden-dump wrapper structs ({handle*}); buffers are plain pointers. */
   Value* loadAbHandle(int32_t word, bool wrapped) {
     Value* base = abBasePointer();
     SmallVector<Value*, 3> idx;
@@ -1943,20 +1772,6 @@ struct AirBuilderImpl {
     setValue(op, currentFn->getArg(it->second));
   }
 
-  /* Golden-dump signatures (see scratchpad golden/tex*.ll):
-   *   sample_texture_2d.v4f32 (t, s, coord,
-   *     i1 offs_en, <2 x i32> offs, i1 is_level, f32 lod_or_bias, f32 minlod, i32 0)
-   *   sample_texture_3d.v4f32 — 3-wide coord/offset, same shape
-   *   sample_texture_cube.v4f32 (t, s, coord, i1 is_level, f32, f32, i32) — no offset
-   *   sample_texture_{2d,3d}_grad.v4f32 (t, s, coord, dx, dy, f32 minlod,
-   *     i1 offs_en, offs, i32 0)
-   *   sample_texture_cube_grad.v4f32 (t, s, coord, dx, dy, f32 minlod, i32 0)
-   *   sample_compare_depth_2d.f32 (t, s, i32 1, coord, f32 dref,
-   *     i1 offs_en, offs, i1 is_level, f32, f32, i32 0)
-   *   sample_compare_depth_cube.f32 (t, s, i32 1, coord, f32 dref,
-   *     i1 is_level, f32, f32, i32 0)
-   *   sample_compare_depth_2d_grad.f32 (t, s, i32 1, coord, f32 dref,
-   *     dx, dy, f32 minlod, i1 offs_en, offs, i32 0) */
   void emitImageSample(const ir::Op& op) {
     const TextureVar& tex = textureForDescriptor(operandDef(op, 0u));
 
@@ -2000,8 +1815,6 @@ struct AirBuilderImpl {
       ? getValue(lodIndexDef)
       : (lodBiasDef ? getValue(lodBiasDef) : ConstantFP::get(f32, 0.0));
 
-    /* dref samples go through the depth_* handle type; the declared
-     * texture handle is bitcast (same opaque pointer size) */
     Value* handle = texHandle;
     if (isDref)
       handle = b->CreateBitCast(texHandle, textureHandleType(tex.kind, true));
@@ -2060,9 +1873,6 @@ struct AirBuilderImpl {
     setValue(op, b->CreateExtractValue(result, { 0u }));
   }
 
-  /* air.gather_texture_2d.v4f32 (t, s, coord, i1 offs_en, <2 x i32> offs,
-   *   i32 component, i32 0)
-   * air.gather_texture_cube.v4f32 (t, s, coord, i32 component, i32 0) */
   void emitImageGather(const ir::Op& op) {
     const TextureVar& tex = textureForDescriptor(operandDef(op, 0u));
     if (tex.kind == ir::ResourceKind::eImage3D)
@@ -2107,8 +1917,6 @@ struct AirBuilderImpl {
     setValue(op, b->CreateExtractValue(result, { 0u }));
   }
 
-  /* {u32xN, u32} = (dimensions at lod, mip count) via
-   * air.get_{width,height,depth}_texture_* + air.get_num_mip_levels_* */
   void emitImageQuerySize(const ir::Op& op) {
     const TextureVar& tex = textureForDescriptor(operandDef(op, 0u));
     Value* texHandle = getValue(operandDef(op, 0u));
@@ -2159,9 +1967,6 @@ struct AirBuilderImpl {
     setValue(op, call);
   }
 
-
-  /* ---- metadata ---- */
-
   Metadata* mdString(StringRef s) { return MDString::get(ctx, s); }
   Metadata* mdI32(uint32_t v) {
     return ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(ctx), v));
@@ -2172,10 +1977,6 @@ struct AirBuilderImpl {
     return "generated(loc" + std::to_string(location) + "_user)";
   }
 
-  /* AB argument metadata (golden metalfe form): air.indirect_buffer with an
-   * air.struct_type_info tuple describing each 8-byte handle member, each
-   * pointing at an ordinary air.texture/air.sampler/air.buffer sub-tuple
-   * whose location_index is the member's [[id(n)]] == its word index. */
   MDNode* buildAbMetadata() {
     struct MemberDesc {
       uint32_t    word;
@@ -2220,8 +2021,6 @@ struct AirBuilderImpl {
           mdString("air.arg_name"), mdString(smp.name) }) };
     }
 
-    /* flat struct_type_info: {offset, size, 0, typeName, memberName,
-     * "air.indirect_argument", sub}* */
     SmallVector<Metadata*, 64> info;
     for (const auto& m : members) {
       info.push_back(mdI32(m.word * 8u));
@@ -2248,7 +2047,6 @@ struct AirBuilderImpl {
   }
 
   void buildMetadata() {
-    /* entry outputs */
     SmallVector<Metadata*, 4> outputMd;
     for (const auto& out : outputs) {
       if (out.isBuiltin && out.builtin == ir::BuiltIn::ePosition) {
@@ -2289,11 +2087,9 @@ struct AirBuilderImpl {
       }
     }
 
-    /* entry inputs */
     SmallVector<Metadata*, 8> inputMd;
     for (const auto& in : inputs) {
       if (in.isBuiltin && in.builtin == ir::BuiltIn::ePosition) {
-        /* PS vPos: raster position with fixed qualifiers */
         inputMd.push_back(mdTuple({
           mdI32(in.argIndex), mdString("air.position"),
           mdString("air.center"), mdString("air.no_perspective"),
@@ -2329,7 +2125,6 @@ struct AirBuilderImpl {
     }
 
     if (useAB) {
-      /* push data keeps its own top-level buffer argument */
       for (const auto& buf : buffers) {
         if (!buf.isPushData)
           continue;
@@ -2388,7 +2183,6 @@ struct AirBuilderImpl {
       ValueAsMetadata::get(entryFn),
       mdTuple(outputMd), mdTuple(inputMd) }));
 
-    /* module-level */
     mod->addModuleFlag(Module::ModFlagBehavior::Error, "wchar_size", 4u);
     mod->addModuleFlag(Module::ModFlagBehavior::Max, "frame-pointer", 2u);
     mod->addModuleFlag(Module::ModFlagBehavior::Max, "air.max_device_buffers", 31u);
@@ -2413,13 +2207,6 @@ struct AirBuilderImpl {
       mdTuple({ mdString("d9mt dxbc-spirv AIR backend") }));
   }
 
-
-  /* ---- top level ---- */
-
-  /* DclSpecConstant -> AIR function constant: an undef working global,
-   * an externally-initialized "MTL_FC_INIT" global the runtime patches
-   * with the MTLFunctionConstantValues entry, and a static-init function
-   * copying one into the other (golden metalfe pattern). */
   void createSpecConstants() {
     if (specs.empty() || options.foldSpecConstants)
       return;
@@ -2429,8 +2216,6 @@ struct AirBuilderImpl {
 
     for (auto& spec : specs) {
       std::string name = "spec" + std::to_string(spec.specId);
-      /* Itanium-style names as the golden dumps use: _ZL<len><name> and
-       * _Z<len><name>.MTL_FC_INIT_<id>_j (j = unsigned int) */
       std::string lenName = std::to_string(name.size()) + name;
 
       spec.workingGlobal = new GlobalVariable(*mod, i32, false,
@@ -2448,14 +2233,11 @@ struct AirBuilderImpl {
       spec.initGlobal->setSection("air.fc_initializer");
       spec.initGlobal->setAlignment(Align(4u));
 
-      /* one named-metadata operand per constant (golden form):
-       * !{init-global, "uint", "specN", i32 id} */
       fcMd.push_back(mdTuple({
         ConstantAsMetadata::get(spec.initGlobal),
         mdString("uint"), mdString(name), mdI32(spec.specId) }));
     }
 
-    /* static initializer: copy INIT globals into the working globals */
     Function* ctor = Function::Create(
       FunctionType::get(Type::getVoidTy(ctx), false),
       GlobalValue::InternalLinkage, "_GLOBAL__sub_I_air", *mod);
@@ -2471,7 +2253,6 @@ struct AirBuilderImpl {
     }
     cb.CreateRetVoid();
 
-    /* llvm.global_ctors entry */
     StructType* ctorTy = StructType::get(
       i32, ctor->getType(), Type::getInt8PtrTy(ctx));
     Constant* entry = ConstantStruct::get(ctorTy,
@@ -2596,4 +2377,4 @@ std::vector<uint8_t> AirBuilder::buildMetallib() {
   return result;
 }
 
-} // namespace dxbc_spv::air
+}

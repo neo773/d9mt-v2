@@ -19,8 +19,7 @@
     if (status) {                                                                                                      \
       fprintf(stderr, "winemetal: unix call %d FAILED status=0x%x\n", (int)(code), (unsigned)status);                  \
       fflush(stderr);                                                                                                  \
-      /* retain/release (codes 0/1) failing at teardown leaks instead of                                               \
-       * aborting the process; anything else is still fatal. */                                                        \
+      /* retain/release (0/1) failing at teardown leaks instead of aborting. */                                        \
       assert(((code) == 0 || (code) == 1) && "unix call failed");                                                      \
     }                                                                                                                  \
   }
@@ -1335,13 +1334,6 @@ MTLDevice_updateSparseTextureMappings(
   return params.ret != 0;
 }
 
-/* ===================================================================== *
- * d9mt addition: Metal 4 surface PE-side marshalling (codes 157..200).
- * Shared thunks (params are all 8-byte / arch-invariant); wow64 twin table
- * points at the same functions.
- * ===================================================================== */
-
-/* --- device factories (157..162) ------------------------------------- */
 static obj_handle_t
 wmt_mtl4_device_new(obj_handle_t device, uint32_t code) {
   struct unixcall_generic_obj_obj_ret params;
@@ -1391,7 +1383,6 @@ MTLDevice_newResidencySet(obj_handle_t device, const struct WMTResidencySetInfo 
   return params.ret;
 }
 
-/* --- command allocator (163) ----------------------------------------- */
 WINEMETAL_API void
 MTL4CommandAllocator_reset(obj_handle_t allocator) {
   struct unixcall_generic_obj_noret params;
@@ -1399,7 +1390,6 @@ MTL4CommandAllocator_reset(obj_handle_t allocator) {
   UNIX_CALL(163, &params);
 }
 
-/* --- command buffer (164..166) --------------------------------------- */
 WINEMETAL_API void
 MTL4CommandBuffer_beginCommandBuffer(obj_handle_t cmdbuf, obj_handle_t allocator) {
   struct unixcall_generic_obj_obj_noret params;
@@ -1423,7 +1413,6 @@ MTL4CommandBuffer_useResidencySet(obj_handle_t cmdbuf, obj_handle_t residency_se
   UNIX_CALL(166, &params);
 }
 
-/* --- command queue (167..171) ---------------------------------------- */
 WINEMETAL_API void
 MTL4CommandQueue_commit(obj_handle_t queue, const obj_handle_t *cmdbufs, uint64_t count) {
   struct unixcall_mtl4_queue_commit params;
@@ -1467,7 +1456,6 @@ MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t v
   UNIX_CALL(171, &params);
 }
 
-/* --- argument table (172..175) --------------------------------------- */
 WINEMETAL_API void
 MTL4ArgumentTable_setAddress(obj_handle_t table, uint64_t gpu_address, uint64_t index) {
   struct unixcall_mtl4_argtable_setaddress params;
@@ -1506,7 +1494,6 @@ MTL4ArgumentTable_setSamplerState(obj_handle_t table, uint64_t gpu_resource_id, 
   UNIX_CALL(175, &params);
 }
 
-/* --- render command encoder (176..188) ------------------------------- */
 WINEMETAL_API obj_handle_t
 MTL4CommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassInfo *info) {
   struct unixcall_generic_obj_uint64_obj_ret params;
@@ -1638,7 +1625,6 @@ MTL4RenderCommandEncoder_drawIndexedPrimitives(
   UNIX_CALL(188, &params);
 }
 
-/* --- compute command encoder (189..195) ------------------------------ */
 WINEMETAL_API obj_handle_t
 MTL4CommandBuffer_computeCommandEncoder(obj_handle_t cmdbuf) {
   struct unixcall_generic_obj_obj_ret params;
@@ -1741,7 +1727,6 @@ MTL4ComputeCommandEncoder_generateMipmaps(obj_handle_t encoder, obj_handle_t tex
   UNIX_CALL(195, &params);
 }
 
-/* --- compiler + render pipeline (196) -------------------------------- */
 WINEMETAL_API obj_handle_t
 MTL4Compiler_newRenderPipelineState(obj_handle_t compiler, const struct WMTMtl4RenderPipelineInfo *info, obj_handle_t *err_out) {
   struct unixcall_mtl4_newrenderpso params;
@@ -1755,7 +1740,6 @@ MTL4Compiler_newRenderPipelineState(obj_handle_t compiler, const struct WMTMtl4R
   return params.ret_pso;
 }
 
-/* --- residency set (197..200) ---------------------------------------- */
 WINEMETAL_API void
 MTLResidencySet_addAllocation(obj_handle_t residency_set, obj_handle_t resource) {
   struct unixcall_generic_obj_obj_noret params;
@@ -1785,7 +1769,6 @@ MTLResidencySet_removeAllAllocations(obj_handle_t residency_set) {
   UNIX_CALL(200, &params);
 }
 
-/* --- drawable present (201) ------------------------------------------ */
 WINEMETAL_API void
 MetalDrawable_present(obj_handle_t drawable) {
   struct unixcall_generic_obj_noret params;
@@ -1811,7 +1794,6 @@ MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after) {
   UNIX_CALL(211, &params);
 }
 
-/* --- render encoder visibility mode (202) ---------------------------- */
 WINEMETAL_API void
 MTL4RenderCommandEncoder_setVisibilityResultMode(obj_handle_t encoder, uint32_t mode, uint64_t offset) {
   struct unixcall_mtl4_setvisibilitymode params;
@@ -1821,7 +1803,6 @@ MTL4RenderCommandEncoder_setVisibilityResultMode(obj_handle_t encoder, uint32_t 
   UNIX_CALL(202, &params);
 }
 
-/* --- cross-encoder producer barrier (203) --------------------------- */
 WINEMETAL_API void
 MTL4CommandEncoder_barrier(obj_handle_t encoder, uint64_t after_stages,
                            uint64_t before_queue_stages, uint64_t visibility_options) {
@@ -1833,7 +1814,6 @@ MTL4CommandEncoder_barrier(obj_handle_t encoder, uint64_t after_stages,
   UNIX_CALL(203, &params);
 }
 
-/* --- residency set single remove (204) ------------------------------ */
 WINEMETAL_API void
 MTLResidencySet_removeAllocation(obj_handle_t residency_set, obj_handle_t resource) {
   struct unixcall_generic_obj_obj_noret params;
@@ -1842,7 +1822,6 @@ MTLResidencySet_removeAllocation(obj_handle_t residency_set, obj_handle_t resour
   UNIX_CALL(204, &params);
 }
 
-/* --- drawable residency + queue-level attach (205..207) -------------- */
 WINEMETAL_API obj_handle_t
 MetalLayer_residencySet(obj_handle_t layer) {
   struct unixcall_generic_obj_obj_ret params;
@@ -1868,7 +1847,6 @@ MTL4CommandQueue_removeResidencySet(obj_handle_t queue, obj_handle_t residency_s
   UNIX_CALL(207, &params);
 }
 
-/* --- MTL4 render command stream (208) -------------------------------- */
 WINEMETAL_API void
 MTL4RenderCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head) {
   struct unixcall_generic_obj_cmd_noret params;

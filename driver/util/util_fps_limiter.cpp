@@ -11,7 +11,7 @@
 using namespace std::chrono_literals;
 
 namespace dxvk {
-  
+
   FpsLimiter::FpsLimiter() {
 
   }
@@ -60,8 +60,8 @@ namespace dxvk {
         return;
     }
 
-    // Subsequent code must not access any class members
-    // that can be written by setTargetFrameRate
+    // m_nextFrame is only ever touched by this thread, so it is
+    // safe to keep reading/writing it after unlocking m_mutex here.
     lock.unlock();
 
     if (t1 < m_nextFrame)
@@ -87,8 +87,6 @@ namespace dxvk {
       uint32_t minFrameCount = m_heuristicFrameCount - 1;
       uint32_t maxFrameCount = m_heuristicFrameCount + maxLatency;
 
-      // Enable frame rate limiter if frames have been delivered faster than
-      // the desired refresh rate even accounting for swap chain buffering.
       if ((maxFrameCount * windowTotalTime) < (m_heuristicFrameCount * windowExpectedTime)) {
         double got = (double(m_heuristicFrameCount) * double(TimerDuration::period::den))
                    / (double(windowTotalTime.count()) * double(TimerDuration::period::num));
@@ -101,7 +99,6 @@ namespace dxvk {
         return true;
       }
 
-      // Reset heuristics if frames have been delivered slower than the refresh rate.
       if (((minFrameCount * windowTotalTime) > (m_heuristicFrameCount * windowExpectedTime))
        || (m_heuristicFrameCount >= MaxWindowSize)) {
         m_heuristicFrameCount = 1;

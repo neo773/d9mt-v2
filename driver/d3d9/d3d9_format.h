@@ -3,10 +3,6 @@
 #include <d3d9.h>
 #include "d3d9_options.h"
 
-// Retargeted from ../dxvk/dxvk_adapter.h + ../dxvk/dxvk_format.h (Vulkan) to the
-// Metal-first type set. The D3D9Format enum + Is*Format predicates are pure D3D9
-// (KEEP verbatim, doc 02 §2); only the mapping payload (VkFormat/VkImageAspect/
-// VkComponentMapping) retypes to MtlFormat / MtlAspectMask / MtlSwizzleChannels.
 #include "../mtl/mtl_types.h"
 #include "../mtl/mtl_format.h"
 
@@ -83,7 +79,6 @@ namespace dxvk {
     A2B10G10R10_XR_BIAS = 119,
     BINARYBUFFER = 199,
 
-    // Driver Hacks / Unofficial Formats
     ATI1 = MAKEFOURCC('A', 'T', 'I', '1'),
     ATI2 = MAKEFOURCC('A', 'T', 'I', '2'),
     INST = MAKEFOURCC('I', 'N', 'S', 'T'),
@@ -102,8 +97,8 @@ namespace dxvk {
 
     NV11 = MAKEFOURCC('N', 'V', '1', '1'),
     NV12 = MAKEFOURCC('N', 'V', '1', '2'),
-    P010 = MAKEFOURCC('P', '0', '1', '0'), // Same as NV12 but 10 bit
-    P016 = MAKEFOURCC('P', '0', '1', '6'), // Same as NV12 but 16 bit
+    P010 = MAKEFOURCC('P', '0', '1', '0'),
+    P016 = MAKEFOURCC('P', '0', '1', '6'),
     Y210 = MAKEFOURCC('Y', '2', '1', '0'),
     Y216 = MAKEFOURCC('Y', '2', '1', '6'),
     Y410 = MAKEFOURCC('Y', '4', '1', '0'),
@@ -111,7 +106,6 @@ namespace dxvk {
     YV12 = MAKEFOURCC('Y', 'V', '1', '2'),
     OPAQUE_420 = MAKEFOURCC('4', '2', '0', 'O'),
 
-    // Not supported but exist
     AI44 = MAKEFOURCC('A', 'I', '4', '4'),
     IA44 = MAKEFOURCC('I', 'A', '4', '4'),
     CENT = MAKEFOURCC('C', 'E', 'N', 'T'),
@@ -163,22 +157,16 @@ namespace dxvk {
     uint8_t            Depth  = 0;
   };
 
-  /**
-   * \brief Format mapping
-   *
-   * Maps a D3D9 format to a set of Metal formats. (Was D3D9_VK_FORMAT_MAPPING over
-   * VkFormat — doc 02 §4 rename to D3D9_MTL_FORMAT_MAPPING over MtlFormat.)
-   */
   struct D3D9_MTL_FORMAT_MAPPING {
     union {
       struct {
-        MtlFormat         FormatColor;                          ///< Corresponding color format
-        MtlFormat         FormatSrgb;                           ///< Corresponding color format
+        MtlFormat         FormatColor;
+        MtlFormat         FormatSrgb;
       };
       MtlFormat           Formats[2];
     };
-    MtlAspectMask         Aspect        = 0;                    ///< Defined aspects for the color format
-    MtlSwizzleChannels    Swizzle       = {                     ///< Color component swizzle (identity)
+    MtlAspectMask         Aspect        = 0;
+    MtlSwizzleChannels    Swizzle       = {
       MtlSwizzle::Red, MtlSwizzle::Green, MtlSwizzle::Blue, MtlSwizzle::Alpha };
     D3D9_CONVERSION_FORMAT_INFO ConversionFormatInfo = { };
 
@@ -191,13 +179,6 @@ namespace dxvk {
 
   class D3D9Adapter;
 
-  /**
-   * \brief Format table
-   *
-   * Initializes a format table for a specific device and provides methods to look
-   * up formats. Was D3D9VkFormatTable; the Vulkan format-support probing is Phase C
-   * (Metal device caps query) — stubbed permissive here.
-   */
   class D3D9MtlFormatTable {
 
   public:
@@ -206,15 +187,9 @@ namespace dxvk {
             D3D9Adapter*     pParent,
       const D3D9Options&     options);
 
-    /**
-     * \brief Retrieves info for a given D3D9 format
-     */
     D3D9_MTL_FORMAT_MAPPING GetFormatMapping(
       D3D9Format            Format) const;
 
-    /**
-     * \brief Retrieves format info for unsupported formats.
-     */
     const MtlFormatInfo* GetUnsupportedFormatInfo(
       D3D9Format            Format) const;
 
@@ -223,8 +198,6 @@ namespace dxvk {
 
   private:
 
-    // PHASE-C: real Metal format-support query (was CheckImageFormatSupport over
-    // VkFormat + VkFormatFeatureFlags2 via DxvkAdapter::getFormatFeatures).
     bool CheckImageFormatSupport(
             MtlFormat             Format) const;
 
@@ -243,7 +216,6 @@ namespace dxvk {
   };
 
   inline bool IsFourCCFormat(D3D9Format format) {
-    // BINARYBUFFER is the largest non-fourcc format
     return format > D3D9Format::BINARYBUFFER;
   }
 
@@ -269,9 +241,7 @@ namespace dxvk {
         || format == D3D9Format::DXT5;
   }
 
-  // D3D9 documentation says: IDirect3DSurface9::GetDC is valid on the following formats only:
-  // D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_R8G8B8, and D3DFMT_X8R8G8B8. However,
-  // the equivalent formats of D3DFMT_A1R5G5B5 and D3DFMT_A8R8G8B8 are also supported.
+  // Undocumented: GetDC also accepts the alpha equivalents of the documented formats.
   inline bool IsSurfaceGetDCCompatibleFormat(D3D9Format format) {
     return format == D3D9Format::R5G6B5
         || format == D3D9Format::X1R5G5B5

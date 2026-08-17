@@ -3,11 +3,6 @@
 #include "d3d9_initializer.h"
 #include "d3d9_device.h"
 
-// PHASE-C6 STAGE-2: ported off Vulkan onto the Mtl seam (doc 01 §1h, contract 3c).
-// The 4 EmitCs sites (initBuffer / initImage / flushCommandList) map straight onto
-// MtlContext. The host-visible init path memsets the shared-storage CPU pointer.
-// util::packImageData/computeBlockCount (Vulkan util) are inlined. The shared-handle
-// sync path is DROPPED (Vulkan/D3D11 interop).
 
 namespace dxvk {
 
@@ -33,9 +28,6 @@ namespace dxvk {
 
   void D3D9Initializer::InitBuffer(
           D3D9CommonBuffer*  pBuffer) {
-    // Host-visible if the real buffer exposes a shared-storage CPU pointer;
-    // otherwise it is GPU-private and needs a GPU-side zero-fill (was memFlags &
-    // HOST_VISIBLE).
     const bool hostVisible =
       pBuffer->GetBuffer<D3D9_COMMON_BUFFER_TYPE_REAL>()->mapPtr(0) != nullptr;
 
@@ -52,12 +44,6 @@ namespace dxvk {
           D3D9CommonTexture* pTexture,
           void*              pInitialData) {
     if (pTexture->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_NONE) {
-      /* GPU-only texture (render target / depth-stencil): no mapping buffer,
-       * but the Metal allocation comes up as uninitialized memory. WDDM
-       * zero-inits new video memory and D3D9 games rely on it — GTA IV's
-       * post-process accumulation targets are sampled before their first
-       * write and poison the whole frame with garbage otherwise. Zero it
-       * GPU-side (initImage clears renderable textures via a Clear pass). */
       if (pTexture->GetImage() != nullptr)
         InitDeviceLocalTexture(pTexture);
       return;
@@ -102,9 +88,6 @@ namespace dxvk {
 
   void D3D9Initializer::InitHostVisibleBuffer(
           MtlBufferSlice     Slice) {
-    // If the buffer is mapped, we can write data directly
-    // to the mapped memory region instead of doing it on
-    // the GPU. Same goes for zero-initialization.
     std::memset(
       Slice.buffer()->mapPtr(Slice.offset()), 0,
       Slice.length());
@@ -131,11 +114,7 @@ namespace dxvk {
           D3D9CommonTexture* pTexture,
           void*              pInitialData,
           void*              mapPtr) {
-    // If the buffer is mapped, we can write data directly
-    // to the mapped memory region instead of doing it on
-    // the GPU. Same goes for zero-initialization.
     if (pInitialData) {
-      // Initial data is only supported for textures with 1 subresource.
       MtlExtent3D mipExtent = pTexture->GetExtentMip(0);
       const MtlFormatInfo* formatInfo = lookupFormatInfo(pTexture->GetFormatMapping().FormatColor);
 
@@ -148,8 +127,6 @@ namespace dxvk {
       uint32_t pitch = blockCountW * formatInfo->elementSize;
       uint32_t alignedPitch = align(pitch, 4);
 
-      // PHASE-E: verify — inlined util::packImageData (per-row copy from a
-      // tightly-packed source into a 4-aligned destination), for all layers/depth.
       const uint8_t* src = reinterpret_cast<const uint8_t*>(pInitialData);
       uint8_t*       dst = reinterpret_cast<uint8_t*>(mapPtr);
       const uint32_t layers   = pTexture->Desc()->ArraySize;
@@ -166,8 +143,7 @@ namespace dxvk {
         }
       }
     } else {
-      // All subresources are allocated in one chunk of memory.
-      // So we can just get the pointer for subresource 0 and memset all of them at once.
+      // All subresources live in one chunk, so subresource 0's pointer covers them all.
       std::memset(
         mapPtr, 0,
         pTexture->GetTotalSize());
@@ -200,8 +176,6 @@ namespace dxvk {
 
 
   void D3D9Initializer::SyncSharedTexture(D3D9CommonTexture* pResource) {
-    // PHASE-C6: shared-handle textures (Vulkan external memory / D3D11 interop)
-    // are DROPPED, so there is never a cross-device sync to wait on here.
   }
 
 

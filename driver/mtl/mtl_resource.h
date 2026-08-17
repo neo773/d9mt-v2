@@ -9,26 +9,8 @@
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
 
-// ---------------------------------------------------------------------------
-// mtl_resource.h — Metal-first resource handles + the Rc<>-managed object types
-// the MtlContext seam moves by reference. Shapes follow doc 02 §4 (resource-object
-// anatomy) and the §2 replacement table:
-//   Rc<DxvkImage>   -> MtlTextureHandle { tex, generation }
-//   Rc<DxvkBuffer>  -> MtlBufferHandle  { buf, generation }
-//   DxvkBufferSlice -> MtlBufferSlice   { Rc<MtlBuffer>, offset, length }
-//   DxvkResourceAllocation (allocateStorage / Discard) -> MtlSuballocation ring
-//   DxvkImageViewKey -> MtlImageViewKey (view-pool cache key)
-//
-// Discard/rename (D3D9 MAP_DISCARD, contract 3a) = per-resource suballocated ring
-// bumping a generation counter; in-flight draws keep the old (handle,generation),
-// new Locks write the new one. The retirement fence (completion handler) is
-// deadlock-class if stubbed — PHASE-C wires it in the backend impl.
-// ---------------------------------------------------------------------------
-
 namespace dxvk {
 
-  // Forward-declared resource objects (defined below). PHASE-C: real Metal object
-  // ownership, residency-set registration, deferred destruction.
   class MtlResource;
   class MtlBuffer;
   class MtlTexture;
@@ -37,9 +19,8 @@ namespace dxvk {
   class MtlSamplerState;
   class MtlAllocation;
 
-  // --- POD handles (generation-stamped) ------------------------------------
   struct MtlBufferHandle {
-    MtlObjectHandle buf        = MtlNullHandle;   // id<MTLBuffer> token
+    MtlObjectHandle buf        = MtlNullHandle;
     uint32_t        generation = 0u;
 
     explicit operator bool () const { return buf != MtlNullHandle; }
@@ -50,7 +31,7 @@ namespace dxvk {
   };
 
   struct MtlTextureHandle {
-    MtlObjectHandle tex        = MtlNullHandle;   // id<MTLTexture> token
+    MtlObjectHandle tex        = MtlNullHandle;
     uint32_t        generation = 0u;
 
     explicit operator bool () const { return tex != MtlNullHandle; }
@@ -60,41 +41,27 @@ namespace dxvk {
     bool operator != (const MtlTextureHandle& o) const { return !(*this == o); }
   };
 
-  // The renamed backing slice handed out by Discard (was DxvkResourceAllocation).
   struct MtlSuballocation {
     MtlBufferHandle backing    = { };
     MtlDeviceSize   offset     = 0;
     MtlDeviceSize   size       = 0;
-    uint32_t        generation = 0u;   // bumped on every Discard
+    uint32_t        generation = 0u;
   };
 
-  // --- MtlBufferSlice (was DxvkBufferSlice) --------------------------------
-  // (offset,length) view into a buffer; underpins Lock/Discard. Holds an Rc to
-  // the logical buffer (keeps it alive through the recorded lambda, contract 3h)
-  // AND a snapshot of the PHYSICAL backing (MtlAllocation) taken when the slice
-  // is constructed. GPU consumers (bind flush, indexed draws) resolve addresses
-  // through the SNAPSHOT, never through the live buffer: a Discard rename on
-  // another thread must not retarget a draw that was recorded against the old
-  // backing (record-time snapshot semantics — the DXVK physical-slice model).
+  // Holds an Rc to the logical buffer plus a snapshot of its physical backing
+  // taken at construction. Binds and draws resolve addresses through that
+  // snapshot, never through the live buffer, so a Discard rename on another
+  // thread cannot retarget a draw already recorded against the old backing.
   // The only sanctioned re-resolution is MtlContext::invalidateBuffer, which
-  // refreshes still-bound slices on the CS thread AFTER assignStorage, in
-  // command order (bind-once-then-Discard patterns).
+  // refreshes still-bound slices on the CS thread after assignStorage.
   class MtlBufferSlice {
 
   public:
 
     MtlBufferSlice() = default;
 
-    // Snapshots the buffer's current storage. Only safe where no rename can
-    // race: never-renamed buffers (real/staging/mapping), CS-thread code, or
-    // creation-time slices. Rename-aware record paths must use the explicit-
-    // storage constructor below. Defined after MtlBuffer.
     MtlBufferSlice(Rc<MtlBuffer> buffer, MtlDeviceSize offset, MtlDeviceSize length);
 
-    // Explicit physical backing: frontends that rename on the app thread
-    // (Lock DISCARD, the UP ring) pass the allocation the CPU actually wrote —
-    // the buffer's own storage() only catches up when the CS executes the
-    // matching assignStorage. Defined after MtlAllocation.
     MtlBufferSlice(Rc<MtlBuffer> buffer, Rc<MtlAllocation> storage,
                    MtlDeviceSize offset, MtlDeviceSize length);
 
@@ -104,26 +71,14 @@ namespace dxvk {
     MtlDeviceSize            length()  const { return m_length; }
     bool                     defined() const { return m_buffer != nullptr; }
 
-    // GPU address of (slice origin + extra) in the SNAPSHOTTED backing.
-    // Defined after MtlAllocation.
     uint64_t gpuAddress(MtlDeviceSize extra = 0) const;
 
-    // Bytes addressable from (slice origin + extra) to the end of the
-    // snapshotted backing (MTL4 draw APIs take an accessible range).
     MtlDeviceSize addressableLength(MtlDeviceSize extra = 0) const;
 
-    // CS-thread only: re-snapshot the buffer's CURRENT storage. Called by
-    // invalidateBuffer after assignStorage so live bindings follow a rename;
-    // already-recorded draws keep the snapshot they were recorded against.
     void refreshStorage();
 
-    // Sub-view within this slice (was DxvkBufferSlice::subSlice). Offset is
-    // relative to this slice's origin; the storage snapshot carries over.
-    // Defined after MtlAllocation.
     MtlBufferSlice subSlice(MtlDeviceSize offset, MtlDeviceSize length) const;
 
-    // CPU pointer at (slice origin + offset) into the SNAPSHOTTED backing
-    // (was DxvkBufferSlice::mapPtr). Defined after MtlAllocation.
     void* mapPtr(MtlDeviceSize offset) const;
 
   private:
@@ -135,9 +90,6 @@ namespace dxvk {
 
   };
 
-  // --- Image-view cache key (mirrors DxvkImageViewKey, doc 02 §2) -----------
-  // Metal newTextureViewWithPixelFormat:… keyed by {format, swizzle, mip range,
-  // layer range, usage, aspects}. Used by the texture view pool.
   struct MtlImageViewKey {
     MtlFormat          format     = MtlFormat::Invalid;
     MtlSwizzleChannels swizzle    = { };
@@ -147,10 +99,8 @@ namespace dxvk {
     uint32_t           layerCount = 1;
     MtlTextureUsage    usage      = MtlTextureUsageShaderRead;
     MtlAspectMask      aspects    = MtlAspectColor;
-    // Dimensionality hint (was VkImageViewType); the backend can also derive it
-    // from layerCount + texture type. PHASE-E: fold into the real view descriptor.
     MtlTextureViewType viewType   = MtlTextureViewType::e2D;
-    uint32_t           packedSwizzle = 0;   // some callers set a packed swizzle directly
+    uint32_t           packedSwizzle = 0;
 
     static uint32_t packSwizzle(MtlSwizzleChannels s) {
       return (uint32_t(s.r) << 0) | (uint32_t(s.g) << 8)
@@ -167,30 +117,16 @@ namespace dxvk {
     bool operator != (const MtlImageViewKey& o) const { return !(*this == o); }
   };
 
-  // Texel-buffer view cache key (was DxvkBufferViewKey). Minimal; the swvp-emu
-  // draw-count buffer is the only D3D9 user.
   struct MtlTexelBufferViewKey {
     MtlFormat     format = MtlFormat::Invalid;
     MtlDeviceSize offset = 0;
     MtlDeviceSize length = 0;
   };
 
-  // --- Rc<>-managed resource objects ---------------------------------------
-  // Minimal complete definitions so the seam links at this phase. Each carries its
-  // POD handle; real Metal object lifetime + residency is PHASE-C.
-
   class MtlResource : public RcObject {
   public:
     virtual ~MtlResource() { }
 
-    // Serial of the last command buffer whose ENCODED commands may read or
-    // write this resource on the GPU (was DxvkPagedResource use tracking).
-    // Contract: the backend context stamps this at ENCODE time (CS thread)
-    // with the serial of the currently recording command buffer — for every
-    // draw that fetches a bound buffer and every transfer/init/resolve on
-    // either operand. The resource is GPU-idle once the device's completed
-    // serial reaches this value. Stamps are monotonic (CS encodes in order);
-    // the app thread reads concurrently, hence the atomic.
     uint64_t trackingSerial() const { return m_trackingSerial.load(std::memory_order_acquire); }
     void setTrackingSerial(uint64_t serial) { m_trackingSerial.store(serial, std::memory_order_release); }
 
@@ -198,21 +134,15 @@ namespace dxvk {
     std::atomic<uint64_t> m_trackingSerial = { 0u };
   };
 
-  // The renamed backing storage of a buffer (was DxvkResourceAllocation).
-  // Owns one Metal buffer allocation; MAP_DISCARD swaps a fresh one in and the
-  // OLD one rides an Rc into the CS command stream, retiring only after the
-  // last submission that referenced it completes (contract 3a).
   class MtlAllocation : public RcObject {
   public:
-    // Rc<MtlAllocation> deletes through THIS type while the backend subclass
-    // (MtlAllocationImpl) owns the Metal object, the host backing and the
-    // residency-set entry. RcObject has no virtual destructor, so without
-    // this the subclass destructor never ran: no allocation was ever freed
-    // or removed from the residency set (the zero-removals leak).
+    // RcObject has no virtual destructor; without this override the backend
+    // subclass's destructor never runs, so allocations are never freed or
+    // removed from the residency set.
     virtual ~MtlAllocation() { }
 
-    MtlBufferHandle handle     = { };       // backing id<MTLBuffer> token
-    void*           mapPtr     = nullptr;   // shared-storage CPU pointer
+    MtlBufferHandle handle     = { };
+    void*           mapPtr     = nullptr;
     uint64_t        gpuAddress = 0u;
     MtlDeviceSize   size       = 0;
   };
@@ -221,7 +151,7 @@ namespace dxvk {
 
   class MtlBuffer : public MtlResource {
   public:
-    MtlBufferHandle handle = { };   // mirrors m_storage->handle (fast path)
+    MtlBufferHandle handle = { };
     MtlDeviceSize   size   = 0;
 
     void* mapPtr(MtlDeviceSize offset) const {
@@ -238,13 +168,8 @@ namespace dxvk {
       return m_storage;
     }
 
-    // Allocates FRESH backing of the same size (the Discard rename).
-    // Implemented by the backend device; declared here so the frontend
-    // port is a token swap of DxvkBuffer::allocateStorage.
     Rc<MtlAllocation> allocateStorage();
 
-    // Swaps in new backing, bumps the generation, returns the OLD storage
-    // (moved into the CS invalidateBuffer command for retirement).
     Rc<MtlAllocation> assignStorage(Rc<MtlAllocation>&& next) {
       Rc<MtlAllocation> prev = std::move(m_storage);
       m_storage = std::move(next);
@@ -255,7 +180,7 @@ namespace dxvk {
 
   protected:
     Rc<MtlAllocation> m_storage = nullptr;
-    MtlDevice*        m_device  = nullptr;   // backend fills; for allocateStorage
+    MtlDevice*        m_device  = nullptr;
 
     friend class MtlDevice;
   };
@@ -297,10 +222,6 @@ namespace dxvk {
       : nullptr;
   }
 
-  // Image metadata the frontend reads back through image->info() (was
-  // DxvkImageCreateInfo, the subset d3d9/ touches). Populated by
-  // MtlDevice::createImage; PHASE-E: backend fills every field from the real
-  // MTLTextureDescriptor.
   struct MtlImageInfo {
     MtlImageType       type          = MtlImageType::e2D;
     MtlFormat          format        = MtlFormat::Invalid;
@@ -314,8 +235,8 @@ namespace dxvk {
 
   class MtlTexture : public MtlResource {
   public:
-    MtlTextureHandle texture        = { };   // primary
-    MtlTextureHandle resolveTexture = { };   // MSAA resolve target (optional)
+    MtlTextureHandle texture        = { };
+    MtlTextureHandle resolveTexture = { };
     MtlFormat        format         = MtlFormat::Invalid;
     MtlSize          extent         = { };
     MtlImageInfo     m_info         = { };
@@ -324,14 +245,10 @@ namespace dxvk {
 
     const MtlFormatInfo* formatInfo() const { return lookupFormatInfo(m_info.format); }
 
-    // Image-owned view creation (was DxvkImage::createView) — delegates to the
-    // device view pool. Defined inline in mtl_device.h once MtlDevice is complete.
     Rc<MtlTextureView> createView(const MtlImageViewKey& key);
 
-    MtlDevice* m_device = nullptr;   // backend fills; for createView
+    MtlDevice* m_device = nullptr;
 
-    // Extent of a given mip (was DxvkImage::mipLevelExtent). Halves per level,
-    // clamped to 1; 3D depth also shrinks.
     MtlExtent3D mipLevelExtent(uint32_t mip) const {
       MtlExtent3D e = m_info.extent;
       e.width  = e.width  > (1u << mip) ? e.width  >> mip : 1u;
@@ -345,7 +262,7 @@ namespace dxvk {
   public:
     MtlTextureHandle view   = { };
     MtlImageViewKey  key    = { };
-    Rc<MtlTexture>   image  = nullptr;   // keep the backing texture alive
+    Rc<MtlTexture>   image  = nullptr;
   };
 
   class MtlTexelBufferView : public MtlResource {
@@ -358,30 +275,24 @@ namespace dxvk {
 
   class MtlSamplerState : public MtlResource {
   public:
-    MtlObjectHandle sampler = MtlNullHandle;   // id<MTLSamplerState> token
+    MtlObjectHandle sampler = MtlNullHandle;
   };
 
 
-  // Linear staging allocator over a shared MtlBuffer (was DxvkStagingBuffer).
-  // The frontend suballocates upload space; retirement rides the standard
-  // allocation lifetime (slices hold Rc to the buffer).
   class MtlStagingBuffer : public RcObject {
   public:
-    MtlStagingBuffer() = default;   // value member of D3D9DeviceEx (was DxvkStagingBuffer)
+    MtlStagingBuffer() = default;
     MtlStagingBuffer(Rc<MtlBuffer> buffer, MtlDeviceSize size)
     : m_buffer(std::move(buffer)), m_size(size) { }
 
-    // Device-driven ctor (was DxvkStagingBuffer(device, size)); allocates the
-    // backing shared buffer from the device. Defined in mtl_device.h.
     MtlStagingBuffer(const Rc<MtlDevice>& device, MtlDeviceSize size);
 
-    // In-place re-init with a fresh backing (RcObject deletes assignment).
     void reinit(const Rc<MtlDevice>& device, MtlDeviceSize size);
 
     MtlBufferSlice alloc(MtlDeviceSize size, MtlDeviceSize align = 256u) {
       MtlDeviceSize offset = (m_offset + align - 1u) & ~(align - 1u);
       if (offset + size > m_size)
-        return MtlBufferSlice();   // caller allocates a fresh staging buffer
+        return MtlBufferSlice();
       m_offset = offset + size;
       m_stats.used += size;
       m_stats.allocated += size;
@@ -400,4 +311,3 @@ namespace dxvk {
   };
 
 }
-

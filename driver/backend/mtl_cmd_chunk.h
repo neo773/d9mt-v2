@@ -1,18 +1,4 @@
 #pragma once
-/*
- * PE-side builder for the winemetal command stream.
- *
- * Encoder commands are not calls — they are wmtcmd_* structs chained
- * through `next` pointers and handed to the unix side in ONE
- * MTL*CommandEncoder_encodeCommands crossing, which replays them into the
- * real Metal encoder natively. This is winemetal's core perf design; at
- * thousands of draws per frame the per-call thunk tax would dominate.
- *
- * Lifetime: the unix side consumes the structs synchronously during
- * encodeCommands, so chunk memory recycles immediately after the flush —
- * no GPU-lifetime tracking needed here (unlike UploadRing memory, which
- * the GPU reads later).
- */
 
 #include <cstdint>
 #include <cstring>
@@ -29,21 +15,8 @@ public:
 
   CmdChunk() = default;
 
-  /* MOVE-ONLY — a CmdChunk copy is structurally broken and MUST stay a
-   * compile error. The implicit copy deep-copied the block arena while
-   * m_head/m_tail and every intra-chain `next` pointer still referenced the
-   * SOURCE's blocks, so the copy's chain dangled the moment the source was
-   * destroyed. That exact copy happened silently in the deferred-pass list:
-   * under C++17, std::function's move ctor is not noexcept, so FrameEntry's
-   * implicit move ctor isn't either, and std::vector<FrameEntry> growth
-   * (move_if_noexcept) COPIED the parked entries and freed the originals'
-   * blocks — the replayed chains then walked freed heap. Frame 1 survived
-   * on stale-but-intact bytes; the next frame's allocation churn recycled
-   * the blocks and the unix replay died on garbage command types
-   * ("unhandled mtl4 render command type", GTA IV boot crash). Deleting
-   * copy forces vector growth onto the (noexcept) move path and turns any
-   * future accidental copy into a compile error. A moved-from chunk is a
-   * valid empty chunk. */
+  // Copy must stay deleted: it would deep-copy the block arena while
+  // next-pointers still referenced the source's blocks, dangling the chain.
   CmdChunk(const CmdChunk&) = delete;
   CmdChunk& operator = (const CmdChunk&) = delete;
 
@@ -71,8 +44,6 @@ public:
     return *this;
   }
 
-  /* Appends a command struct; returns a stable pointer to fill in.
-   * T must begin with struct wmtcmd_base (type + next). */
   template<typename T>
   T* append(uint16_t cmdType) {
     void* mem = alloc(sizeof(T), alignof(T));
@@ -96,12 +67,8 @@ public:
 
   bool empty() const { return m_head == nullptr; }
 
-  /* Bytes parked in the arena since the last reset. Callers cap per-flush
-   * memory with this — flushing at any command boundary is order-preserving
-   * (the stream replays in append order across flushes). */
   size_t approxBytes() const { return m_activeBlock * BlockSize + m_blockUsed; }
 
-  /* Recycle all memory; valid immediately after encodeCommands returns. */
   void reset() {
     m_head = nullptr;
     m_tail = nullptr;
@@ -138,4 +105,4 @@ private:
 
 };
 
-} // namespace dxvk::backend
+}

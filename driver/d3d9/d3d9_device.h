@@ -1,21 +1,5 @@
 #pragma once
 
-// PHASE-C6: THE linchpin — ported off Vulkan onto the Mtl seam (docs 01/02/05).
-//   Rc<DxvkDevice>            -> Rc<MtlDevice>
-//   DxvkBufferSlice           -> MtlBufferSlice
-//   DxvkStagingBuffer         -> MtlStagingBuffer (mtl_resource.h)
-//   VkDeviceSize              -> MtlDeviceSize
-//   const DxvkFormatInfo*     -> const MtlFormatInfo*
-//   D3D9_VK_FORMAT_MAPPING    -> D3D9_MTL_FORMAT_MAPPING
-//   GetEnabledShaderStages()  -> m_dxvkDevice->getShaderStages()  (MtlStageMask)
-//   WaitForResource(DxvkPagedResource) -> WaitForResource(const MtlResource&)
-//   BeginFrame/EndFrame(Rc<DxvkLatencyTracker>) -> Rc<MtlLatencyTracker>
-//   TransformImage layouts    -> DROPPED (backend owns transitions, doc 05)
-//   VkOffset3D/VkExtent3D      -> MtlOrigin/MtlExtent3D
-// DROPPED: DxvkShaderOptions (m_dxvkShaderOptions + GetShaderOptions), the Vulkan
-//   interop device (D3D9VkInteropDevice m_d3d9Interop + friend), the 9On12 backend
-//   (D3D9On12 m_d3d9On12; D3D9ON12_ARGS is KEPT — it lives in d3d9_include.h),
-//   VkImageLayout m_hazardLayout, DxvkDepthBiasRepresentation m_depthBiasRepresentation.
 #include "../mtl/mtl_device.h"
 #include "../cs/dxvk_cs.h"
 
@@ -35,7 +19,6 @@
 #include "d3d9_fixed_function.h"
 #include "d3d9_swvp_emu.h"
 
-// d3d9_interop.h / d3d9_on_12.h — DROPPED (Vulkan interop + 9On12 backend, doc 02 §DROP).
 
 #include <cstdint>
 #include <unordered_set>
@@ -49,7 +32,7 @@
 #include "../util/util_flush.h"
 #include "../util/util_lru.h"
 #include "../util/util_unmap.h"
-#include "../util/sync/sync_signal.h"   // sync::Fence (was reached via dxvk_device.h)
+#include "../util/sync/sync_signal.h"
 
 namespace dxvk {
 
@@ -122,106 +105,59 @@ namespace dxvk {
   };
 
   struct D3D9TextureSlotTracking {
-    /* Pixel shaders can access 16 textures/samplers.
-     * Then there's 1 dmap texture/sampler.
-     * Vertex shaders can use 4 textures/samplers.
-     * So unless otherwise noted most bitmasks use 21 bits
-     * and each bit is one texture/sampler slot.
-     * See RemapSamplerState(), IsPSSampler(), IsVSSampler() in d3d9_util.h */
 
-    /** Whether the format of the texture currently bound to each slot is a format that gets fetched in comparison mode. */
     uint32_t depth = 0;
 
-    /** If a depth texture format isn't supported, we fall back to D32F.
-     * We'll need to clamp the reference value if the original format was an unorm format.
-     * This tracks the texture/sampler slots for which this kind of adjusting needs to be done. */
     uint32_t drefClamp = 0;
 
-    /** Used to store the type of each bound pixel shader texture.
-     * This is used to generate fixed function shader code
-     * and for PS 1.1 shaders which do not provide this information in the shader bytecode.
-     * SM 1.1 and fixed function doesn't allow sampling textures in the VS, so we only need the 16 PS slots.
-     * There's 3 texture types, so every texture/sampler slot uses 2 bits. */
     uint32_t textureType = 0;
 
-    /** Whether projected texture lookup is enabled for each texture/sampler slot. This is only used for generating fixed function shaders. */
     uint32_t projected = 0;
 
-    /** Whether sampler slots whose state has been changed and bindings in the backend need to be updated */
     uint32_t samplerStateDirty = 0;
 
-    /** Whether Fetch 4 is enabled for a sampler slot.
-     * This just means the application enabled it using the sampler state.
-     * It does not mean Fetch 4 is actually active, as that depends on other factors
-     * such as the sampling mode and the texture format. */
     uint32_t fetch4SamplerState = 0;
 
-    /** Whether Fetch 4 is active. */
     uint32_t fetch4 = 0;
 
-    /** Whether the texture bound to a slot has been changed and bindings in the backend need to be updated */
     uint32_t textureDirty = 0;
 
-    /** Whether the texture bound to a slot has D3DUSAGE_RENDERTARGET */
     uint32_t rtUsage = 0;
 
-    /** Whether the texture bound to a slot has D3DUSAGE_DEPTHSTENCIL */
     uint32_t dsUsage = 0;
 
-    /** Whether the texture bound to a slot is also bound as a render target
-     * and the render target is actually used for writing. */
     uint32_t unresolvableHazardRT = 0;
 
-    /** Whether the texture bound to a slot is also bound as the depth stencil surface
-     * and depth stencil surface is actually used for depth testing. */
     uint32_t unresolvableHazardDS = 0;
 
-    /** Whether the texture bound to a slot is also bound as a render target */
     uint32_t hazardRT = 0;
 
-    /** Whether the texture bound to a slot is also bound as the depth stencil view */
     uint32_t hazardDS = 0;
 
-    /** Whether there's a texture bound to a slot */
     uint32_t bound = 0;
 
-    /** Whether there's a texture bound to a slot that needs to be uploaded at draw time */
     uint32_t needsUpload = 0;
 
-    /** Whether there's a texture bound to a slot that needs to have its mip maps generated */
     uint32_t needsMipGen = 0;
 
-    /** Texture stages used by fixed-function pixel shader */
     uint32_t ffpsTextures = 0u;
   };
 
   struct D3D9RTSlotTracking {
-    /* D3D9 allows rendering to 4 render targets at the same time.
-     * So all RT bit masks only use the first 4 bits. */
 
-    /** Whether a render target is a D3D9Texture rather than just a D3D9Surface.
-      * Textures can be bound for sampling so there can be a feedback loop if this
-      * RT is also bound for sampling. */
     uint8_t canBeSampled = 0;
 
-    /** Whether the alpha channel of the format of this RT needs to be manually handled
-      * as part of the blend state. */
     uint8_t hasAlphaSwizzle = 0;
   };
 
   struct D3D9VBSlotTracking {
-    /* D3D9 allows using 16 vertex buffers ('streams'). */
 
-    /** Whether there's a vertex buffer bound to the slot */
     uint16_t bound = 0;
 
-    /** Whether the vertex buffer at each slot needs to be uploaded at draw time */
     uint16_t needsUpload = 0;
 
-    /** Whether the vertex buffer for each slot gets copied at draw time to act like DrawUP */
     uint16_t uploadPerDraw = 0;
 
-    /** Whether instancing is enabled for each slot */
     uint16_t instanced = 0;
   };
 
@@ -242,7 +178,6 @@ namespace dxvk {
     friend class D3D9ConstantBuffer;
     friend class D3D9UserDefinedAnnotation;
     friend class DxvkD3D8Bridge;
-    // friend D3D9VkInteropDevice; — DROPPED (Vulkan interop device)
 
     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
   public:
@@ -687,7 +622,6 @@ namespace dxvk {
 
     HRESULT STDMETHODCALLTYPE CreateQuery(D3DQUERYTYPE Type, IDirect3DQuery9** ppQuery);
 
-    // Ex Methods
 
     HRESULT STDMETHODCALLTYPE SetConvolutionMonoKernel(
             UINT   width,
@@ -771,41 +705,15 @@ namespace dxvk {
       const D3DDISPLAYMODEEX*      pFullscreenDisplayMode,
             IDirect3DSwapChain9**  ppSwapChain);
 
-    /**
-     * @brief Sets the given sampler state
-     *
-     * @param StateSampler Sampler index (according to our internal way of storing samplers)
-     * @param Type Sampler state type to change
-     * @param Value State value
-     */
     HRESULT SetStateSamplerState(
         DWORD               StateSampler,
         D3DSAMPLERSTATETYPE Type,
         DWORD               Value);
 
-    /**
-     * @brief Sets the given sampler texture
-     *
-     * @param StateSampler Sampler index (according to our internal way of storing samplers)
-     * @param pTexture Texture to use
-     */
     HRESULT SetStateTexture(DWORD StateSampler, IDirect3DBaseTexture9* pTexture);
 
-    /**
-     * @brief Sets the transform for the given sampler
-     *
-     * @param idx Sampler index (according to our internal way of storing samplers)
-     * @param pMatrix Transform matrix
-     */
     HRESULT SetStateTransform(uint32_t idx, const D3DMATRIX* pMatrix);
 
-    /**
-     * @brief Sets the fixed function texture processing state
-     *
-     * @param Stage Sampler index (according to our internal way of storing samplers)
-     * @param Type Fixed function texture stage type
-     * @param Value Value for the state
-     */
     HRESULT SetStateTextureStageState(
             DWORD                      Stage,
             D3D9TextureStageStateTypes Type,
@@ -815,9 +723,6 @@ namespace dxvk {
       return m_dxvkDevice->getShaderStages();
     }
 
-    /**
-     * \brief Returns whether the Vulkan device supports the required features for ProcessVertices
-     */
     bool SupportsSWVP();
 
     bool SupportsVCacheQuery() const;
@@ -841,15 +746,6 @@ namespace dxvk {
             uint64_t                SequenceNumber,
             DWORD                   MapFlags);
 
-    /**
-     * \brief Locks a subresource of an image
-     *
-     * \param [in] Subresource The subresource of the image to lock
-     * \param [out] pLockedBox The returned locked box of the image, containing data ptr and strides
-     * \param [in] pBox The region of the subresource to lock. This offsets the returned data ptr
-     * \param [in] Flags The D3DLOCK_* flags to lock the image with
-     * \returns \c D3D_OK if the parameters are valid or D3DERR_INVALIDCALL if it fails.
-     */
     HRESULT LockImage(
             D3D9CommonTexture* pResource,
             UINT                    Face,
@@ -864,29 +760,15 @@ namespace dxvk {
       const MtlFormatInfo*          FormatInfo,
       const D3DBOX*                 pBox);
 
-    /**
-     * \brief Unlocks a subresource of an image
-     *
-     * Passthrough to device unlock.
-     * \param [in] Subresource The subresource of the image to unlock
-     * \returns \c D3D_OK if the parameters are valid or D3DERR_INVALIDCALL if it fails.
-     */
     HRESULT UnlockImage(
             D3D9CommonTexture*      pResource,
             UINT                    Face,
             UINT                    MipLevel);
 
-    /**
-     * \brief Uploads the given texture subresource from its local system memory copy.
-     */
     HRESULT FlushImage(
             D3D9CommonTexture*      pResource,
             UINT                    Subresource);
 
-    /**
-     * \brief Copies the given part of a texture from the local system memory copy of the source texture
-     * to the image of the destination texture.
-     */
     void UpdateTextureFromBuffer(
             D3D9CommonTexture*      pDestTexture,
             D3D9CommonTexture*      pSrcTexture,
@@ -906,23 +788,12 @@ namespace dxvk {
             void**                  ppbData,
             DWORD                   Flags);
 
-    /**
-     * \brief Uploads the given buffer from its local system memory copy.
-     */
     HRESULT FlushBuffer(
             D3D9CommonBuffer*       pResource);
 
     HRESULT UnlockBuffer(
             D3D9CommonBuffer*       pResource);
 
-    /**
-     * @brief Uploads data from D3DPOOL_SYSMEM + D3DUSAGE_DYNAMIC buffers and binds the temporary buffers.
-     *
-     * @param FirstVertexIndex The first vertex
-     * @param NumVertices The number of vertices that are accessed. If this is 0, the vertex buffer binding will not be modified.
-     * @param FirstIndex The first index
-     * @param NumIndices The number of indices that will be drawn. If this is 0, the index buffer binding will not be modified.
-     */
     void UploadPerDrawData(
             UINT&                   FirstVertexIndex,
             UINT                    NumVertices,
@@ -983,7 +854,6 @@ namespace dxvk {
     void BindViewportAndScissor();
 
     inline bool IsNVDepthBoundsTestEnabled () {
-      // NVDB is not supported by D3D8
       if (unlikely(m_isD3D8Compatible))
         return false;
 
@@ -1056,10 +926,6 @@ namespace dxvk {
     template <D3D9ShaderType ShaderStage>
     void BindFFUbershader();
 
-    // Draw-time VS<->PS interpolant reconciliation (doc 03 §2b). When both stages
-    // are programmable, (re)binds the pixel shader compiled to agree with the
-    // current vertex shader's output interpolant layout. Mirrors how upstream
-    // built DxvkShaderLinkage per stage at PSO-create time (doc 03 §1c).
     void BindProgrammablePixelShaderLinkage();
 
     void BindInputLayout();
@@ -1113,7 +979,6 @@ namespace dxvk {
     void TransformImage(
             D3D9CommonTexture*       pResource,
       const MtlSubresourceRange*     pSubresources);
-    // OldLayout/NewLayout DROPPED — Metal backend owns image transitions (doc 05).
 
     const D3D9ConstantLayout& GetVertexConstantLayout() { return m_consts[uint32_t(D3D9ShaderType::VertexShader)].layout; }
     const D3D9ConstantLayout& GetPixelConstantLayout()  { return m_consts[uint32_t(D3D9ShaderType::PixelShader)].layout; }
@@ -1123,33 +988,16 @@ namespace dxvk {
 
     HRESULT InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
 
-    /**
-     * \brief Returns the allocator used for unmappable system memory texture data
-     */
     MemoryFilePool* GetAllocator() {
       return &m_memoryAllocator;
     }
 
-    /**
-     * \brief Gets the pointer of the system memory copy of the texture
-     *
-     * Also tracks the texture if it is unmappable.
-     */
     void* MapTexture(D3D9CommonTexture* pTexture, UINT Subresource);
 
-    /**
-     * \brief Moves the texture to the front of the LRU list of mapped textures
-     */
     void TouchMappedTexture(D3D9CommonTexture* pTexture);
 
-    /**
-     * \brief Removes the texture from the LRU list of mapped textures
-     */
     void RemoveMappedTexture(D3D9CommonTexture* pTexture);
 
-    /**
-     * \brief Returns whether the device is currently recording a StateBlock
-     */
     bool ShouldRecord() const {
       return m_recorder != nullptr;
     }
@@ -1158,7 +1006,6 @@ namespace dxvk {
       return m_isD3D8Compatible;
     }
 
-    // Device Lost
     bool IsDeviceLost() const {
       return m_deviceLostState != D3D9DeviceLostState::Ok;
     }
@@ -1166,45 +1013,26 @@ namespace dxvk {
     void NotifyFullscreen(HWND window, bool fullscreen);
     void NotifyWindowActivated(HWND window, bool activated);
 
-    /**
-     * \brief Increases the amount of D3DPOOL_DEFAULT resources that block a device reset
-     */
     void IncrementLosableCounter() {
       m_losableResourceCounter++;
     }
 
-    /**
-     * \brief Decreases the amount of D3DPOOL_DEFAULT resources that block a device reset
-     */
     void DecrementLosableCounter() {
       m_losableResourceCounter--;
     }
 
-    /**
-     * \brief Returns whether the device is configured to only support vertex processing.
-     */
     bool CanOnlySWVP() const {
       return m_behaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING;
     }
 
-    /**
-     * \brief Returns whether the device can be set to do software vertex processing.
-     * It may also be set up to only support software vertex processing.
-     */
     bool CanSWVP() const {
       return m_behaviorFlags & (D3DCREATE_MIXED_VERTEXPROCESSING | D3DCREATE_SOFTWARE_VERTEXPROCESSING);
     }
 
-    /**
-     * \brief Returns whether or not the device is currently set to do software vertex processing.
-     */
     bool IsSWVP() const {
       return m_isSWVP;
     }
 
-    /**
-     * \brief Returns the number of shader modules generated for ProcessVertices.
-     */
     UINT GetSWVPShaderCount() const {
       return m_swvpEmulator.GetShaderCount();
     }
@@ -1228,14 +1056,13 @@ namespace dxvk {
     }
 
     bool Is9On12Device() const {
-      return m_d3d9On12Args.Enable9On12;   // D3D9ON12_ARGS kept (d3d9_include.h); backend dropped
+      return m_d3d9On12Args.Enable9On12;
     }
 
     D3D9Adapter* GetAdapter() const {
       return m_adapter;
     }
 
-    // DxvkShaderOptions GetShaderOptions() — DROPPED (SPIR-V shader options; REWRITE).
 
     const D3D9ConstantBufferCopy* GetOrCreateConstantLayout(
             D3D9ConstantBufferLayout  FloatLayout,
@@ -1274,8 +1101,6 @@ namespace dxvk {
         if constexpr (AllowFlush)
           ConsiderFlush(GpuFlushType::ImplicitWeakHint);
 
-        // We must record this command after the potential
-        // flush since the caller may still access the data
         m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
       }
 
@@ -1291,11 +1116,6 @@ namespace dxvk {
       }
     }
 
-    /**
-     * \brief Queries current reset counter
-     * Used for the deferred surface creation workaround.
-     * (Device Reset detection for D3D9SwapChainEx::Present)
-     */
     uint32_t GetResetCounter() {
       return m_resetCtr;
     }
@@ -1304,19 +1124,10 @@ namespace dxvk {
 
     void DetermineConstantLayouts(bool canSWVP);
 
-    /**
-     * \brief Allocates buffer memory for DrawPrimitiveUp draws
-     */
     D3D9BufferSlice AllocUPBuffer(MtlDeviceSize size);
 
-    /**
-     * \brief Allocates buffer memory for resource uploads
-     */
     D3D9BufferSlice AllocStagingBuffer(MtlDeviceSize size);
 
-    /**
-     * \brief Waits until the amount of used staging memory is below a certain threshold.
-     */
     void ThrottleAllocation();
 
     MtlStagingBufferStats GetStagingMemoryStatistics() const;
@@ -1335,27 +1146,14 @@ namespace dxvk {
       return (vertexCount - 1) * stride + std::max(m_state.vertexDecl->GetSize(0), stride);
     }
 
-    /**
-     * \brief Writes data to the given pointer and zeroes any access buffer space
-     */
     inline void FillUPVertexBuffer(void* buffer, const void* userData, uint32_t dataSize, uint32_t bufferSize) {
       uint8_t* data = reinterpret_cast<uint8_t*>(buffer);
-      // Don't copy excess data if we don't end up needing it.
       dataSize = std::min(dataSize, bufferSize);
       std::memcpy(data, userData, dataSize);
-      // Pad out with 0 to make buffer range checks happy
-      // Some games have components out of range in the vertex decl
-      // that they don't read from the shader.
-      // My tests show that these are read back as 0 always if out of range of
-      // the dataSize.
-      //
-      // So... make the actual buffer the range that satisfies the range of the vertex
-      // declaration and pad with 0s outside of it.
       if (dataSize < bufferSize)
         std::memset(data + dataSize, 0, bufferSize - dataSize);
     }
 
-    // So we don't do OOB.
     template <D3D9ShaderType ShaderType, D3D9ConstantType ConstantType>
     inline static constexpr uint32_t DetermineSoftwareRegCount() {
       constexpr bool isVS = ShaderType == D3D9ShaderType::VertexShader;
@@ -1368,7 +1166,6 @@ namespace dxvk {
       }
     }
 
-    // So we don't copy more than we need.
     template<D3D9ShaderType ShaderType, D3D9ConstantType ConstantType>
     inline uint32_t DetermineHardwareRegCount() const {
       constexpr bool isVS = ShaderType == D3D9ShaderType::VertexShader;
@@ -1478,31 +1275,16 @@ namespace dxvk {
 
     uint64_t GetCurrentSequenceNumber();
 
-    /**
-     * \brief Will unmap the least recently used textures if the amount of mapped texture memory exceeds a threshold.
-     */
     void UnmapTextures();
 
-    /**
-     * \brief Get the swapchain that was used the most recently for presenting
-     * Has to be externally synchronized.
-     */
     D3D9SwapChainEx* GetMostRecentlyUsedSwapchain() {
       return m_mostRecentlyUsedSwapchain;
     }
 
-    /**
-     * \brief Set the swapchain that was used the most recently for presenting
-     * Has to be externally synchronized.
-     */
     void SetMostRecentlyUsedSwapchain(D3D9SwapChainEx* swapchain) {
       m_mostRecentlyUsedSwapchain = swapchain;
     }
 
-    /**
-     * @brief Reset the most recently swapchain back to the implicit one
-     * Has to be externally synchronized.
-     */
     void ResetMostRecentlyUsedSwapchain() {
       m_mostRecentlyUsedSwapchain = m_implicitSwapchain.ptr();
     }
@@ -1545,7 +1327,6 @@ namespace dxvk {
     }
 
     inline static uint16_t EncodePointSize(DWORD Value) {
-      // Basically 13.3 fixed point, highest value is 8191.875
       return uint16_t(std::clamp(bit::cast<float>(Value) * 8.0f, 0.0f, 65535.0f));
     }
 
@@ -1589,9 +1370,6 @@ namespace dxvk {
 
     MemoryFilePool                  m_memoryAllocator;
 
-    // Second memory allocator used for D3D9 shader bytecode.
-    // Most games never access the stored bytecode, so putting that
-    // into the same chunks as texture memory would waste address space.
     MemoryFilePool                  m_shaderAllocator;
 
     uint32_t                        m_frameLatency = DefaultFrameLatency;
@@ -1602,8 +1380,6 @@ namespace dxvk {
     D3D9FFShaderModuleSet           m_ffModules;
     D3D9SWVPEmulator                m_swvpEmulator;
 
-    // Identity of the (VS output IO, VS, PS) triple whose reconciled pixel shader
-    // is currently bound. Guards redundant draw-time rebinds; ~0 forces a rebind.
     uint64_t                        m_boundPsLinkageHash = ~0ull;
 
     Com<D3D9StateBlock, false>      m_recorder;
@@ -1613,9 +1389,6 @@ namespace dxvk {
     std::array<D3D9ConstantBuffer, CbvIndex::Count> m_constantBuffers;
 
     Rc<MtlBuffer>                   m_upBuffer;
-    /* The UP ring's CURRENT physical backing as the frontend sees it. The
-     * buffer object's storage() only follows at CS time (assignStorage), so
-     * record-time slices snapshot THIS — never the live buffer. */
     Rc<MtlAllocation>               m_upBufferAllocation;
     MtlDeviceSize                   m_upBufferOffset  = 0ull;
     void*                           m_upBufferMapPtr  = nullptr;
@@ -1623,12 +1396,6 @@ namespace dxvk {
     MtlStagingBuffer                m_stagingBuffer;
     Rc<sync::Fence>                 m_stagingBufferFence;
     MtlDeviceSize                   m_stagingMemorySignaled = 0ull;
-    /* Monotonic bytes allocated by staging backings that have already been
-     * retired (replaced when full). Keeps GetStagingMemoryStatistics().allocated
-     * monotonic across backing swaps (DXVK's allocatedTotal) so the throttle +
-     * fence accounting stays correct. Retired backings themselves need no
-     * frontend bookkeeping: their teardown rides the deferred-destruction
-     * spine once the last encoded upload drops the Rc. */
     MtlDeviceSize                   m_stagingAllocatedBase = 0ull;
 
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
@@ -1640,7 +1407,6 @@ namespace dxvk {
     Com<D3D9SwapChainEx, false>     m_implicitSwapchain;
 
     D3D9ShaderOptions               m_shaderOptions;
-    // DxvkShaderOptions m_dxvkShaderOptions — DROPPED (SPIR-V shader options).
 
     std::unordered_map<
       DWORD,
@@ -1662,22 +1428,16 @@ namespace dxvk {
     bool                            m_isD3D8Compatible;
     bool                            m_ffZTest          = false;
 
-    // the enablement of below features is tracked independently
-    // of render states both due to complexity and to avoid
-    // incurring overhead on all render state changes
     bool                            m_alphaTestEnabled = false;
-    // vendor hack state tracking
     bool                            m_atocEnabled      = false;
     bool                            m_nvdbEnabled      = false;
 
     bool                            m_inScene          = false;
     bool                            m_validSampleMask  = false;
 
-    // VkImageLayout m_hazardLayout — DROPPED (Metal backend owns layouts).
 
     uint32_t                        m_resetCtr = 0u;
 
-    // DxvkDepthBiasRepresentation m_depthBiasRepresentation — DROPPED (no Metal analogue).
     float                           m_depthBiasScale  = 0.0f;
 
     uint32_t                        m_robustSSBOAlignment     = 1;
@@ -1720,18 +1480,14 @@ namespace dxvk {
     std::unordered_set<D3D9ConstantBufferCopy,
       DxvkHash, DxvkEq>             m_constantLayouts;
 
-    // m_state should be declared last (i.e. freed first), because it
-    // references objects that can call back into the device when freed.
+    // Members below are destroyed first; their objects can call back into the device on teardown.
     Direct3DState9                  m_state;
     D3D9PushData                    m_pushData = {};
     D3D9SpecData                    m_specData = {};
 
-    // D3D9VkInteropDevice m_d3d9Interop — DROPPED (Vulkan interop).
-    D3D9ON12_ARGS                   m_d3d9On12Args = { };   // kept (struct in d3d9_include.h)
-    // D3D9On12 m_d3d9On12 — DROPPED (9On12 backend).
+    D3D9ON12_ARGS                   m_d3d9On12Args = { };
     DxvkD3D8Bridge                  m_d3d8Bridge;
 
-    // Sampler statistics
     constexpr static uint32_t       SamplerCountBits = 12u;
     constexpr static uint64_t       SamplerCountMask = (1u << SamplerCountBits) - 1u;
 
@@ -1740,7 +1496,6 @@ namespace dxvk {
     uint64_t                        m_lastSamplerLiveCount = 0u;
     uint64_t                        m_lastSamplerBindCount = 0u;
 
-    // Written by CS thread
     alignas(CACHE_LINE_SIZE)
     std::atomic<uint64_t>           m_lastSamplerStats = { 0u };
 

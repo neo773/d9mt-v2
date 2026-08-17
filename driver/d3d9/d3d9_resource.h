@@ -74,8 +74,7 @@ namespace dxvk {
     }
 
     DWORD STDMETHODCALLTYPE SetPriority(DWORD PriorityNew) {
-      // Priority can only be set for D3DPOOL_MANAGED resources on
-      // D3D9 interfaces, and for D3DPOOL_DEFAULT on D3D9Ex interfaces
+      // D3D9 only allows priority changes on D3DPOOL_MANAGED; D3D9Ex only on D3DPOOL_DEFAULT
       if (likely((m_pool == D3DPOOL_MANAGED && !m_isExtended)
               || (m_pool == D3DPOOL_DEFAULT &&  m_isExtended))) {
         DWORD oldPriority = m_priority;

@@ -1,11 +1,3 @@
-/* d9mt v2 alpha-blend test: a 50%-opacity red triangle drawn over a green
- * clear with SrcAlpha / InvSrcAlpha blending. Correct blending yields an olive
- * triangle (0.5*red + 0.5*green); a broken/ignored blend state shows pure red.
- *
- * Exercises Phase 1 item 4 (dynamic state into the PSO): the blend render
- * states must reach the Metal pipeline's color-attachment blend descriptor.
- * Uses the same SM3 vs/ps as code_shader so only the blend path differs.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -85,7 +77,6 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  /* 50%-opacity red (0x80 alpha) at every vertex. */
   static const struct Vertex verts[3] = {
       {0.0f, 0.7f, 0.5f, 0x80FF0000},
       {0.7f, -0.7f, 0.5f, 0x80FF0000},

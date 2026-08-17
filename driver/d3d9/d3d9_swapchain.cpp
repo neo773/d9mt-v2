@@ -1,13 +1,3 @@
-// PHASE-C10: D3D9SwapChainEx REWRITE onto the MtlPresenter seam (doc 01 §1j /
-// contract 3e; doc 02 §4). All D3D9 bookkeeping (present params, back-buffer
-// array, reset/format/fullscreen logic, frame-latency counter) is KEPT; the
-// Vulkan scan-out path is replaced:
-//   Rc<Presenter>            -> Rc<MtlPresenter>          (mtl_presenter.h)
-//   PresenterSync            -> MtlAcquiredDrawable / MtlPresenterSync
-//   Rc<DxvkImage/View>       -> Rc<MtlTexture/View>
-//   ctx->synchronizeWsi / flushCommandList / present     -> REAL (contract 3e)
-// DROPPED: DxvkSwapchainBlitter (present blit lives in the presenter), the HUD
-//   items, m_colorspace / m_hdrMetadata, and the ID3D9VkExtSwapchain interop.
 #include "d3d9_swapchain.h"
 #include "d3d9_surface.h"
 #include "d3d9_monitor.h"
@@ -23,12 +13,6 @@
 
 namespace dxvk {
 
-  // --- Gated backbuffer readback (SOURCE_OF_TRUTH §4b bug 2) ------------------
-  // When the trigger file C:/d9mt-test/DUMP exists, copy the app's rendered
-  // backbuffer into a CPU-readable buffer, synchronously wait for the GPU, and
-  // write a tiny header (u32 width, u32 height) + raw BGRA8 pixels to
-  // C:/d9mt-test/rt_dump.bin. Reliable autonomous verifier (no screencapture).
-  // Runs on the CS thread inside the present lambda, only when triggered.
   static void DumpBackbufferIfRequested(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
@@ -38,17 +22,12 @@ namespace dxvk {
     if (ctx == nullptr || device == nullptr || image == nullptr)
       return;
 
-    // Trigger check (Windows-side fopen accepts forward-slash C: paths).
     FILE* trig = std::fopen("C:/d9mt-test/DUMP", "rb");
     if (trig == nullptr)
       return;
     std::fclose(trig);
-    // One-shot: remove the trigger so we dump exactly one frame.
     std::remove("C:/d9mt-test/DUMP");
 
-    // The backbuffer MtlTexture's extent is not always populated (backend
-    // gap); fall back to the create-info extent, then to the swapchain's
-    // present-params size.
     uint32_t w = uint32_t(image->extent.width);
     uint32_t h = uint32_t(image->extent.height);
     if (!w || !h) { w = image->info().extent.width;  h = image->info().extent.height; }
@@ -71,17 +50,11 @@ namespace dxvk {
       return;
     }
 
-    // Compute-encoder copy texture -> buffer (MTL4; no blit encoder).
     ctx->copyTextureToBuffer(
       readback, 0u, rowBytes, imageBytes, image->format,
       image, MtlSubresourceLayers{ }, MtlOrigin{ },
       MtlSize{ w, h, 1u });
 
-    // Commit the copy, then give the GPU time to finish before reading the
-    // shared-storage buffer. A synchronous shared-event wait from inside the
-    // present lambda (CS thread) deadlocks, and the global waitForIdle is a
-    // no-op in this backend; a bounded sleep is reliable for this gated debug
-    // dump (the copy is a single small blit).
     ctx->flushCommandList("backbuffer-dump", nullptr);
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -130,25 +103,18 @@ namespace dxvk {
     if (FAILED(CreateBackBuffers(m_presentParams.BackBufferCount, m_presentParams.Flags)))
       throw DxvkError("D3D9: Failed to create swapchain backbuffers");
 
-    // PHASE-C10: CreateBlitter() dropped — the present blit lives in the presenter.
-
     InitRamp();
 
-    // Apply initial window mode and fullscreen state
     if (!m_presentParams.Windowed && FAILED(EnterFullscreenMode(pPresentParams, pFullscreenDisplayMode)))
       throw DxvkError("D3D9: Failed to set initial fullscreen state");
   }
 
 
   D3D9SwapChainEx::~D3D9SwapChainEx() {
-    // Avoids hanging when in this state, see comment
-    // in DxvkDevice::~DxvkDevice.
     if (this_thread::isInModuleDetachment())
       return;
 
     {
-      // Locking here and in Device::GetFrontBufferData
-      // ensures that other threads don't accidentally access a stale pointer.
       D3D9DeviceLock lock = m_parent->LockDevice();
 
       if (m_parent->GetMostRecentlyUsedSwapchain() == this) {
@@ -161,8 +127,6 @@ namespace dxvk {
     RestoreDisplayMode(m_monitor);
 
     for (auto& p : m_presenters) {
-      // PHASE-C10: MtlPresenter destroys its CAMetalLayer resources in its dtor;
-      // the seam has no explicit destroyResources().
       p.second.presenter = nullptr;
     }
 
@@ -205,13 +169,11 @@ namespace dxvk {
     if (unlikely(m_parent->IsDeviceLost()))
       return D3DERR_DEVICELOST;
 
-    // If we have no backbuffers, error out.
     if (m_backBuffers.empty())
       return D3D_OK;
 
     uint32_t presentInterval = m_presentParams.PresentationInterval;
 
-    // D3DPRESENT_INTERVAL_DEFAULT (0) == D3DPRESENT_INTERVAL_ONE (1) which means VSYNC.
     presentInterval = std::max(presentInterval, 1u);
 
     if (presentInterval == D3DPRESENT_INTERVAL_IMMEDIATE || (dwFlags & D3DPRESENT_FORCEIMMEDIATE))
@@ -241,8 +203,6 @@ namespace dxvk {
     if (m_wctx->presenter != nullptr) {
       m_wctx->presenter->setSyncInterval(presentInterval);
 
-      // Re-probe every frame: the NSView resizes asynchronously behind us, so
-      // the layer only converges on the window if we keep pushing.
       RECT client = { };
       if (::GetClientRect(m_window, &client)) {
         m_wctx->presenter->syncLayerGeometry(
@@ -251,26 +211,10 @@ namespace dxvk {
       }
     }
 
-    // Not displaying: drain rather than just returning, so queued work does not
-    // pile up across the no-display window and unwind as a slideshow when the
-    // window comes back (DXMT does the same, "so resource lifetimes stay
-    // coherent"). Native does not synthesize DEVICELOST on a plain minimize; it
-    // stops updating the front buffer, so Ex reports S_PRESENT_OCCLUDED and
-    // non-Ex reports D3D_OK.
-    //
-    // Do NOT extend this to wsi::isOccluded(): macOS already stops vending
-    // drawables for a backgrounded window (measured 0 fps), and gating here on
-    // occlusion froze the game outright.
-    // DXMT drains here (FlushDrawBatch + flushOpenWork). Doing the equivalent
-    // (EndFrame + Flush) from inside Present wedged the frame loop outright —
-    // frames stopped advancing with the window frontmost and not minimized.
-    // Plain return until that is understood.
     if (wsi::isMinimized(m_window))
       return D3D_OK;
 
     if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
-      // We never actually rotate in the front buffer.
-      // Just blit to it for GetFrontBufferData.
       const auto& backbuffer = m_backBuffers[0];
       const auto& frontbuffer = GetFrontBuffer();
       if (FAILED(m_parent->StretchRect(backbuffer.ptr(), nullptr, frontbuffer.ptr(), nullptr, D3DTEXF_NONE))) {
@@ -356,11 +300,6 @@ namespace dxvk {
     if (unlikely(m_parent->IsDeviceLost()))
       return D3DERR_DEVICELOST;
 
-    // PHASE-E: the DXVK front-buffer readback used heavy Vulkan image machinery
-    // (createImage + resolveImage + blitImageView + copyImageToBuffer with
-    // per-format subresource/swizzle plumbing). This screenshot path has no Metal
-    // analogue wired on the seam yet; the meta-blit/resolve lands with the
-    // resource REWRITE track. Report success with no copy so callers don't crash.
     static bool s_errorShown = false;
     if (!std::exchange(s_errorShown, true))
       Logger::warn("D3D9SwapChainEx::GetFrontBufferData: PHASE-E stub (no readback)");
@@ -373,7 +312,6 @@ namespace dxvk {
           UINT                iBackBuffer,
           D3DBACKBUFFER_TYPE  Type,
           IDirect3DSurface9** ppBackBuffer) {
-    // Could be doing a device reset...
     D3D9DeviceLock lock = m_parent->LockDevice();
 
     if (unlikely(ppBackBuffer == nullptr))
@@ -385,7 +323,6 @@ namespace dxvk {
     }
 
     if (m_backBuffers.empty()) {
-      // The backbuffers were destroyed and not recreated.
       *ppBackBuffer = nullptr;
       return D3D_OK;
     }
@@ -396,7 +333,6 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9SwapChainEx::GetRasterStatus(D3DRASTER_STATUS* pRasterStatus) {
-    // We lie here and make some stuff up enough that it makes games work.
     constexpr uint32_t vBlankLineCount = 20;
 
     if (unlikely(pRasterStatus == nullptr))
@@ -535,11 +471,7 @@ namespace dxvk {
           return hr;
       }
 
-      // No D3D9WindowMessageFilter here: it indexes the window-proc map
-      // unconditionally, and we never hook the proc, so it would dereference
-      // end(). Nothing to filter either — we send no window messages.
       if (!changeFullscreen) {
-        // Already fullscreen, resolution changed: re-apply the borderless rect.
         RECT rect = { };
         wsi::getDesktopCoordinates(m_monitor, &rect);
 
@@ -611,10 +543,6 @@ namespace dxvk {
       return;
 
     m_ramp = *pRamp;
-
-    // PHASE-E: gamma was applied by DxvkSwapchainBlitter::setGammaRamp (dropped).
-    // The MtlPresenter seam has no gamma-LUT path yet; the ramp is stored for
-    // GetGammaRamp round-trips. (Metal EDR/gamma path lands with the presenter.)
   }
 
 
@@ -649,14 +577,11 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::SetCursorTexture(UINT Width, UINT Height, uint8_t* pCursorBitmap) {
-    // PHASE-E: HW cursor was drawn by DxvkSwapchainBlitter (dropped). Metal cursor
-    // overlay lands with the presenter; no-op for now.
     (void)Width; (void)Height; (void)pCursorBitmap;
   }
 
 
   void D3D9SwapChainEx::SetCursorPosition(int32_t X, int32_t Y, UINT Width, UINT Height) {
-    // PHASE-E: see SetCursorTexture.
     (void)X; (void)Y; (void)Width; (void)Height;
   }
 
@@ -703,13 +628,9 @@ namespace dxvk {
     m_parent->EndFrame(m_latencyTracker);
     m_parent->Flush();
 
-    // Retrieve the back buffer to present (source of the present blit).
     Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
     Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
 
-    // MSAA backbuffer: resolve into the single-sample surface and present
-    // from THAT (D3D9 allows a multisampled swapchain; a raw MSAA -> drawable
-    // copy is invalid in Metal and displays scrambled sample blocks).
     Rc<MtlTexture>     resolveImage;
     Rc<MtlTextureView> resolveView;
     if (m_resolveBuffer != nullptr) {
@@ -717,14 +638,11 @@ namespace dxvk {
       resolveView  = m_resolveBuffer->GetCommonTexture()->GetSampleView(false);
     }
 
-    // Bump frame ID for the acquire below.
     m_wctx->frameId += 1;
 
-    // The ENTIRE present — drawable acquire, blit, signal, present, release —
-    // runs on the CS thread. Acquiring nextDrawable on the producer thread and
-    // releasing it on the CS thread let >maximumDrawableCount(3) drawables go
-    // outstanding, blocking nextDrawable and deadlocking both threads at
-    // exactly 3 frames. dxmt acquires late, on the encode thread; so do we.
+    // The entire present (acquire/blit/signal/present/release) runs on the CS
+    // thread: acquiring on the producer thread instead let drawables exceed
+    // maximumDrawableCount(3), deadlocking both threads.
     m_parent->EmitCs([
       cPresenter    = m_wctx->presenter,
       cSrcView      = swapImageView,
@@ -737,8 +655,6 @@ namespace dxvk {
       cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
       cSignal       = m_wctx->frameLatencySignal
     ] (MtlContext* ctx) {
-      // MSAA backbuffer -> single-sample resolve surface; everything below
-      // (dump, copy, blit) consumes the resolved image.
       if (cResolveImage != nullptr && cSrcImage != nullptr) {
         MtlResolveRegion region = { };
         region.dstSubresource = { MtlAspectColor, 0u, 0u, 1u };
@@ -750,24 +666,9 @@ namespace dxvk {
       const Rc<MtlTexture>&     cPresentImage = cResolveImage != nullptr ? cResolveImage : cSrcImage;
       const Rc<MtlTextureView>& cPresentView  = cResolveView  != nullptr ? cResolveView  : cSrcView;
 
-      // Gated backbuffer readback (verifier) — before the present copy, on
-      // the fully-rendered app backbuffer. No-op unless the trigger exists.
       DumpBackbufferIfRequested(ctx, cDevice, cPresentImage, cParamsW, cParamsH);
 
-      // Do not acquire while macOS is not compositing the layer: presented
-      // drawables never retire then, so the pool drains and nextDrawable blocks
-      // ~1s per frame — a backlog that keeps costing frames after the window is
-      // visible again. Rendering itself continues (D3D9 requires an occluded
-      // device to keep succeeding); only scan-out is skipped.
-      //
-      // This must stay HERE, not as an early return from Present(): EndFrame +
-      // Flush have already run above, and the frame fences below must still be
-      // signalled. Skipping those is what froze the game previously.
       if (!cPresenter->isVisible()) {
-        // Commit what this frame already recorded. synchronizeWsi (below) is
-        // what normally submits it, so returning without this leaks a frame of
-        // work into the context every time; sustained, the CS queue backs up
-        // and the app thread spins at 100% with no output.
         ctx->flushCommandList("present-skipped-not-visible", nullptr);
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
@@ -775,12 +676,8 @@ namespace dxvk {
         return;
       }
 
-      // Acquire the drawable HERE (CS thread) — one thread owns the whole
-      // acquire/present/release cycle.
       MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
       if (!cDrawable.valid) {
-        // No drawable this frame — still submit the recorded work and advance
-        // the frame fences so the limiter and any waiter don't stall.
         ctx->flushCommandList("present-skipped-no-drawable", nullptr);
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
@@ -788,24 +685,15 @@ namespace dxvk {
         return;
       }
 
-      // Copy the app's rendered back buffer into the acquired drawable
-      // before presenting (D3D9 Present = backbuffer -> front/drawable).
       if (cPresentView != nullptr && cPresentView->image != nullptr && cDrawable.texture != nullptr) {
         const MtlSize src = cPresentView->image->extent;
         const MtlSize dst = cDrawable.texture->extent;
         if (src.width == dst.width && src.height == dst.height) {
-          // 1:1 — native texel copy.
           MtlSize extent = { src.width, src.height, 1u };
           ctx->copyTexture(
             cDrawable.texture,     MtlSubresourceLayers{ }, MtlOrigin{ },
             cPresentView->image,   MtlSubresourceLayers{ }, MtlOrigin{ }, extent);
         } else if (cDrawable.view != nullptr) {
-          /* Sizes differ: CoreAnimation window layout re-sizes drawables to
-           * the window behind our pinned drawableSize, so a raw copy would
-           * leave the image in the top-left corner. MetalFX spatial upscale
-           * when opted in (D9MT_METALFX=1) — a lower render resolution then
-           * presents near-native; otherwise the scaled meta-blit fills the
-           * drawable regardless of its size. */
           if (!ctx->presentUpscale(cDrawable.texture, cPresentImage)) {
             MtlOffset3D dstBox[2] = { { 0, 0, 0 },
               { int32_t(dst.width), int32_t(dst.height), 1 } };
@@ -815,8 +703,6 @@ namespace dxvk {
               MtlSamplerFilter::Linear);
           }
         } else {
-          /* No drawable view (stub presenter): clamped copy — an over-sized
-           * copy is an out-of-bounds fault that hangs the GPU. */
           MtlSize extent = {
             std::min(src.width,  dst.width  ? dst.width  : src.width),
             std::min(src.height, dst.height ? dst.height : src.height),
@@ -828,10 +714,8 @@ namespace dxvk {
           }
         }
       }
-      // synchronizeWsi: submit the blit, then signalDrawable + present. No
-      // pre-commit waitForDrawable (dxmt omits it; a wait on a drawable the
-      // display never releases blocks the queue timeline forever, so the
-      // completion event after it never fires — the classic wedge).
+      // No pre-commit waitForDrawable: waiting on a drawable the display
+      // never releases would block the queue timeline forever.
       ctx->synchronizeWsi(cDrawable.sync);
       cPresenter->present(cDrawable);
       Logger::debug("D3D9: frame presented");
@@ -845,21 +729,6 @@ namespace dxvk {
 
     SyncFrameLatency();
 
-    // BLIT/COPY present model (both windowed AND fullscreen): PresentImage copies
-    // back buffer 0 -> the freshly-acquired CAMetalLayer drawable every frame, so
-    // the OS always gives us a clean front surface and buffer 0 is the app's
-    // persistent back buffer. Rotating the swap-chain buffers here would repoint
-    // buffer 0 at a different physical texture each present, so an app that
-    // composes its frame INCREMENTALLY (GTA IV builds its loading/legal art a few
-    // pretransformed tiles per frame and relies on the back buffer surviving
-    // Present regardless of DISCARD) loses everything but the current frame's tiles
-    // — the "one lone tile per present / CRT-scanline" failure. This previously
-    // only skipped rotation when Windowed; GTA runs FULLSCREEN and hit the same
-    // bug. With a copy-based present, rotation is never needed for display
-    // correctness, so keep buffer 0 stable in both modes.
-    //
-    // (If GetFrontBufferData / a true multi-buffer flip chain ever needs the old
-    // rotation, gate it on that specific case — not on Windowed.)
     (void)0;
 
     m_parent->m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
@@ -867,8 +736,6 @@ namespace dxvk {
 
 
   Rc<MtlPresenter> D3D9SwapChainEx::CreatePresenter(HWND Window, Rc<sync::Signal> Signal) {
-    // PHASE-C10: the frame-latency signal is wired via the D3D9WindowContext fence
-    // and bumped in PresentImage; the factory takes only device + desc.
     (void)Signal;
 
     MtlPresenterDesc desc = { };
@@ -909,9 +776,6 @@ namespace dxvk {
 
       entry->second.frameLatencySignal = new sync::Fence(entry->second.frameId);
       entry->second.presenter = CreatePresenter(m_window, entry->second.frameLatencySignal);
-
-      // PHASE-E: Reflex-style latency tracking (createLatencyTracker) is not wired
-      // on the Metal seam yet; m_latencyTracker stays null.
     }
 
     m_wctx = &entry->second;
@@ -920,7 +784,6 @@ namespace dxvk {
 
 
   HRESULT D3D9SwapChainEx::CreateBackBuffers(uint32_t NumBackBuffers, DWORD Flags) {
-    // Explicitly destroy current swap image before creating a new one.
     DestroyBackBuffers();
 
     const uint32_t frontBufferCount = (SwapWithFrontBuffer() || m_parent->GetOptions()->extraFrontbuffer) ? 1 : 0;
@@ -928,7 +791,6 @@ namespace dxvk {
 
     m_backBuffers.reserve(bufferCount);
 
-    // Create new back buffer
     D3D9_COMMON_TEXTURE_DESC desc;
     desc.Width              = std::max(m_presentParams.BackBufferWidth,  1u);
     desc.Height             = std::max(m_presentParams.BackBufferHeight, 1u);
@@ -942,9 +804,7 @@ namespace dxvk {
     desc.Usage              = D3DUSAGE_RENDERTARGET;
     desc.Discard            = FALSE;
     desc.IsBackBuffer       = TRUE;
-    // The texture will get sampled for presentation.
     desc.IsAttachmentOnly   = FALSE;
-    // we might need to lock for the BlitGDI fallback path
     desc.IsLockable         = true;
 
     for (uint32_t i = 0; i < bufferCount; i++) {
@@ -961,10 +821,6 @@ namespace dxvk {
       m_backBuffers.emplace_back(surface);
     }
 
-    // MSAA backbuffer: Present cannot copy a multisampled texture into the
-    // single-sample drawable (invalid in Metal — reads back as scrambled
-    // sample blocks). Create a matching single-sample surface; PresentImage
-    // resolves into it and presents from there.
     if (m_presentParams.MultiSampleType != D3DMULTISAMPLE_NONE) {
       D3D9_COMMON_TEXTURE_DESC resolveDesc = desc;
       resolveDesc.MultiSample        = D3DMULTISAMPLE_NONE;
@@ -979,8 +835,6 @@ namespace dxvk {
       }
     }
 
-    // Initialize the image so that we can use it. Clearing to black prevents
-    // garbled output for the first frame.
     small_vector<Rc<MtlTexture>, 4> images;
 
     for (size_t i = 0; i < m_backBuffers.size(); i++)
@@ -1025,10 +879,6 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::UpdateTargetFrameRate(uint32_t SyncInterval) {
-    // PHASE-E: DXVK drove Presenter::setFrameRateLimit from the display refresh
-    // rate / latency-sleep config. The MtlPresenter seam owns pacing via
-    // displaySyncEnabled; here we only track the target for GetRasterStatus-style
-    // math. (Metal frame limiter lands with the presenter.)
     double frameRate = double(m_parent->GetOptions()->maxFrameRate);
 
     if (frameRate != -1.0) {
@@ -1042,8 +892,6 @@ namespace dxvk {
       m_targetFrameRate = frameRate;
     }
 
-    // A fullscreen app asked for a specific refresh rate. We no longer switch
-    // display modes to give it one, so honour it by pacing instead.
     if (!m_presentParams.Windowed && m_presentParams.FullScreen_RefreshRateInHz)
       m_targetFrameRate = double(m_presentParams.FullScreen_RefreshRateInHz);
 
@@ -1055,17 +903,10 @@ namespace dxvk {
 
 
   double D3D9SwapChainEx::GetPresentMinimumDuration(uint32_t SyncInterval) const {
-    // Pace via the display pipeline, not a CPU sleep (DXMT does the same):
-    // presentAfterMinimumDuration lets CoreAnimation hold the frame and lets a
-    // ProMotion panel settle to a matching refresh rate.
     double refresh = m_targetFrameRate > 0.0
       ? m_targetFrameRate
       : m_displayRefreshRate;
 
-    // Only pace against a plausible refresh rate. m_displayRefreshRate is not
-    // reliably populated now that we never change the display mode, and a bogus
-    // low value here holds every drawable for ~1s, starving nextDrawable and
-    // wedging the present loop.
     if (!SyncInterval || refresh < 20.0 || refresh > 1000.0)
       return 0.0;
 
@@ -1083,7 +924,6 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::SyncFrameLatency() {
-    // Wait for the sync event so that we respect the maximum frame latency
     m_wctx->frameLatencySignal->wait(m_wctx->frameId - GetActualFrameLatency());
   }
 
@@ -1136,7 +976,6 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::UpdateWindowedRefreshRate() {
-    // Ignore call if we are in fullscreen mode and know the mode already.
     if (!m_displayRefreshRateDirty || m_monitor)
       return;
 
@@ -1163,15 +1002,6 @@ namespace dxvk {
   HRESULT D3D9SwapChainEx::EnterFullscreenMode(
           D3DPRESENT_PARAMETERS* pPresentParams,
     const D3DDISPLAYMODEEX*      pFullscreenDisplayMode) {
-    // Borderless fullscreen, after wined3d_swapchain_state_setup_fullscreen
-    // (and DXMT, which does the same). The display mode is NOT changed: on
-    // macOS the mode switch is asynchronous, so every rect derived from it is
-    // stale for an unknown number of frames.
-    //
-    // The window proc is NOT hooked either. DXVK's hook resizes the window to
-    // the backbuffer on WM_ACTIVATEAPP and minimizes it on focus loss; with a
-    // backbuffer smaller than the desktop that strands the window in the
-    // top-left on the first click.
     m_monitor = wsi::getDefaultMonitor();
 
     RECT rect = { };
@@ -1192,8 +1022,6 @@ namespace dxvk {
       ::SetWindowLongW(m_window, GWL_EXSTYLE, exStyle);
     }
 
-    // HWND_TOP, not HWND_TOPMOST: wined3d uses topmost, but on macOS a topmost
-    // window sits above everything and cmd-tab cannot switch away from it.
     ::SetWindowPos(m_window, HWND_TOP,
       rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
       SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1212,9 +1040,6 @@ namespace dxvk {
 
     m_monitor = nullptr;
 
-    // Undo the borderless restyle. No display mode to restore — entering
-    // fullscreen never changed one. Preserve the live visibility/topmost bits,
-    // as wined3d does, so a window the app is driving is not hidden.
     if (m_fullscreenWindow == m_window) {
       LONG curStyle   = ::GetWindowLongW(m_window, GWL_STYLE)   & WS_VISIBLE;
       LONG curExStyle = ::GetWindowLongW(m_window, GWL_EXSTYLE) & WS_EX_TOPMOST;
@@ -1288,7 +1113,6 @@ namespace dxvk {
   void D3D9SwapChainEx::UpdatePresentRegion(const RECT* pSourceRect, const RECT* pDestRect) {
     const bool isWindowed = m_presentParams.Windowed;
 
-    // Tests show that present regions are ignored in fullscreen
     if (pSourceRect == nullptr || !isWindowed) {
       m_srcRect.top    = 0;
       m_srcRect.left   = 0;

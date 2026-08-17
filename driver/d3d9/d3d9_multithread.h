@@ -6,9 +6,6 @@ namespace dxvk {
 
   class D3D9Multithread;
 
-  /**
-   * \brief Scoped device lock
-   */
   class D3D9DeviceLock {
 
   public:
@@ -44,9 +41,6 @@ namespace dxvk {
   };
 
 
-  /**
-   * \brief D3D9 context lock
-   */
   class D3D9Multithread {
     static constexpr uint32_t InvalidTid = -1u;
 
@@ -56,13 +50,6 @@ namespace dxvk {
     D3D9Multithread(BOOL Protected)
     : m_protected(Protected) { }
 
-    /**
-     * \brief Acquires lock
-     *
-     * If the calling thread already owns the lock, this will return
-     * an empty lock guard and rely entirely on proper scoping.
-     * \returns Lock guard
-     */
     D3D9DeviceLock AcquireLock() {
       if (likely(!m_protected))
         return D3D9DeviceLock();

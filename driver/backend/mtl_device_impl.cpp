@@ -16,7 +16,6 @@ namespace dxvk::backend {
     constexpr uint64_t UploadRingChunkSize = 4u << 20;
 
     WMTPixelFormat wmtFormat(MtlFormat format) {
-      /* MtlFormat mirrors WMTPixelFormat values by construction */
       return WMTPixelFormat(uint32_t(format));
     }
 
@@ -66,7 +65,6 @@ namespace dxvk::backend {
       if (usage & MtlUsage::DepthStencil)
         result |= WMTTextureUsageRenderTarget;
 
-      /* swizzled views (A8/L8-class formats) need PixelFormatView */
       result |= WMTTextureUsagePixelFormatView;
       return result;
     }
@@ -84,14 +82,10 @@ namespace dxvk::backend {
     }
 
     m_device = WmtDevice::adopt(device);
-    /* METAL 4 ONLY (SOURCE_OF_TRUTH §2): the queue is an MTL4CommandQueue and
-     * PSOs build through an MTL4Compiler. No MTLCommandQueue path exists. */
     m_queue = WmtQueue::adopt(MTLDevice_newMTL4CommandQueue(m_device.handle()));
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
-    /* All residency state lives in the tracker (mtl_residency.h): one
-     * queue-attached set, add-at-alloc, serial-deferred destruction. */
     m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle());
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get());
 
@@ -99,30 +93,21 @@ namespace dxvk::backend {
   }
 
   MtlDeviceImpl::~MtlDeviceImpl() {
-    /* Teardown order (member dtors run AFTER this body, in reverse
-     * declaration order: ring, residency, tracker): the pump thread must be
-     * stopped and every retirement callback drained FIRST — those callbacks
-     * reach into the residency tracker (allocDestroyed), which must still
-     * be alive when they run. drainAndStopPump also waits the GPU idle. */
+    /* Retirement callbacks reach into the residency tracker, which is
+     * destroyed after this body runs — the pump must be stopped and
+     * drained here, before that member teardown happens. */
     if (m_tracker)
       m_tracker->drainAndStopPump();
-    /* ~MtlResidencyTracker then flushes all deferred destructions
-     * (serialRetired(~0) under its GPU-idle contract, now satisfied). */
   }
 
   void* MtlDeviceImpl::hostAlloc(uint64_t size) {
     void* p = VirtualAlloc(nullptr, SIZE_T(size),
         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (unlikely(!p)) {
-      /* 32-bit address space exhausted by in-flight backings. Drain the GPU
-       * and run the retirement spine (thread-safe) so retired allocations
-       * VirtualFree their memory, then retry once. */
       Logger::warn("MtlDeviceImpl: host allocation failed — draining GPU and retrying");
       waitForIdle();
       if (m_tracker)
         m_tracker->processRetirements();
-      /* The retirements just dropped the last Rcs; flush the completed
-       * deferred destructions so their VirtualAlloc'd backings free NOW. */
       if (m_tracker && m_residency)
         m_residency->serialRetired(m_tracker->completedSerial());
       p = VirtualAlloc(nullptr, SIZE_T(size),
@@ -130,13 +115,6 @@ namespace dxvk::backend {
       if (!p)
         Logger::err("MtlDeviceImpl: host allocation failed after drain");
     }
-    /* Rosetta first-touch pre-fault (v1 fix, d9mt src/d3d9fe/d9mt_resources.cpp).
-     * Under Rosetta x86_32 + WoW64 the FIRST write to a newBufferWithBytesNoCopy
-     * backing is pathologically slow (~100s ms to >1s for large blocks). Left
-     * lazy, that cliff lands on the DRAW hot path — the first frame that writes
-     * a fresh dynamic VB/IB/CB (Gamebryo/Oblivion DISCARD-renames these many
-     * times per frame) stutters for hundreds of ms. Touching every page here
-     * moves the cost to allocation time, off the frame path. */
     if (p)
       std::memset(p, 0, SIZE_T(size));
     return p;
@@ -144,19 +122,12 @@ namespace dxvk::backend {
 
   MtlAllocationImpl::~MtlAllocationImpl() {
     if (residencyDevice) {
-      /* Deferred destruction (mtl_residency.h invariant 3): the tracker
-       * removes the set entry, releases the Metal buffer and frees the
-       * bytesNoCopy host backing — in that order — once every submission
-       * that could reference this allocation has completed. The recording
-       * serial bounds that (encoded references live in the current or an
-       * older command buffer). */
       residencyDevice->residency().allocDestroyed(
         owned.detach(), mapPtr,
         residencyDevice->submissions().nextSerial());
       mapPtr = nullptr;
       return;
     }
-    /* Never registered with a device: release directly. */
     owned.reset();
     if (mapPtr) {
       VirtualFree(mapPtr, 0, MEM_RELEASE);
@@ -168,7 +139,8 @@ namespace dxvk::backend {
     WMTBufferInfo bufferInfo = {};
     bufferInfo.length = info.size;
     bufferInfo.options = storageOptions(info.cpuAccess);
-    /* 32-bit PE rule: CPU-visible backing allocated in OUR space */
+    /* 32-bit process: CPU-visible backing must be allocated in our own
+     * address space, not handed off to Metal. */
     bufferInfo.memory.set(info.cpuAccess != MtlCpuAccess::None
       ? hostAlloc(info.size)
       : nullptr);
@@ -193,7 +165,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
     storage->residencyDevice = this;
-    m_residency->allocCreated(handle);   // resident from creation to retirement
+    m_residency->allocCreated(handle);
     buffer->assignStorage(std::move(storage));
     m_diagBuffersCreated++;
     return buffer;
@@ -206,11 +178,6 @@ namespace dxvk::backend {
     texInfo.height = info.extent.height;
     texInfo.depth = info.extent.depth;
     texInfo.type = wmtTextureType(info);
-    /* Metal's arrayLength counts array *slices*, and for cube types the 6 faces
-     * are implicit (NOT slices): MTLTextureTypeCube requires arrayLength == 1,
-     * MTLTextureTypeCubeArray requires arrayLength == number-of-cubes. D3D9
-     * passes arrayLayers == 6*cubeCount, so divide by 6 for cube types. Non-cube
-     * array textures use arrayLayers directly; everything needs arrayLength >= 1. */
     uint32_t arrayLength = info.arrayLayers > 0u ? info.arrayLayers : 1u;
     if (info.cube)
       arrayLength = arrayLength / 6u > 0u ? arrayLength / 6u : 1u;
@@ -235,9 +202,6 @@ namespace dxvk::backend {
     texture->extent = info.extent;
     texture->gpuResourceId = texInfo.gpu_resource_id;
     texture->info = info;
-    /* Base-class metadata the frontend reads via image->info() and
-     * mipLevelExtent() — unset it reports 1x1 extents (UpdateTexture upload
-     * regions collapse to a single texel: black game textures). */
     texture->m_info.type        = info.type;
     texture->m_info.format      = info.format;
     texture->m_info.extent      = info.extent;
@@ -246,7 +210,7 @@ namespace dxvk::backend {
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     texture->residencyDevice = this;
-    m_residency->allocCreated(handle);   // resident from creation to retirement
+    m_residency->allocCreated(handle);
     m_diagImagesCreated++;
     return texture;
   }
@@ -257,10 +221,8 @@ namespace dxvk::backend {
 
     WMTTextureSwizzleChannels swizzle;
     if (key.usage & MtlTextureUsageRenderTarget) {
-      /* Metal strips RenderTarget usage from texture views with a
-       * non-identity swizzle — an RTV/DSV built with the sampling swizzle
-       * (e.g. X8R8G8B8's {R,G,B,One}) silently loses attachability and every
-       * render pass on it is invalid. Attachments always use identity. */
+      /* Metal silently strips RenderTarget usage from a view with a
+       * non-identity swizzle, so attachments must stay identity. */
       swizzle.r = WMTTextureSwizzleRed;
       swizzle.g = WMTTextureSwizzleGreen;
       swizzle.b = WMTTextureSwizzleBlue;
@@ -274,13 +236,6 @@ namespace dxvk::backend {
 
     MtlImageCreateInfo viewShape = impl->info;
     viewShape.arrayLayers = key.layerCount;
-    /* View type is derived from the view's layer span, NOT blindly from the
-     * source texture's cube flag. Metal asserts a cube view's slice range is
-     * a multiple of 6 ("newSliceRange.length must be a multiple of 6"). A
-     * whole-cube view (layerCount 6, or 6*N for a cube array) stays a cube;
-     * a single-face view — layerCount 1, e.g. Oblivion rendering its
-     * reflection cubemap one face at a time, or a per-face SRV — must be a
-     * plain 2D view of that face (baseLayer selects the slice). */
     if (viewShape.cube
      && (key.layerCount == 0u || key.layerCount % 6u != 0u))
       viewShape.cube = false;
@@ -354,10 +309,6 @@ namespace dxvk::backend {
   Rc<MtlAllocation> MtlDeviceImpl::renameBuffer(MtlBuffer* buffer) {
     auto* impl = static_cast<MtlBufferImpl*>(buffer);
 
-    /* Recycle a retired backing first (returned via the retirement spine,
-     * so its last referencing submission has completed): steady-state
-     * DISCARD renaming must not mint a Metal buffer + VirtualAlloc + set
-     * mutation per Lock. */
     if (Rc<MtlAllocation> recycled = impl->takeRecycledStorage()) {
       m_diagBuffersRecycled++;
       return recycled;
@@ -384,7 +335,7 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
     storage->residencyDevice = this;
-    m_residency->allocCreated(handle);   // renamed backing resident until it retires
+    m_residency->allocCreated(handle);
     m_diagBuffersRenamed++;
     return storage;
   }
@@ -394,9 +345,6 @@ namespace dxvk::backend {
     if (!metallib || !size)
       return nullptr;
 
-    // Wrap the AIR metallib bytes in a dispatch_data and hand them to
-    // -newLibraryWithData: (doc 04). The unix side copies out of the given
-    // native pointer, so the transient buffer only needs to outlive this call.
     obj_handle_t data = DispatchData_alloc_init(uint64_t(uintptr_t(metallib)), uint64_t(size));
     if (!data) {
       Logger::err("MtlDeviceImpl::createShaderFunction: DispatchData_alloc_init failed");
@@ -480,17 +428,11 @@ namespace dxvk::backend {
   }
 
   void MtlDeviceImpl::waitForIdle() {
-    /* Drain everything submitted so far. The tracker owns the submission
-     * serials — the device-side m_lastSubmittedSerial was never updated and
-     * made this a silent no-op (CPU readbacks raced the GPU copy). */
     if (m_tracker)
       m_tracker->waitFor(m_tracker->lastSubmittedSerial());
   }
 
   void MtlDeviceImpl::waitForResource(const MtlResource& resource) {
-    /* Blocking shared-event wait for the resource's last encode serial.
-     * A serial from a still-recording command buffer only signals after the
-     * flush the caller (D3D9DeviceEx::WaitForResource) already issued. */
     if (m_tracker)
       m_tracker->waitFor(resource.trackingSerial());
   }
@@ -504,7 +446,6 @@ namespace dxvk::backend {
 
 namespace dxvk {
 
-  /* seam-visible factory (declared extern in mtl_device_stub.cpp) */
   Rc<MtlDevice> backendCreateDevice() {
     Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl();
     return device->valid() ? Rc<MtlDevice>(device) : nullptr;

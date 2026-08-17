@@ -10,7 +10,6 @@
 #include <stdint.h>
 #include <d3d9.h>
 
-//for some reason we need to specify __declspec(dllexport) for MinGW
 #if defined(__WINE__) || !defined(_WIN32)
   #define DLLEXPORT __attribute__((visibility("default")))
 #else
@@ -38,13 +37,10 @@
 #include "../util/util_math.h"
 #include "../util/util_string.h"
 
-// Missed definitions in Wine/MinGW.
-
 #ifndef D3DPRESENT_FORCEIMMEDIATE
 #define D3DPRESENT_FORCEIMMEDIATE              0x00000100L
 #endif
 
-// Missing in some versions of mingw headers
 #ifndef _MSC_VER
 namespace dxvk {
   typedef struct _D3DDEVINFO_RESOURCEMANAGER
@@ -54,14 +50,10 @@ namespace dxvk {
 }
 #endif
 
-// This is the managed pool on D3D9Ex, it's just hidden!
+// Undocumented: this is D3D9Ex's managed pool value.
 #define D3DPOOL_MANAGED_EX D3DPOOL(6)
 
 using D3D9VertexElements = std::vector<D3DVERTEXELEMENT9>;
-
-/////////////////////
-// D3D9On12 content
-/////////////////////
 
 #include <d3d12.h>
 
@@ -77,11 +69,9 @@ struct D3D9ON12_ARGS {
 
 extern "C" {
 
-  // Ordinal 20
   typedef IDirect3D9* (WINAPI* PFN_Direct3DCreate9On12)(UINT sdk_version, D3D9ON12_ARGS* override_list, UINT override_entry_count);
   IDirect3D9* WINAPI Direct3DCreate9On12(UINT sdk_version, D3D9ON12_ARGS* override_list, UINT override_entry_count);
 
-  // Ordinal 21
   typedef HRESULT(WINAPI* PFN_Direct3DCreate9On12Ex)(UINT sdk_version, D3D9ON12_ARGS* override_list, UINT override_entry_count, IDirect3D9Ex** output);
   HRESULT WINAPI Direct3DCreate9On12Ex(UINT sdk_version, D3D9ON12_ARGS* override_list, UINT override_entry_count, IDirect3D9Ex** output);
 

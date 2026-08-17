@@ -292,8 +292,8 @@ namespace dxvk {
   } D3DKMT_RELEASEKEYEDMUTEX;
 
   typedef struct _UNICODE_STRING {
-      USHORT Length;        /* bytes */
-      USHORT MaximumLength; /* bytes */
+      USHORT Length;
+      USHORT MaximumLength;
       WCHAR *Buffer;
   } UNICODE_STRING;
 
@@ -308,7 +308,6 @@ namespace dxvk {
 
   #define OBJ_CASE_INSENSITIVE 0x00000040
 
-  /* undocumented D3D runtime data descriptors */
 
   struct d3dkmt_dxgi_desc
   {
@@ -424,9 +423,9 @@ namespace dxvk {
   union d3dkmt_desc
   {
       struct d3dkmt_dxgi_desc     dxgi;
-      struct d3dkmt_d3d9_desc     d3d9;   /* if dxgi.size == sizeof(d3d9)  && dxgi.version == 1 && sizeof(desc) == sizeof(d3d9) */
-      struct d3dkmt_d3d11_desc    d3d11;  /* if dxgi.size == sizeof(d3d11) && dxgi.version == 4 && sizeof(desc) >= sizeof(d3d11) */
-      struct d3dkmt_d3d12_desc    d3d12;  /* if dxgi.size == sizeof(d3d11) && dxgi.version == 0 && sizeof(desc) == sizeof(d3d12) */
+      struct d3dkmt_d3d9_desc     d3d9;
+      struct d3dkmt_d3d11_desc    d3d11;
+      struct d3dkmt_d3d12_desc    d3d12;
   };
 
   NTSTATUS WINAPI D3DKMTAcquireKeyedMutex(D3DKMT_ACQUIREKEYEDMUTEX *desc);

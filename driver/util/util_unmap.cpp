@@ -42,7 +42,6 @@ namespace dxvk {
     SYSTEM_INFO sysInfo = { };
     GetSystemInfo(&sysInfo);
 
-    // Bump granularity to the allocator's page size for consistenty
     result = sysInfo.dwAllocationGranularity;
     result = std::max(result, uint32_t(DxvkPageAllocator::PageSize));
 
@@ -76,9 +75,6 @@ namespace dxvk {
     if (!m_data.mapping)
       throw DxvkError("Failed to create file mapping.");
   }
-
-
-
 
   MemoryFilePool::MemoryFilePool()
   : m_poolAllocator(m_pageAllocator) {
@@ -173,10 +169,8 @@ namespace dxvk {
       m_memoryMapped += allocInfo.size;
 
       if (allocInfo.file) {
-        // Map entire file if the allocation owns it
         allocInfo.mapPtr = allocInfo.file.map(0u, allocInfo.size);
       } else {
-        // Check whether the allocation is contained inside one page
         auto& chunk = m_chunks.at(allocInfo.address >> DxvkPageAllocator::ChunkAddressBits);
         auto chunkOffset = allocInfo.address & DxvkPageAllocator::ChunkAddressMask;
 
@@ -197,7 +191,6 @@ namespace dxvk {
 
           allocInfo.mapPtr = reinterpret_cast<char*>(page.mapPtr) + pageOffset;
         } else {
-          // We're straddling multiple pages, map them all and offset the base address
           auto mapPtr = chunk.file.map(pageLo * pageSize, (pageHi - pageLo + 1u) * pageSize);
           allocInfo.mapPtr = reinterpret_cast<char*>(mapPtr) + pageOffset;
         }
@@ -217,10 +210,8 @@ namespace dxvk {
       m_memoryMapped -= allocInfo.size;
 
       if (allocInfo.file) {
-        // Unmap entire file
         allocInfo.file.unmap(allocInfo.mapPtr);
       } else {
-        // Check whether the allocation is contained inside one page
         auto& chunk = m_chunks.at(allocInfo.address >> DxvkPageAllocator::ChunkAddressBits);
         auto chunkOffset = allocInfo.address & DxvkPageAllocator::ChunkAddressMask;
 
@@ -238,7 +229,6 @@ namespace dxvk {
             page.mapPtr = nullptr;
           }
         } else {
-          // Apply page offset to mapped pointer and unmap all pages
           auto basePtr = reinterpret_cast<char*>(allocInfo.mapPtr) - pageOffset;
           chunk.file.unmap(basePtr);
         }

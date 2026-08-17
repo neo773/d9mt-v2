@@ -1,12 +1,5 @@
 #pragma once
 
-// PHASE-C5: ported off Vulkan onto the Mtl seam (doc 05 §Buffers).
-//   Rc<DxvkBuffer>            -> Rc<MtlBuffer>
-//   DxvkBufferSlice          -> MtlBufferSlice
-//   Rc<DxvkResourceAllocation> -> Rc<MtlAllocation>   (the Discard rename ring)
-//   VkDeviceSize             -> MtlDeviceSize
-// The Vulkan usage/stage/access split dies here; CreateBuffer()/CreateStagingBuffer()
-// bodies (d3d9_common_buffer.cpp) do the semantic MtlBufferCreateInfo rewrite.
 #include "../mtl/mtl_device.h"
 #include "../cs/dxvk_cs.h"
 
@@ -15,17 +8,11 @@
 
 namespace dxvk {
 
-  /**
-   * \brief Buffer map mode
-   */
   enum D3D9_COMMON_BUFFER_MAP_MODE {
     D3D9_COMMON_BUFFER_MAP_MODE_BUFFER,
     D3D9_COMMON_BUFFER_MAP_MODE_DIRECT
   };
 
-  /**
-   * \brief Common buffer descriptor
-   */
   struct D3D9_BUFFER_DESC {
     D3DRESOURCETYPE Type;
     UINT            Size;
@@ -35,9 +22,6 @@ namespace dxvk {
     DWORD           FVF;
   };
 
-  /**
-   * \brief The type of buffer you want to use
-   */
   enum D3D9_COMMON_BUFFER_TYPE {
     D3D9_COMMON_BUFFER_TYPE_MAPPING,
     D3D9_COMMON_BUFFER_TYPE_STAGING,
@@ -95,28 +79,19 @@ namespace dxvk {
 
     HRESULT Unlock();
 
-    /**
-    * \brief Determine the mapping mode of the buffer, (ie. direct mapping or backed)
-    */
     D3D9_COMMON_BUFFER_MAP_MODE DetermineMapMode(const D3D9Options* options) const;
 
-    /**
-    * \brief Get the mapping mode of the buffer, (ie. direct mapping or backed)
-    */
     inline D3D9_COMMON_BUFFER_MAP_MODE GetMapMode() const {
       return m_mapMode;
     }
 
-    /**
-    * \brief Abstraction for getting a type of buffer (mapping/staging/the real buffer) across mapping modes.
-    */
     template <D3D9_COMMON_BUFFER_TYPE Type>
     inline const Rc<MtlBuffer>& GetBuffer() const {
       if constexpr (Type == D3D9_COMMON_BUFFER_TYPE_MAPPING)
         return GetMapBuffer();
       else if constexpr (Type == D3D9_COMMON_BUFFER_TYPE_STAGING)
         return GetStagingBuffer();
-      else //if constexpr (Type == D3D9_COMMON_BUFFER_TYPE_REAL)
+      else
         return GetRealBuffer();
     }
 
@@ -136,10 +111,8 @@ namespace dxvk {
         const Rc<MtlBuffer>& buffer = GetBuffer<Type>();
         MtlDeviceSize clamped = std::min<MtlDeviceSize>(m_desc.Size - offset, length);
 
-        // The map buffer renames on the APP thread (DiscardMapSlice); its
-        // storage() only catches up when the CS executes assignStorage.
-        // Slices of it must snapshot the allocation the frontend actually
-        // maps, or a recorded draw can resolve against the wrong generation.
+        // The map buffer's storage() lags its renames until the CS thread catches up, so
+        // slices must snapshot the allocation the frontend actually maps, not the current one.
         if (buffer == GetMapBuffer())
           return MtlBufferSlice(buffer, m_allocation, offset, clamped);
 
@@ -165,19 +138,10 @@ namespace dxvk {
 
     static HRESULT ValidateBufferProperties(const D3D9_BUFFER_DESC* pDesc, const bool IsExtended);
 
-    /**
-     * \brief The range of the buffer that was changed using Lock calls
-     */
     inline D3D9Range& DirtyRange()  { return m_dirtyRange; }
 
-    /**
-    * \brief Whether or not the buffer was written to by the GPU (in IDirect3DDevice9::ProcessVertices)
-    */
     inline bool NeedsReadback() const     { return m_needsReadback; }
 
-    /**
-    * \brief Sets whether or not the buffer was written to by the GPU
-    */
     inline void SetNeedsReadback(bool state) { m_needsReadback = state; }
 
     inline uint32_t IncrementLockCount() { return ++m_lockCount; }
@@ -189,9 +153,6 @@ namespace dxvk {
     }
     inline uint32_t GetLockCount() const { return m_lockCount; }
 
-    /**
-     * \brief Whether or not the staging buffer needs to be copied to the actual buffer
-     */
     inline bool NeedsUpload() const { return (m_desc.Pool != D3DPOOL_DEFAULT || m_uploadAtDraw) && m_mapMode != D3D9_COMMON_BUFFER_MAP_MODE_DIRECT && !m_dirtyRange.IsDegenerate(); }
 
     void PreLoad();
@@ -200,23 +161,11 @@ namespace dxvk {
       return m_mapMode != D3D9_COMMON_BUFFER_MAP_MODE_DIRECT;
     }
 
-     /**
-     * \brief Tracks sequence number
-     *
-     * Stores which CS chunk the resource was last used on.
-     * \param [in] Seq Sequence number
-     */
     void TrackMappingBufferSequenceNumber(uint64_t Seq) {
       m_seq = Seq;
     }
 
 
-    /**
-     * \brief Queries sequence number
-     *
-     * Returns which CS chunk the resource was last used on.
-     * \returns Sequence number
-     */
     uint64_t GetMappingBufferSequenceNumber() const {
       return HasSequenceNumber() ? m_seq
         : DxvkCsThread::SynchronizeAll;

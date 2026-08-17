@@ -1,9 +1,3 @@
-// PHASE-C10: d3d9.dll entry points (the 20 d3d9.def exports) + the
-// D3D9GlobalAnnotationList singleton storage. Ported off DXVK's d3d9_main.cpp:
-//   - #include ../dxvk/dxvk_instance.h dropped (MtlInstance comes via
-//     d3d9_interface.h -> mtl_device.h).
-//   - Logger::s_instance is NOT redefined here — the driver defines it in
-//     util/log/log.cpp ({ "d3d9.log" }); redefining would be a duplicate symbol.
 #include "d3d9_interface.h"
 #include "d3d9_shader_validator.h"
 
@@ -13,7 +7,6 @@ class D3DFE_PROCESSVERTICES;
 using PSGPERRORID = UINT;
 
 namespace dxvk {
-  // Global annotation list singleton storage (declared static in d3d9_annotation.h).
   D3D9GlobalAnnotationList D3D9GlobalAnnotationList::s_instance;
 
   HRESULT CreateD3D9(
@@ -76,9 +69,6 @@ extern "C" {
   DLLEXPORT int __stdcall DebugSetLevel(void) {
     return 0;
   }
-
-  // Processor Specific Geometry Pipeline
-  // for P3 SIMD/AMD 3DNow.
 
   DLLEXPORT void __stdcall PSGPError(D3DFE_PROCESSVERTICES* a, PSGPERRORID b, UINT c) {
   }

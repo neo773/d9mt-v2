@@ -22,13 +22,13 @@ namespace dxvk::sync {
 
     bool status = m_owner.compare_exchange_weak(
       expected, threadId, std::memory_order_acquire);
-    
+
     if (status)
       return true;
-    
+
     if (expected != threadId)
       return false;
-    
+
     m_counter += 1;
     return true;
   }

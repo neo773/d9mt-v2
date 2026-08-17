@@ -116,7 +116,7 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
     flock(fd, LOCK_EX);
 
     if (sqlite3_open_v2(
-            [dbPath fileSystemRepresentation], &_db, //
+            [dbPath fileSystemRepresentation], &_db,
             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL
         ) != SQLITE_OK) {
       NSLog(@"[CacheWriter] Failed to open DB: %s", sqlite3_errmsg(_db));

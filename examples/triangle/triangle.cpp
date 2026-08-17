@@ -1,9 +1,3 @@
-// triangle — first v2 Metal milestone: a white triangle on a black background,
-// rendered fully offscreen via metal-cpp (no Objective-C, no windowing yet) and
-// written to a BMP. Validates the Metal backend end-to-end: device + queue,
-// runtime MSL compile, render pipeline state, a render pass with a black clear,
-// and a single 3-vertex draw. Windowing/present is a later milestone.
-
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -17,8 +11,6 @@ namespace {
   constexpr uint32_t kWidth  = 512;
   constexpr uint32_t kHeight = 512;
 
-  // Positions are generated from the vertex id, so the draw needs no vertex
-  // buffer. Fragment is constant white. NDC: a centered upward triangle.
   const char* kShaderSource = R"(
     #include <metal_stdlib>
     using namespace metal;
@@ -43,8 +35,6 @@ namespace {
     }
   )";
 
-  // Builds the render pipeline state for the triangle. Returns a +1 reference
-  // the caller owns, or nullptr on compile/link failure (reason printed).
   MTL::RenderPipelineState* buildPipeline(MTL::Device* device) {
     NS::Error* error = nullptr;
 
@@ -82,14 +72,13 @@ namespace {
     return pipeline;
   }
 
-  // Allocates the offscreen color target the triangle renders into.
   MTL::Texture* createColorTarget(MTL::Device* device) {
     MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
     descriptor->setTextureType(MTL::TextureType2D);
     descriptor->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
     descriptor->setWidth(kWidth);
     descriptor->setHeight(kHeight);
-    descriptor->setStorageMode(MTL::StorageModeShared);  // unified memory readback
+    descriptor->setStorageMode(MTL::StorageModeShared);
     descriptor->setUsage(MTL::TextureUsageRenderTarget);
 
     MTL::Texture* texture = device->newTexture(descriptor);
@@ -97,22 +86,20 @@ namespace {
     return texture;
   }
 
-  // Writes a bottom-up 24-bit BMP from BGRA pixels. Preview-openable; keeps the
-  // milestone dependency-free (no ImageIO/CoreGraphics).
   bool writeBmp(const char* path, const uint8_t* bgra, uint32_t width, uint32_t height) {
-    const uint32_t rowStride = (width * 3 + 3) & ~3u;  // rows padded to 4 bytes
+    const uint32_t rowStride = (width * 3 + 3) & ~3u;
     const uint32_t pixelBytes = rowStride * height;
     const uint32_t fileBytes = 54 + pixelBytes;
 
     uint8_t header[54] = {};
     header[0] = 'B'; header[1] = 'M';
     *reinterpret_cast<uint32_t*>(&header[2])  = fileBytes;
-    *reinterpret_cast<uint32_t*>(&header[10]) = 54;          // pixel data offset
-    *reinterpret_cast<uint32_t*>(&header[14]) = 40;          // DIB header size
+    *reinterpret_cast<uint32_t*>(&header[10]) = 54;
+    *reinterpret_cast<uint32_t*>(&header[14]) = 40;
     *reinterpret_cast<int32_t*>(&header[18])  = int32_t(width);
     *reinterpret_cast<int32_t*>(&header[22])  = int32_t(height);
-    *reinterpret_cast<uint16_t*>(&header[26]) = 1;           // planes
-    *reinterpret_cast<uint16_t*>(&header[28]) = 24;          // bits per pixel
+    *reinterpret_cast<uint16_t*>(&header[26]) = 1;
+    *reinterpret_cast<uint16_t*>(&header[28]) = 24;
     *reinterpret_cast<uint32_t*>(&header[34]) = pixelBytes;
 
     FILE* file = fopen(path, "wb");
@@ -121,12 +108,12 @@ namespace {
     fwrite(header, 1, sizeof(header), file);
 
     std::vector<uint8_t> row(rowStride, 0);
-    for (int32_t y = int32_t(height) - 1; y >= 0; --y) {  // BMP is bottom-up
+    for (int32_t y = int32_t(height) - 1; y >= 0; --y) {  // BMP rows are stored bottom-up
       const uint8_t* src = bgra + size_t(y) * width * 4;
       for (uint32_t x = 0; x < width; ++x) {
-        row[x * 3 + 0] = src[x * 4 + 0];  // B
-        row[x * 3 + 1] = src[x * 4 + 1];  // G
-        row[x * 3 + 2] = src[x * 4 + 2];  // R
+        row[x * 3 + 0] = src[x * 4 + 0];
+        row[x * 3 + 1] = src[x * 4 + 1];
+        row[x * 3 + 2] = src[x * 4 + 2];
       }
       fwrite(row.data(), 1, rowStride, file);
     }
@@ -156,7 +143,7 @@ int main() {
   colorAttachment->setTexture(colorTarget);
   colorAttachment->setLoadAction(MTL::LoadActionClear);
   colorAttachment->setStoreAction(MTL::StoreActionStore);
-  colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));  // black
+  colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
 
   MTL::CommandBuffer* commandBuffer = gpu.queue()->commandBuffer();
   MTL::RenderCommandEncoder* encoder =

@@ -4,8 +4,6 @@
 
 namespace dxvk {
 
-  // Direct3DTexture9
-
   D3D9Texture2D::D3D9Texture2D(
           D3D9DeviceEx*             pDevice,
     const D3D9_COMMON_TEXTURE_DESC* pDesc,
@@ -32,8 +30,6 @@ namespace dxvk {
       *ppvObject = ref(this);
       return S_OK;
     }
-
-    // PHASE-C6: ID3D9VkInteropTexture path DROPPED (Vulkan interop, doc 02 §DROP).
 
     if (logQueryInterfaceError(__uuidof(IDirect3DTexture9), riid)) {
       Logger::warn("D3D9Texture2D::QueryInterface: Unknown interface query");
@@ -95,18 +91,15 @@ namespace dxvk {
       m_texture.AddDirtyBox(nullptr, 0);
     }
 
-    // Some games keep using the pointer returned in LockRect() after calling Unlock()
-    // and purely rely on AddDirtyRect to notify D3D9 that contents have changed.
-    // We have no way of knowing which mip levels were actually changed.
+    // Some games keep writing through the LockRect() pointer after Unlock()
+    // and rely solely on AddDirtyRect to signal the change, so conservatively
+    // mark every mip as needing upload since we can't tell which one changed.
     if (m_texture.IsManaged())
       m_texture.SetAllNeedUpload();
 
     m_parent->TouchMappedTexture(&m_texture);
     return D3D_OK;
   }
-
-
-  // Direct3DVolumeTexture9
 
 
   D3D9Texture3D::D3D9Texture3D(
@@ -129,8 +122,6 @@ namespace dxvk {
       *ppvObject = ref(this);
       return S_OK;
     }
-
-    // PHASE-C6: ID3D9VkInteropTexture path DROPPED (Vulkan interop, doc 02 §DROP).
 
     if (logQueryInterfaceError(__uuidof(IDirect3DVolumeTexture9), riid)) {
       Logger::warn("D3D9Texture3D::QueryInterface: Unknown interface query");
@@ -186,18 +177,12 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9Texture3D::AddDirtyBox(CONST D3DBOX* pDirtyBox) {
     m_texture.AddDirtyBox(pDirtyBox, 0);
 
-    // Some games keep using the pointer returned in LockBox() after calling Unlock()
-    // and purely rely on AddDirtyBox to notify D3D9 that contents have changed.
-    // We have no way of knowing which mip levels were actually changed.
     if (m_texture.IsManaged())
       m_texture.SetAllNeedUpload();
 
     m_parent->TouchMappedTexture(&m_texture);
     return D3D_OK;
   }
-
-
-  // Direct3DCubeTexture9
 
 
   D3D9TextureCube::D3D9TextureCube(
@@ -220,8 +205,6 @@ namespace dxvk {
       *ppvObject = ref(this);
       return S_OK;
     }
-
-    // PHASE-C6: ID3D9VkInteropTexture path DROPPED (Vulkan interop, doc 02 §DROP).
 
     if (logQueryInterfaceError(__uuidof(IDirect3DCubeTexture9), riid)) {
       Logger::warn("D3D9TextureCube::QueryInterface: Unknown interface query");
@@ -283,9 +266,6 @@ namespace dxvk {
       m_texture.AddDirtyBox(nullptr, Face);
     }
 
-    // Some games keep using the pointer returned in LockRect() after calling Unlock()
-    // and purely rely on AddDirtyRect to notify D3D9 that contents have changed.
-    // We have no way of knowing which mip levels were actually changed.
     if (m_texture.IsManaged()) {
       for (uint32_t m = 0; m < m_texture.ExposedMipLevels(); m++) {
         m_texture.SetNeedsUpload(m_texture.CalcSubresource(Face, m), true);

@@ -40,9 +40,6 @@ namespace dxvk {
     if (m_shaderInfo.getVersion().first == 1u && m_shaderInfo.getType() == dxbc_spv::sm3::ShaderType::ePixel)
       m_usedRTs = 0b1u;
 
-    // No real point in gathering bool masks here. For HWVP we have to
-    // use a different mechanism anyway, and in SWVP mode we can just
-    // use the entire bit array up to the highest accessed constant.
     D3D9ImmediateConstantsData shaderDefs;
 
     ConstantMask constMaskF;
@@ -57,8 +54,6 @@ namespace dxvk {
 
     m_length = parser.getByteOffset();
 
-    // The compiler will always constant-fold inline constants that
-    // are statically indexed, so there is no need to keep them around
     for (size_t i = 0u; i < shaderDefs.floats.size(); i++)
       clrBit(constMaskF, shaderDefs.floats[i].index);
 
@@ -74,8 +69,6 @@ namespace dxvk {
     D3D9ConstantBufferLayout constLayoutB;
 
     if (m_isSWVP && m_shaderInfo.getType() == ShaderType::eVertex) {
-      // Pad bool constants to a multiple of 16 bytes so we
-      // can trivially keep all the other constants aligned
       uint32_t dwordCount = align(m_constants.boolCount, 32u) / 32u;
       constLayoutB = D3D9ConstantBufferLayout(align(dwordCount, 4u));
     }
@@ -85,9 +78,6 @@ namespace dxvk {
       std::move(constLayoutI),
       std::move(constLayoutB));
 
-    // Shift up these sampler bits so we can just
-    // do an or per-draw in the device.
-    // We shift by 17 because 16 ps samplers + 1 dmap (tess)
     if (m_shaderInfo.getType() == ShaderType::eVertex)
       m_usedSamplers <<= FirstVSSamplerSlot;
 
@@ -101,9 +91,6 @@ namespace dxvk {
           D3D9ImmediateConstantsData&   shaderDefs) {
     auto matrixSize = getMatrixSize(op.getOpCode());
 
-    /* Determine whether we're accessing float constants dynamically
-     * because in that case, we'll need to copy the immediate constants
-     * into the constant buffer inside DXVK. */
     for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
       const auto& src = op.getSrc(i);
       auto registerType = src.getRegisterType();
@@ -125,7 +112,6 @@ namespace dxvk {
         case RegisterType::eConstBool: {
           m_constants.boolCount = std::max(m_constants.boolCount, index + count);
 
-          // SWVP raises the constant limit too high to use bit mask.
           if (!m_isSWVP || m_shaderInfo.getType() != ShaderType::eVertex)
             m_constants.boolMask |= 1u << index;
         } break;
@@ -137,8 +123,7 @@ namespace dxvk {
           m_constants.floatCount = std::max(m_constants.floatCount, index + count);
 
           if (src.hasRelativeAddressing()) {
-            // SEAM/FORK FIX: upstream references undefined `MaxFloatConstantsPS`;
-            // the SM3 PS float-constant ceiling is MaxSM3FloatConstantsPS (224).
+            // the SM3 PS float-constant ceiling is MaxSM3FloatConstantsPS (224), not MaxFloatConstantsPS
             uint32_t hwvpFloatConstantsCount = GetShaderInfo().getType() == ShaderType::ePixel ? MaxSM3FloatConstantsPS : MaxFloatConstantsVS;
 
             m_constants.floatCount = std::max(m_constants.floatCount,
@@ -146,7 +131,6 @@ namespace dxvk {
 
             m_constants.floatsAccessedDynamically = true;
           } else {
-            // Gather indices of statically accessed constants
             for (uint32_t j = 0u; j < count; j++)
               setBit(constMaskF, index + j);
           }
@@ -316,12 +300,10 @@ namespace dxvk {
       auto location = FindLocationInFixedFunctionIO(semantic);
 
       if (!location.has_value()) {
-        // Should never happen. The semantics we're looking for are at indices 9 and 10.
         dxbc_spv_unreachable();
         return false;
       }
 
-      // The flat shading mask is applied before Semantic IO, so it uses the locations that are set by the compiler.
       m_flatShadingMask |= 1u << *location;
     }
 
@@ -330,9 +312,6 @@ namespace dxvk {
 
 
   std::optional<uint32_t> D3D9ShaderAnalysis::FindLocationInFixedFunctionIO(dxbc_spv::sm3::Semantic semantic) const {
-    // Outputs by the FF vertex shader and inputs by the FF pixel shader.
-    // The locations of those semantics are reserved to make sure programmable shaders and FF are compatible.
-    // The compiler does the same thing when determining IO locations.
     return IoMap::findFixedFunctionLocation(semantic);
   }
 

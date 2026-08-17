@@ -1,13 +1,3 @@
-/* d9mt v2 — minimal FIXED-FUNCTION test (no shaders at all).
- *
- * Exercises the FF pipeline the driver just gained: FVF XYZRHW|DIFFUSE|TEX1,
- * a pre-transformed (POSITIONT) screen-space quad, sampled from a procedural
- * texture and modulated by the diffuse color — exactly the shape GTA-style 2D
- * UI uses. No SetVertexShader/SetPixelShader => the driver's FF ubershaders run.
- *
- * Draws one full-window quad at known screen coords; reads back the center and
- * a few points; asserts it's textured (non-bg, spatially varied).
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -20,7 +10,6 @@
 
 enum { W = 640, H = 480, TEX = 256 };
 
-/* D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 */
 #define FVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1)
 struct V { float x, y, z, rhw; DWORD color; float u, v; };
 
@@ -42,9 +31,6 @@ static DWORD read_px(IDirect3DDevice9 *dev, UINT x, UINT y) {
 
 static void ident(D3DMATRIX *m){ memset(m,0,sizeof(*m)); m->m[0][0]=m->m[1][1]=m->m[2][2]=m->m[3][3]=1.f; }
 
-/* Case B: LIT, non-POSITIONT (XYZ|NORMAL|DIFFUSE|TEX1). Exercises the FF VS
- * world/view/proj transform + directional lighting path (the branches the
- * POSITIONT quad skips), plus texture*litColor modulation. */
 static int run_lit(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
 #define LFVF (D3DFVF_XYZ|D3DFVF_NORMAL|D3DFVF_DIFFUSE|D3DFVF_TEX1)
   struct LV { float x,y,z, nx,ny,nz; DWORD color; float u,v; };
@@ -58,7 +44,7 @@ static int run_lit(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
   D3DMATRIX I; ident(&I);
   IDirect3DDevice9_SetTransform(dev,D3DTS_WORLD,&I);
   IDirect3DDevice9_SetTransform(dev,D3DTS_VIEW,&I);
-  IDirect3DDevice9_SetTransform(dev,D3DTS_PROJECTION,&I);   /* identity WVP: xyz already in NDC */
+  IDirect3DDevice9_SetTransform(dev,D3DTS_PROJECTION,&I);
 
   D3DMATERIAL9 mat; memset(&mat,0,sizeof mat);
   mat.Diffuse.r=mat.Diffuse.g=mat.Diffuse.b=mat.Diffuse.a=1.f;
@@ -68,7 +54,7 @@ static int run_lit(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
   D3DLIGHT9 light; memset(&light,0,sizeof light);
   light.Type=D3DLIGHT_DIRECTIONAL;
   light.Diffuse.r=light.Diffuse.g=light.Diffuse.b=1.f;
-  light.Direction.x=0; light.Direction.y=0; light.Direction.z=1.f; /* travels +z; N=(0,0,-1) faces it */
+  light.Direction.x=0; light.Direction.y=0; light.Direction.z=1.f;
   IDirect3DDevice9_SetLight(dev,0,&light);
   IDirect3DDevice9_LightEnable(dev,0,TRUE);
 
@@ -102,13 +88,9 @@ static int run_lit(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
   return ok;
 }
 
-/* Case C: multi-stage texturing (2 stages). Stage0 = tex*diffuse, stage1 =
- * tex2*current. Exercises the FS texture-stage-op spec constants + a second
- * bound texture/sampler + a second texcoord set. */
 static int run_multistage(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
 #define MFVF (D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX2)
   struct MV { float x,y,z,rhw; DWORD color; float u0,v0, u1,v1; };
-  /* second texture: horizontal red gradient so stage1 visibly modulates */
   IDirect3DTexture9 *tex2=NULL;
   if(FAILED(IDirect3DDevice9_CreateTexture(dev,TEX,TEX,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&tex2,NULL)))
     { LOG("RESULT-C: FAIL (CreateTexture)"); return 0; }
@@ -127,12 +109,10 @@ static int run_multistage(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
   IDirect3DDevice9_SetFVF(dev,MFVF);
   IDirect3DDevice9_SetTexture(dev,0,(IDirect3DBaseTexture9*)tex);
   IDirect3DDevice9_SetTexture(dev,1,(IDirect3DBaseTexture9*)tex2);
-  /* stage 0: tex0 * diffuse */
   IDirect3DDevice9_SetTextureStageState(dev,0,D3DTSS_COLOROP,D3DTOP_MODULATE);
   IDirect3DDevice9_SetTextureStageState(dev,0,D3DTSS_COLORARG1,D3DTA_TEXTURE);
   IDirect3DDevice9_SetTextureStageState(dev,0,D3DTSS_COLORARG2,D3DTA_DIFFUSE);
   IDirect3DDevice9_SetTextureStageState(dev,0,D3DTSS_TEXCOORDINDEX,0);
-  /* stage 1: tex1 * current */
   IDirect3DDevice9_SetTextureStageState(dev,1,D3DTSS_COLOROP,D3DTOP_MODULATE);
   IDirect3DDevice9_SetTextureStageState(dev,1,D3DTSS_COLORARG1,D3DTA_TEXTURE);
   IDirect3DDevice9_SetTextureStageState(dev,1,D3DTSS_COLORARG2,D3DTA_CURRENT);
@@ -149,12 +129,11 @@ static int run_multistage(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex) {
     IDirect3DDevice9_DrawPrimitiveUP(dev,D3DPT_TRIANGLESTRIP,2,q,sizeof(struct MV));
     IDirect3DDevice9_EndScene(dev);
     IDirect3DDevice9_Present(dev,NULL,NULL,NULL,NULL);
-    DWORD tl=read_px(dev,x0+20,y0+20);   /* u≈0: tex2 red≈0 -> dark */
-    DWORD br=read_px(dev,x1-20,y1-20);   /* u≈1: tex2 red≈255 -> bright red */
+    DWORD tl=read_px(dev,x0+20,y0+20);
+    DWORD br=read_px(dev,x1-20,y1-20);
     DWORD c =read_px(dev,W/2,H/2);
     DWORD out=read_px(dev,6,6);
     int textured=(c!=bg&&c!=0xdeadbeef), varied=(tl!=br&&tl!=bg&&br!=bg), bgok=(out==bg);
-    /* stage1's green gradient (tex2.G = u*255) makes the right edge greener */
     int grnGrad = ((br&0xff00) > (tl&0xff00));
     LOG("C f%d center=%06lx tl=%06lx br=%06lx out=%06lx textured=%d varied=%d bgok=%d grnGrad=%d",
         f,(unsigned long)c,(unsigned long)tl,(unsigned long)br,(unsigned long)out,textured,varied,bgok,grnGrad);
@@ -185,7 +164,6 @@ int main(void) {
   if(!dev){LOG("no device");return 1;}
   LOG("device %dx%d, FIXED FUNCTION (no shaders)", W, H);
 
-  /* procedural texture: R=u, G=v, B=checker */
   IDirect3DTexture9 *tex=NULL;
   CHECK(IDirect3DDevice9_CreateTexture(dev,TEX,TEX,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&tex,NULL));
   { D3DLOCKED_RECT lr; IDirect3DTexture9_LockRect(tex,0,&lr,NULL,0);
@@ -194,7 +172,6 @@ int main(void) {
         row[tx]=0xFF000000u|((DWORD)tx<<16)|((DWORD)ty<<8)|b; } }
     IDirect3DTexture9_UnlockRect(tex,0); }
 
-  /* XYZRHW quad covering most of the window; rhw=1; white diffuse; uv 0..1 */
   float x0=80.f,y0=60.f,x1=560.f,y1=420.f;
   struct V q[4]={
     {x0,y0,0,1, 0xFFFFFFFF, 0,0},
@@ -220,10 +197,10 @@ int main(void) {
     CHECK(IDirect3DDevice9_Present(dev,NULL,NULL,NULL,NULL));
 
     DWORD bg=0x101028;
-    DWORD c =read_px(dev,W/2,H/2);           /* center of quad: mid texture */
-    DWORD tl=read_px(dev,x0+20,y0+20);       /* near uv(0,0): low R,G */
-    DWORD br=read_px(dev,x1-20,y1-20);       /* near uv(1,1): high R,G */
-    DWORD out=read_px(dev,10,10);            /* outside quad: bg */
+    DWORD c =read_px(dev,W/2,H/2);
+    DWORD tl=read_px(dev,x0+20,y0+20);
+    DWORD br=read_px(dev,x1-20,y1-20);
+    DWORD out=read_px(dev,10,10);
     int textured = (c!=bg && c!=0xdeadbeef);
     int varied   = (tl!=br && tl!=bg && br!=bg);
     int bgok     = (out==bg);

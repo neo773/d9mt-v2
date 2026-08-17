@@ -1,21 +1,3 @@
-/*
- * air_render_test: loads a VS metallib + PS metallib produced by the AIR
- * backend from the shadertri SM3 pair, renders the triangle offscreen with
- * the v0 binding model, and verifies interpolated corner colors.
- *
- *   air_render_test vs.metallib ps.metallib
- *
- * Bindings (must match AirBuilder's v0 model):
- *   VS: buffer(0)=cF float4[256] (identity MVP rows in [0..3]),
- *       buffer(1)=clipPlanes {u32 count; pad; float4 x6} zeroed,
- *       buffer(2)=pointArgs {i32,f32,f32,f32},
- *       vertex data via stage_in at bufferIndex 3 (attr0 pos, attr1 color).
- *   PS: buffer(0)=cF float4[224] ([0]=tint=1,1,1,1),
- *       buffer(1)=alphaTest {u32 compareOp=8(always), u32 bits, u32 ref}.
- *
- * Exit 0 = PASS.
- */
-
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include <array>
@@ -84,7 +66,6 @@ int main(int argc, char** argv) {
     }
     printf("pipeline state created\n");
 
-    /* VS constants: identity MVP rows (shader does dp4(pos, cF[row])) */
     std::vector<float> vsConstants(256 * 4, 0.f);
     vsConstants[0 * 4 + 0] = 1.f;
     vsConstants[1 * 4 + 1] = 1.f;
@@ -93,30 +74,25 @@ int main(int argc, char** argv) {
     id<MTLBuffer> vsCf = [device newBufferWithBytes:vsConstants.data()
       length:vsConstants.size() * 4 options:MTLResourceStorageModeShared];
 
-    /* clipPlanes: {u32 count; pad to 16; 6x float4} all zero */
     std::vector<uint8_t> clipPlanes(16 + 6 * 16, 0);
     id<MTLBuffer> vsClip = [device newBufferWithBytes:clipPlanes.data()
       length:clipPlanes.size() options:MTLResourceStorageModeShared];
 
-    /* pointArgs: {i32 isSprite; f32 size; f32 min; f32 max} */
     struct { int32_t sprite; float size, sizeMin, sizeMax; }
       pointArgs = { 0, 1.f, 0.f, 64.f };
     id<MTLBuffer> vsPoint = [device newBufferWithBytes:&pointArgs
       length:sizeof(pointArgs) options:MTLResourceStorageModeShared];
 
-    /* PS constants: cF[0] = tint (1,1,1,1) */
     std::vector<float> psConstants(224 * 4, 0.f);
     psConstants[0] = psConstants[1] = psConstants[2] = psConstants[3] = 1.f;
     id<MTLBuffer> psCf = [device newBufferWithBytes:psConstants.data()
       length:psConstants.size() * 4 options:MTLResourceStorageModeShared];
 
-    /* alphaTest: compareOp=8 (D3DCMP_ALWAYS -> shader returns true) */
     struct { uint32_t compareOp, precisionBits, alphaRef; }
       alphaTest = { 8u, 8u, 0u };
     id<MTLBuffer> psAlpha = [device newBufferWithBytes:&alphaTest
       length:sizeof(alphaTest) options:MTLResourceStorageModeShared];
 
-    /* triangle covering most of the target, r/g/b corners */
     float verts[] = {
       -1.f, -1.f, 0.f, 1.f,  1.f, 0.f, 0.f, 1.f,
        3.f, -1.f, 0.f, 1.f,  0.f, 1.f, 0.f, 1.f,
@@ -168,11 +144,10 @@ int main(int argc, char** argv) {
 
     auto px = [&](uint32_t x, uint32_t y) {
       const uint8_t* p = &pixels[(y * W + x) * 4];
-      return std::array<uint8_t, 4>{ p[2], p[1], p[0], p[3] }; /* ->RGBA */
+      return std::array<uint8_t, 4>{ p[2], p[1], p[0], p[3] };
     };
 
-    /* bottom-left ~red, bottom-right-ish ~green, top-left-ish ~blue
-     * (Metal texture row 0 = top; clip -1,-1 = bottom-left) */
+    // texture row 0 is the top, but clip-space (-1,-1) is the bottom-left
     auto redPt   = px(2, H - 3);
     auto greenPt = px(W - 3, H - 3);
     auto bluePt  = px(2, 2);

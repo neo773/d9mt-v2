@@ -2,9 +2,6 @@
 
 namespace dxvk {
 
-  ////////////////////////
-  // D3D9VertexBuffer
-  ////////////////////////
 
   D3D9VertexBuffer::D3D9VertexBuffer(
           D3D9DeviceEx*      pDevice,
@@ -60,11 +57,6 @@ namespace dxvk {
 
     return D3D_OK;
   }
-
-
-  //////////////////////
-  // D3D9IndexBuffer
-  //////////////////////
 
 
   D3D9IndexBuffer::D3D9IndexBuffer(

@@ -35,7 +35,6 @@ namespace dxvk {
 
 
   void D3D9Volume::AddRefPrivate() {
-    // Can't have a swapchain container for a volume.
     if (m_baseTexture != nullptr) {
       static_cast<D3D9Texture3D*>(m_baseTexture)->AddRefPrivate();
       return;
@@ -46,7 +45,6 @@ namespace dxvk {
 
 
   void D3D9Volume::ReleasePrivate() {
-    // Can't have a swapchain container for a volume.
     if (m_baseTexture != nullptr) {
       static_cast<D3D9Texture3D*>(m_baseTexture)->ReleasePrivate();
       return;
@@ -68,8 +66,6 @@ namespace dxvk {
       *ppvObject = ref(this);
       return S_OK;
     }
-
-    // PHASE-C6: ID3D9VkInteropTexture path DROPPED (Vulkan interop, doc 02 §DROP).
 
     if (logQueryInterfaceError(__uuidof(IDirect3DVolume9), riid)) {
       Logger::warn("D3D9Volume::QueryInterface: Unknown interface query");
@@ -103,7 +99,6 @@ namespace dxvk {
     if (unlikely(pLockedBox == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // LockBox clears any existing content present in pLockedBox
     pLockedBox->pBits = nullptr;
     pLockedBox->RowPitch = 0;
     pLockedBox->SlicePitch = 0;
@@ -111,11 +106,9 @@ namespace dxvk {
     if (unlikely(pBox != nullptr)) {
       auto& desc = *(m_texture->Desc());
 
-      // Negative or zero length dimensions
       if ( static_cast<LONG>(pBox->Right)  - static_cast<LONG>(pBox->Left)  <= 0
         || static_cast<LONG>(pBox->Bottom) - static_cast<LONG>(pBox->Top)   <= 0
         || static_cast<LONG>(pBox->Back)   - static_cast<LONG>(pBox->Front) <= 0
-      // Exceeding surface dimensions
         || pBox->Right  > std::max(1u, desc.Width  >> m_mipLevel)
         || pBox->Bottom > std::max(1u, desc.Height >> m_mipLevel)
         || pBox->Back   > std::max(1u, desc.Depth  >> m_mipLevel))

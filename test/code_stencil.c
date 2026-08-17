@@ -1,12 +1,3 @@
-/* d9mt v2 stencil test: pass 1 draws a red triangle that writes stencil=1 in
- * its pixels; pass 2 draws a green full-screen quad that only passes where
- * stencil==1. Correct stencil masking shows a GREEN TRIANGLE (the quad clipped
- * to the triangle's stencil mask); if stencil state is ignored the whole quad
- * passes and the screen is fully green.
- *
- * Uses the vertex-colour shader (POSITION + D3DCOLOR, output = colour * tint)
- * so no textures are needed; depth test is disabled to isolate the stencil.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -67,7 +58,6 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  /* Mask triangle (red) and a full-screen quad (green). */
   static const struct Vertex tri[3] = {
       {0.0f, 0.8f, 0.5f, 0xFFFF0000}, {0.8f, -0.8f, 0.5f, 0xFFFF0000},
       {-0.8f, -0.8f, 0.5f, 0xFFFF0000}};
@@ -105,14 +95,12 @@ int main(void) {
                            D3DCOLOR_XRGB(24, 24, 40), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
 
-    /* Pass 1: write stencil=1 in the triangle. */
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILREF, 1);
     IDirect3DDevice9_SetStreamSource(dev, 0, triVb, 0, sizeof(struct Vertex));
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 1);
 
-    /* Pass 2: draw the green quad only where stencil==1. */
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILFUNC, D3DCMP_EQUAL);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILREF, 1);

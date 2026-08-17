@@ -1,19 +1,3 @@
-/* d9mt v2 — minimal, LOUD 3D debug demo.
- *
- * A spinning colored cube: real perspective projection, a depth buffer, an
- * indexed draw, ONE draw call per frame, ~8 slow frames (400ms each). Every
- * D3D9 call is HRESULT-checked and logged; every frame reads back a grid of
- * pixels and ASSERTS the cube is actually on screen (non-background) and that
- * it CHANGES between frames (proving the transform + depth path works, not a
- * static clear). A per-frame create/destroy of a scratch VB exercises the
- * residency add-at-alloc / remove-at-free path.
- *
- * Reuses the shadertri SM3 shaders (POSITION float3 + COLOR d3dcolor, 4x4 mvp
- * in vs c0..c3) — identical to a colored cube. Feed a real World*View*Proj
- * matrix (D3D row-vector convention) instead of identity.
- *
- * Goal: the smallest thing that must render correctly for ANY 3D game to work.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -38,7 +22,6 @@ static const unsigned char shadertri_ps_bytecode[] = {
 
 struct Vertex { float x, y, z; DWORD color; };
 
-/* ---- 4x4 row-major matrix math (D3D row-vector convention: v' = v*M) ---- */
 typedef float mat4[16];
 static void m_identity(mat4 m) {
   for (int i = 0; i < 16; i++) m[i] = 0.0f;
@@ -64,7 +47,6 @@ static void m_translate(mat4 m, float x, float y, float z) {
   m_identity(m);
   m[12] = x; m[13] = y; m[14] = z;
 }
-/* D3DXMatrixPerspectiveFovLH, row-vector */
 static void m_persp(mat4 m, float fovy, float aspect, float zn, float zf) {
   for (int i = 0; i < 16; i++) m[i] = 0.0f;
   float ys = 1.0f / tanf(fovy * 0.5f);
@@ -76,7 +58,6 @@ static void m_persp(mat4 m, float fovy, float aspect, float zn, float zf) {
   m[14] = -zn * zf / (zf - zn);
 }
 
-/* readback one pixel of the current RT (BGRA in memory -> return 0x00RRGGBB) */
 static DWORD read_px(IDirect3DDevice9 *dev, UINT x, UINT y) {
   IDirect3DSurface9 *rt = NULL, *sys = NULL;
   D3DSURFACE_DESC d;
@@ -89,7 +70,7 @@ static DWORD read_px(IDirect3DDevice9 *dev, UINT x, UINT y) {
     if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(dev, rt, sys)) &&
         SUCCEEDED(IDirect3DSurface9_LockRect(sys, &lr, NULL, D3DLOCK_READONLY))) {
       DWORD raw = ((DWORD *)((BYTE *)lr.pBits + y * lr.Pitch))[x];
-      c = raw & 0x00ffffff;   /* drop X/A */
+      c = raw & 0x00ffffff;
       IDirect3DSurface9_UnlockRect(sys);
     }
     IDirect3DSurface9_Release(sys);
@@ -146,7 +127,6 @@ int main(void) {
   IDirect3DVertexDeclaration9 *vdecl = NULL;
   CHECK(IDirect3DDevice9_CreateVertexDeclaration(dev, decl, &vdecl));
 
-  /* unit cube, 8 corners, distinct colors */
   static const struct Vertex verts[8] = {
       {-0.5f,-0.5f,-0.5f, 0xFFFF0000}, { 0.5f,-0.5f,-0.5f, 0xFF00FF00},
       { 0.5f, 0.5f,-0.5f, 0xFF0000FF}, {-0.5f, 0.5f,-0.5f, 0xFFFFFF00},
@@ -172,17 +152,15 @@ int main(void) {
   CHECK(IDirect3DDevice9_SetIndices(dev, ib));
   CHECK(IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, getenv("NOZ") ? D3DZB_FALSE : D3DZB_TRUE));
   CHECK(IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, getenv("NOZ") ? FALSE : TRUE));
-  CHECK(IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE)); /* see the whole cube */
+  CHECK(IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE));
   CHECK(IDirect3DDevice9_SetRenderState(dev, D3DRS_LIGHTING, FALSE));
 
-  /* shadertri_ps multiplies vertex color by ps c0 ("tint"). Uninitialized
-   * ps constants read as 0 -> black cube. Set white so color passes through. */
   { static const float tint[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     CHECK(IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, tint, 1)); }
 
   mat4 proj, view;
   m_persp(proj, 3.14159265f / 3.0f, (float)W / (float)H, 0.5f, 20.0f);
-  m_translate(view, 0.0f, 0.0f, 3.0f);   /* push cube 3 units into the screen */
+  m_translate(view, 0.0f, 0.0f, 3.0f);
 
   DWORD prev_center = 0xdeadbeef;
   int pass_visible = 0, pass_changed = 0;
@@ -190,7 +168,6 @@ int main(void) {
   for (int f = 0; f < FRAMES; f++) {
     LOG("======== FRAME %d ========", f);
 
-    /* residency stress: transient VB created+destroyed every frame */
     if (getenv("STRESS")) {
       IDirect3DVertexBuffer9 *scratch = NULL;
       CHECK(IDirect3DDevice9_CreateVertexBuffer(dev, 4096, D3DUSAGE_DYNAMIC, 0, D3DPOOL_DEFAULT, &scratch, NULL));
@@ -198,21 +175,14 @@ int main(void) {
     }
 
     mat4 world, wv, mvp;
-    /* FREEZE=N: every frame uses frame-N's rotation angle (test a specific
-     * matrix statically). Combine with STATICMVP to upload it only once. */
     float ang = (getenv("FREEZE") ? (float)atoi(getenv("FREEZE")) : (float)f) * 0.03f;
     m_rot_y(world, ang);
     m_mul(wv, world, view);
     m_mul(mvp, wv, proj);
     LOG("mvp row0 = %.3f %.3f %.3f %.3f", mvp[0], mvp[1], mvp[2], mvp[3]);
     LOG("mvp row3 = %.3f %.3f %.3f %.3f", mvp[12], mvp[13], mvp[14], mvp[15]);
-    /* STATICMVP: set constants only on frame 0 to isolate the upload ring.
-     * SAMEVAL: call every frame but always with frame-0 matrix (isolates the
-     * per-frame Alloc/offset-bump from the constant VALUE). */
-    /* Transpose before upload. HLSL vs default column-major reads c0..c3 as
-     * matrix COLUMNS (mul(pos, M) via dp4), so D3D apps pass M^T. Identity
-     * rotation is symmetric -> frame 0 works either way; rotation exposes it.
-     * NOTR disables this (to reproduce the off-screen-geometry failure). */
+    /* HLSL's default column-major layout reads c0..c3 as matrix columns
+     * (mul(pos, M) via dp4), so D3D row-vector apps must upload M^T. */
     if (!getenv("NOTR")) {
       mat4 mvpT;
       for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) mvpT[c*4+r] = mvp[r*4+c];
@@ -231,13 +201,11 @@ int main(void) {
     CHECK(IDirect3DDevice9_EndScene(dev));
     CHECK(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL));
 
-    /* readback churn isolation: with RARERB set, only read frames 0,1,last */
     if (getenv("RARERB") && f >= 2 && f != FRAMES - 1) { continue; }
     if (getenv("NORB")) { continue; }
 
-    /* readback: center + a 3x3 grid; log, and assert cube is visible + moving */
     DWORD center = read_px(dev, W / 2, H / 2);
-    DWORD bg = 0x101028;   /* the clear color, BGRA-dropped */
+    DWORD bg = 0x101028;
     LOG("readback center(%d,%d) = 0x%06lx  (bg=0x%06lx)", W/2, H/2,
         (unsigned long)center, (unsigned long)bg);
     for (int gy = 0; gy < 3; gy++) {

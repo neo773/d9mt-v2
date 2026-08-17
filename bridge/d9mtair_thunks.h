@@ -1,8 +1,3 @@
-/* d9mt addition: PE-side entry points for the AIR shader-compile thunks
- * (codes 154..156), modeled on airconv_thunks.h. Param structs are the
- * d9mtair ABI (../airlib/d9mtair.h): all members 8-byte/arch-invariant,
- * so no wow64 twins are needed. */
-
 #ifndef __D9MTAIR_THUNKS_H
 #define __D9MTAIR_THUNKS_H
 

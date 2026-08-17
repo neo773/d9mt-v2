@@ -1,15 +1,3 @@
-/*
- * air_compiler: D3D9 SM2/SM3 shader bytecode -> dxbc-spirv IR -> AIR.
- *
- * Host CLI driving the same front-end + legalization pipeline the v2
- * driver uses, then the AIR backend instead of the SPIR-V one.
- *
- *   air_compiler --test-vs --dump-ir          # built-in shadertri VS
- *   air_compiler shader.bin -o out.metallib   # raw SM3 bytecode file
- *
- * Build: v2/scripts/build-air-compiler.sh
- */
-
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -31,7 +19,6 @@
 
 namespace {
 
-/* Built-in test shaders: the proven code_shader.exe SM3 pair */
 const uint8_t kTestVs[] = {
 #include "../../test/shadertri_vs_bytecode.inc"
 };
@@ -48,21 +35,11 @@ struct Args {
   std::string name = "main";
   bool dumpIr = false;
   bool dumpAir = false;
-  /* run the driver-style legacy-builtin -> CBV lowering on the AIR path
-   * too (the reference path always lowers; this exercises DclCbv /
-   * DescriptorLoad / BufferLoad in AirBuilder) */
   bool lowerLegacy = false;
-  /* argument-buffer binding model (Options::useArgumentBuffer) */
   bool argBuffer = false;
-  /* hand-built spec-constant IR module instead of SM3 input (spec
-   * constants are driver-generated, not sm3-reachable) */
   bool testSpec = false;
 };
 
-/* Hand-built legalized IR: a PS whose color is selected by u32 spec
- * constant 0 (0 -> blue, 1 -> red, 2 -> green). Exercises DclSpecConstant
- * through BOTH backends: SpirvBuilder -> OpSpecConstant -> SPIRV-Cross MSL
- * function constant; AirBuilder -> AIR function constant. */
 void buildSpecTestIr(dxbc_spv::ir::Builder& b) {
   using namespace dxbc_spv;
 
@@ -94,8 +71,6 @@ void buildSpecTestIr(dxbc_spv::ir::Builder& b) {
   b.add(ir::Op::FunctionEnd());
 }
 
-/* Manifest describing one compiled shader's runtime interface, consumed by
- * air_diff_test so it can bind buffers/textures correctly for either path. */
 struct Manifest {
   std::string entry;
   std::string stage;
@@ -106,13 +81,11 @@ struct Manifest {
   std::vector<Resource> samplers;
   struct Spec { std::string name; uint32_t index; };
   std::vector<Spec> specConstants;
-  /* output interface, identical for both paths (derived from the IR) */
   uint32_t renderTargets = 1u;
   bool depthOut = false;
   bool pointSize = false;
 };
 
-/* Output-interface facts both paths share, straight from the IR decls. */
 void scanIrFeatures(const dxbc_spv::ir::Builder& builder, Manifest& m) {
   bool isPixel = false;
   for (auto iter = builder.getDeclarations().first;
@@ -178,7 +151,6 @@ void writeManifest(const Manifest& m, const std::string& path) {
   out << "\"samplers\":["; writeResources(m.samplers); out << "]}\n";
 }
 
-/* Driver-style lowering: legacy D3D9 builtins -> plain CBVs */
 void lowerLegacyBuiltins(dxbc_spv::ir::Builder& builder) {
   std::vector<dxbc_spv::ir::BuiltIn> legacyBuiltins;
   for (auto iter = builder.getDeclarations().first;
@@ -197,15 +169,10 @@ void lowerLegacyBuiltins(dxbc_spv::ir::Builder& builder) {
     ioPass.lowerLegacyBuiltInToCbv(builtIn, 0u, regIndex++);
 }
 
-/* Reference path: SpirvBuilder -> SPIRV-Cross MSL (default direct bindings).
- * The runner compiles the .metal with xcrun; only the math must match. */
 bool emitReferenceMsl(
         const dxbc_spv::ir::Builder&  srcBuilder,
         const std::string&            mslPath,
         const std::string&            manifestPath) {
-  /* SpirvBuilder cannot consume legacy D3D9 builtins directly (asserts);
-   * lower them to CBVs the standard way first. Work on a copy so the AIR
-   * path keeps its own binding model. */
   dxbc_spv::ir::Builder builder = srcBuilder;
   lowerLegacyBuiltins(builder);
 
@@ -322,7 +289,7 @@ bool parseArgs(int argc, char** argv, Args& args) {
   return !args.bytecode.empty() || args.testSpec;
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
   Args args;

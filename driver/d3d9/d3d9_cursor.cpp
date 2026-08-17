@@ -30,9 +30,7 @@ namespace dxvk {
 
 
   void D3D9Cursor::UpdateCursor(int X, int Y) {
-    // SetCursorPosition is used to directly update the position of software cursors,
-    // but keep track of the cursor position even when using hardware cursors, in order
-    // to ensure a smooth transition/overlap from one type to the other.
+    // Position is tracked even for hardware cursors so switching cursor types stays smooth.
     m_sCursor.X = X;
     m_sCursor.Y = Y;
 
@@ -48,7 +46,6 @@ namespace dxvk {
 
 
   BOOL D3D9Cursor::ShowCursor(BOOL bShow) {
-    // Cursor visibility remains unchanged (typically FALSE) if the cursor isn't set.
     if (unlikely(!IsHardwareCursor() && !IsActiveSoftwareCursor()))
       return m_visible;
 
@@ -88,7 +85,6 @@ namespace dxvk {
 
 
   void D3D9Cursor::SetSoftwareCursor(UINT XHotSpot, UINT YHotSpot, UINT Width, UINT Height) {
-    // Make sure to hide the win32 cursor.
     ::SetCursor(nullptr);
 
     if (IsHardwareCursor())

@@ -1,7 +1,3 @@
-/* d9mt v2 backface-culling test: draws two triangles with opposite winding
- * under D3DCULL_CCW. Correct culling shows exactly ONE triangle (the other is
- * back-facing and culled); if culling is ignored, both triangles show.
- */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -62,8 +58,6 @@ int main(void) {
   if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl)))
     return 1;
 
-  /* Left triangle is clockwise (front-facing under D3DCULL_CCW), right triangle
-   * is counter-clockwise (back-facing) — so the right one should be culled. */
   static const struct Vertex data[6] = {
       {-0.8f, 0.7f, 0.5f, 0xFF40C0FF}, {-0.4f, -0.7f, 0.5f, 0xFF40C0FF}, {-0.8f, -0.7f, 0.5f, 0xFF40C0FF},
       {0.8f, 0.7f, 0.5f, 0xFFFFC040},  {0.4f, -0.7f, 0.5f, 0xFFFFC040},  {0.8f, -0.7f, 0.5f, 0xFFFFC040}};

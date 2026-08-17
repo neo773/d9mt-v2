@@ -1,14 +1,3 @@
-/*
- * metallib_load_test: loads a .metallib via MTLDevice newLibraryWithData,
- * builds a render pipeline from vs_main/fs_main, renders one triangle
- * offscreen, and verifies center/corner pixels.
- *
- * Exit 0 = the AIR blob is fully accepted AND renders correctly.
- * Prints the exact NSError at whichever stage fails.
- *
- * Build: v2/scripts/build-air-prototype.sh
- */
-
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include <cstdio>
@@ -82,9 +71,7 @@ int main(int argc, char** argv) {
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> target = [device newTextureWithDescriptor:td];
 
-    /* full-ish triangle, red/green/blue corners */
     float verts[] = {
-      /* pos                 color */
       -1.f, -1.f, 0.f, 1.f,  1.f, 0.f, 0.f, 1.f,
        3.f, -1.f, 0.f, 1.f,  0.f, 1.f, 0.f, 1.f,
       -1.f,  3.f, 0.f, 1.f,  0.f, 0.f, 1.f, 1.f,
@@ -120,10 +107,9 @@ int main(int argc, char** argv) {
     [target getBytes:pixels.data() bytesPerRow:W * 4
       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
 
-    /* center should be an interpolated non-black color */
     auto px = [&](uint32_t x, uint32_t y) {
       const uint8_t* p = &pixels[(y * W + x) * 4];
-      return std::array<uint8_t, 4>{ p[2], p[1], p[0], p[3] }; /* BGRA->RGBA */
+      return std::array<uint8_t, 4>{ p[2], p[1], p[0], p[3] };
     };
     auto center = px(W / 2, H / 2);
     printf("center pixel RGBA: %u %u %u %u\n",

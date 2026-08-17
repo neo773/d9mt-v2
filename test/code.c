@@ -1,4 +1,3 @@
-/* d9mt MVP test: colored triangle through the real D3D9 API. */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -66,9 +65,9 @@ int main(void) {
   printf("CreateDevice OK\n");
 
   struct Vertex tri[3] = {
-      {400.0f, 100.0f, 0.5f, 1.0f, 0xFFFF0000}, /* top: red */
-      {700.0f, 500.0f, 0.5f, 1.0f, 0xFF00FF00}, /* right: green */
-      {100.0f, 500.0f, 0.5f, 1.0f, 0xFF0000FF}, /* left: blue */
+      {400.0f, 100.0f, 0.5f, 1.0f, 0xFFFF0000},
+      {700.0f, 500.0f, 0.5f, 1.0f, 0xFF00FF00},
+      {100.0f, 500.0f, 0.5f, 1.0f, 0xFF0000FF},
   };
 
   int frames = 0;

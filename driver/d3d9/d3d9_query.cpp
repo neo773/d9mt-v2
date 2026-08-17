@@ -91,8 +91,6 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9Query::Issue(DWORD dwIssueFlags) {
-    // Note: No need to submit to CS if we don't do anything!
-
     if (dwIssueFlags == D3DISSUE_BEGIN) {
       if (QueryBeginnable(m_queryType)) {
         if (m_state == D3D9_VK_QUERY_BEGUN && QueryEndable(m_queryType)) {
@@ -132,9 +130,6 @@ namespace dxvk {
     }
 
     if (m_state == D3D9_VK_QUERY_CACHED) {
-      // Query data was already retrieved once.
-      // Use cached query data to prevent having to check the VK event
-      // and having to iterate over the VK queries again
       if (likely(pData && dwSize)) {
         if (m_queryType != D3DQUERYTYPE_EVENT) {
           memcpy(pData, &m_dataCache, dwSize);
@@ -147,8 +142,6 @@ namespace dxvk {
 
     HRESULT hr = this->GetQueryData(pData, dwSize);
 
-    // If we get S_FALSE and it's not from the fact
-    // they didn't call end, do some flushy stuff...
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();
       m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);
@@ -159,16 +152,12 @@ namespace dxvk {
 
 
   HRESULT D3D9Query::GetQueryData(void* pData, DWORD dwSize) {
-    // Let the game know that calling end might be a good idea...
     if (m_state == D3D9_VK_QUERY_BEGUN)
       return S_FALSE;
 
     if (unlikely(!pData && dwSize))
       return D3DERR_INVALIDCALL;
 
-    // The game forgot to even issue the query!
-    // Let's do it for them...
-    // This will issue both the begin, and the end.
     if (m_state == D3D9_VK_QUERY_INITIAL)
       this->Issue(D3DISSUE_END);
 

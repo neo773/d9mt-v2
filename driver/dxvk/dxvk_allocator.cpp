@@ -32,16 +32,12 @@ namespace dxvk {
     while (index--) {
       PageRange entry = m_freeList[index];
 
-      // The chunk index is the same regardless of alignment.
-      // Skip chunk if it does not accept new allocations.
       uint32_t chunkIndex = entry.index >> ChunkPageBits;
 
       if (unlikely(m_chunks[chunkIndex].disabled))
         continue;
 
       if (likely(!(entry.index & (alignment - 1u)))) {
-        // If the current free range is sufficiently aligned, we can use
-        // it as-is and simply modify the remaining free list entry.
         uint32_t pageIndex = entry.index;
 
         entry.index += count;
@@ -52,21 +48,17 @@ namespace dxvk {
         m_chunks[chunkIndex].pagesUsed += count;
         return pageIndex;
       } else {
-        // Apply alignment and skip if the free range is too small.
         uint32_t pageIndex = align(entry.index, alignment);
 
         if (pageIndex + count > entry.index + entry.count)
           continue;
 
-        // Insert free range before the first allocated page,
-        // guaranteed to be non-empty at this point.
         PageRange prevRange = { };
         prevRange.index = entry.index;
         prevRange.count = pageIndex - entry.index;
 
         insertFreeRange(prevRange, index);
 
-        // Insert free range after the last allocated page.
         PageRange nextRange = { };
         nextRange.index = pageIndex + count;
         nextRange.count = entry.index + entry.count - nextRange.index;
@@ -80,7 +72,7 @@ namespace dxvk {
       }
     }
 
-    return -1;    
+    return -1;
   }
 
 
@@ -93,8 +85,6 @@ namespace dxvk {
 
 
   bool DxvkPageAllocator::freePages(uint32_t index, uint32_t count) {
-    // Use the lookup table to quickly determine which
-    // free ranges we can actually merge with
     int32_t prevRange = -1;
     int32_t nextRange = -1;
 
@@ -106,14 +96,12 @@ namespace dxvk {
 
     if (prevRange < 0) {
       if (nextRange < 0) {
-        // No adjacent range, need to insert a new one
         PageRange range = { };
         range.index = index;
         range.count = count;
 
         insertFreeRange(range, -1);
       } else {
-        // One adjacent range after the current one
         PageRange range = m_freeList[nextRange];
         range.index = index;
         range.count += count;
@@ -121,14 +109,11 @@ namespace dxvk {
         insertFreeRange(range, nextRange);
       }
     } else if (nextRange < 0) {
-        // One adjacent range before the current one
       PageRange range = m_freeList[prevRange];
       range.count += count;
 
       insertFreeRange(range, prevRange);
     } else {
-      // Two adjacent ranges, need to merge with both
-      // and replace one while removing the other.
       PageRange prev = m_freeList[prevRange];
       PageRange next = m_freeList[nextRange];
 
@@ -138,11 +123,6 @@ namespace dxvk {
 
       PageRange emptyRange = { };
 
-      // Remove the range at the higher index, then replace the one at the
-      // lower index with the merged range. The order is important here since
-      // having overlapping entries in the free list would cause issues for
-      // the look-up table, and using the correct indices is important since
-      // the index for the second operation could otherwise be invalidated.
       insertFreeRange(emptyRange, std::max(prevRange, nextRange));
       insertFreeRange(mergedRange, std::min(prevRange, nextRange));
     }
@@ -222,7 +202,6 @@ namespace dxvk {
 
 
   void DxvkPageAllocator::getPageAllocationMask(uint32_t chunkIndex, uint32_t* pageMask) const {
-    // Initialize bit mask with all ones
     const auto& chunk = m_chunks[chunkIndex];
 
     uint32_t fullCount = chunk.pageCount / 32u;
@@ -234,8 +213,6 @@ namespace dxvk {
     if (lastCount)
       pageMask[fullCount] = (1u << lastCount) - 1u;
 
-    // Iterate over free list and set all pages included
-    // in the current chunk to 0.
     for (PageRange range : m_freeList) {
       if ((range.index >> ChunkPageBits) != chunkIndex)
         continue;
@@ -246,7 +223,6 @@ namespace dxvk {
       uint32_t shift = range.index % 32u;
 
       if (shift + range.count < 32u) {
-        // Entire free range fits in one single mask
         pageMask[index] ^= ((1u << range.count) - 1u) << shift;
       } else {
         if (shift) {
@@ -267,14 +243,9 @@ namespace dxvk {
 
 
   int32_t DxvkPageAllocator::searchFreeList(uint32_t count) {
-    // Find the insertion index of a free list entry with the given page count.
-    // All entries with an index lower than but not equal to the return value
-    // will have a page count greater than or equal to count.
     if (unlikely(m_freeList.empty()))
       return 0u;
 
-    // Do a binary search, but optimize for the common
-    // case where we request a small page count
     uint32_t lo = 0u;
     uint32_t hi = m_freeList.size();
 
@@ -315,15 +286,11 @@ namespace dxvk {
       index = count++;
     }
 
-    // Remove old range from the LUT since it gets replaced
     PageRange oldRange = m_freeList[index];
 
     if (likely(oldRange.count))
       removeLutEntry(oldRange);
 
-    // Move range within the free list until the proper ordering
-    // is restored again and update LUT entries for all ranges we
-    // move in the process.
     if (newRange.count < oldRange.count) {
       while (index + 1u < count) {
         PageRange next = m_freeList[index + 1u];
@@ -371,19 +338,15 @@ namespace dxvk {
     uint32_t listIndex = computeListIndex(size);
     uint32_t poolCapacity = computePoolCapacity(listIndex);
 
-    // Obtain a page for the size category
     int32_t pageIndex = m_pageLists[listIndex].head;
 
     if (likely(pageIndex >= 0)) {
       uint32_t chunkIndex = uint32_t(pageIndex) >> DxvkPageAllocator::ChunkPageBits;
 
-      // If the selected page is from a dead chunk, do not allocate
-      // into it anymore so that the chunk can actually be freed.
       if (unlikely(!m_pageAllocator->chunkIsAvailable(chunkIndex))) {
         int32_t nextIndex = pageIndex;
 
         do {
-          // This works because we add pages to the end
           removePageFromList(nextIndex, listIndex);
           addPageToList(nextIndex, listIndex);
 
@@ -391,7 +354,6 @@ namespace dxvk {
           chunkIndex = uint32_t(nextIndex) >> DxvkPageAllocator::ChunkPageBits;
         } while (nextIndex != pageIndex && !m_pageAllocator->chunkIsAvailable(chunkIndex));
 
-        // Allocate a new page if the entire list is dead
         pageIndex = nextIndex != pageIndex ? nextIndex : -1;
       }
     }
@@ -400,14 +362,11 @@ namespace dxvk {
       if ((pageIndex = allocPage(listIndex)) < 0)
         return -1;
 
-      // Initialize suballocator for the page
       PageInfo& page = m_pageInfos[pageIndex];
 
       if (likely(poolCapacity <= MaskBits)) {
-        // Initialize free mask with the first item marked as used
         page.pool = (MaskType(2) << (poolCapacity - 1u)) - 2u;
       } else {
-        // This is also going to have its first item used already
         page.pool = allocPagePool(poolCapacity);
       }
 
@@ -415,8 +374,6 @@ namespace dxvk {
     }
 
     if (likely(poolCapacity <= MaskBits)) {
-      // Fast path that uses the pool index as an allocator.
-      // Frequent allocations should ideally hit this path.
       PageInfo& page = m_pageInfos[pageIndex];
 
       uint32_t itemIndex = bit::tzcnt(page.pool);
@@ -430,13 +387,11 @@ namespace dxvk {
       PageInfo& page = m_pageInfos[pageIndex];
       PagePool& pool = m_pagePools[page.pool];
 
-      // Check top-level masks to find which low-level mask to use
       uint32_t maskIndex = bit::tzcnt(uint32_t(pool.freeMask));
       MaskType maskBit = MaskType(1) << maskIndex;
 
       pool.usedMask |= maskBit;
 
-      // Allocate item from the selected low-level mask
       MaskType& mask = pool.subPools[maskIndex];
       uint32_t itemIndex = bit::tzcnt(mask) + maskIndex * MaskBits;
 
@@ -460,9 +415,6 @@ namespace dxvk {
 
     uint32_t poolCapacity = computePoolCapacity(listIndex);
 
-    // Return the allocation to the given pool and add the page back
-    // to the free list if it was previously full. If the page is now
-    // unused, return it to the allocator.
     if (likely(poolCapacity <= MaskBits)) {
       PageInfo& page = m_pageInfos[pageIndex];
 
@@ -528,9 +480,6 @@ namespace dxvk {
 
 
   void DxvkPoolAllocator::addPageToList(uint32_t pageIndex, uint32_t listIndex) {
-    // Add page to the end of the list. Allocations within a single page
-    // often have similar lifetimes, so not reusing the page immediately
-    // increases the chances of it getting freed.
     PageInfo& page = m_pageInfos[pageIndex];
     page.prev = m_pageLists[listIndex].tail;
 
@@ -544,9 +493,6 @@ namespace dxvk {
 
 
   void DxvkPoolAllocator::removePageFromList(uint32_t pageIndex, uint32_t listIndex) {
-    // The list of non-full pages is organized in a double-linked list so
-    // that entries can get removed in constant time whenever a page gets
-    // filled or removed.
     PageInfo& page = m_pageInfos[pageIndex];
 
     if (page.prev >= 0)
@@ -569,19 +515,15 @@ namespace dxvk {
     uint32_t poolIndex;
 
     if (unlikely(m_freePool < 0)) {
-      // Allocate new pool as necessary
       pool = &m_pagePools.emplace_back();
       pool->subPools.fill(MaskType(-1));
 
       poolIndex = uint32_t(m_pagePools.size() - 1u);
     } else {
-      // Otherwise, just use the free list
       pool = &m_pagePools[m_freePool];
       poolIndex = std::exchange(m_freePool, pool->nextPool);
     }
 
-    // Initialize free mask to the correct capacity. Everything
-    // else is assumed to be in its default initialized state.
     uint32_t maskCount = capacity / MaskBits;
     pool->freeMask = (1u << maskCount) - 1u;
     pool->usedMask = 1u;
@@ -601,15 +543,11 @@ namespace dxvk {
   uint32_t DxvkPoolAllocator::computeListIndex(uint64_t size) {
     size = std::max(size, MinSize);
 
-    // Use leading zero count to determine the size category and
-    // basically round up to the next power of two. Pools are
-    // ordered by allocation size in descending order.
     return bit::lzcnt(uint32_t(size) - 1u) - (33u - DxvkPageAllocator::PageBits);
   }
 
 
   uint32_t DxvkPoolAllocator::computePoolCapacity(uint32_t index) {
-    // Number of objects we can allocate in the pool
     return 2u << index;
   }
 

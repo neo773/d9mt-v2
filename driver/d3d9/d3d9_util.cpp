@@ -2,17 +2,13 @@
 
 #include "../util/util_win32_compat.h"
 
-// ADAPT (doc 02 §2): 1:1 Vk*->Mtl* retype of the enum decoders. Switch bodies are
-// byte-for-byte the DXVK originals; only the return enum type flips. See per-function
-// notes where the Metal enum has no analogue for a D3D9 value.
-
 namespace dxvk {
 
   typedef HRESULT (STDMETHODCALLTYPE *D3DXDisassembleShader) (
     const void*      pShader,
           BOOL       EnableColorCode,
           char*      pComments,
-          ID3DBlob** ppDisassembly); // ppDisassembly is actually a D3DXBUFFER, but it has the exact same vtable as a ID3DBlob at the start.
+          ID3DBlob** ppDisassembly);
 
   D3DXDisassembleShader g_pfnDisassembleShader = nullptr;
 
@@ -51,12 +47,9 @@ namespace dxvk {
     if (MultiSample == D3DMULTISAMPLE_NONMASKABLE)
       sampleCount = 1u << MultisampleQuality;
 
-    // 16 is the largest entry in the D3DMULTISAMPLE_TYPE enum
-    // and the largest sample count realistically supported by any hardware.
     if (sampleCount > 16u)
       return D3DERR_INVALIDCALL;
 
-    // Check if this is a power of two...
     if (sampleCount & (sampleCount - 1))
       return D3DERR_NOTAVAILABLE;
 
@@ -70,7 +63,7 @@ namespace dxvk {
   MtlFormat GetPackedDepthStencilFormat(D3D9Format Format) {
     switch (Format) {
     case D3D9Format::D15S1:
-      return MtlFormat::Depth32Float_Stencil8; // This should never happen!
+      return MtlFormat::Depth32Float_Stencil8;
 
     case D3D9Format::D16:
     case D3D9Format::D16_LOCKABLE:
@@ -79,9 +72,9 @@ namespace dxvk {
 
     case D3D9Format::D24X8:
     case D3D9Format::DF24:
-      // D24-class images are created as Depth32Float on Apple Silicon
-      // (Depth24Unorm_Stencil8 = Intel-only, asserts on texture creation) —
-      // the packed readback layout must match the ACTUAL image format.
+      // Depth24Unorm_Stencil8 is Intel-only and asserts on texture creation on
+      // Apple Silicon, where D24-class images are backed by Depth32Float instead;
+      // the packed readback layout must match that actual image format.
       return MtlFormat::Depth32Float;
 
     case D3D9Format::D24X4S4:
@@ -108,7 +101,7 @@ namespace dxvk {
     MtlTextureUsage features = MtlTextureUsageShaderRead;
 
     if (Usage & D3DUSAGE_DEPTHSTENCIL)
-      features |= MtlTextureUsageRenderTarget; // DS attachment folds into RT usage on Metal
+      features |= MtlTextureUsageRenderTarget;
 
     if (Usage & D3DUSAGE_RENDERTARGET)
       features |= MtlTextureUsageRenderTarget;
@@ -245,8 +238,6 @@ namespace dxvk {
 
   MtlTriangleFillMode DecodeFillMode(D3DFILLMODE Mode) {
     switch (Mode) {
-      // Metal has no POINT fill mode (MTLTriangleFillMode is Fill/Lines only);
-      // D3DFILL_POINT falls back to Lines. PHASE-C: point-fill emulation if needed.
       case D3DFILL_POINT:     return MtlTriangleFillMode::Lines;
       case D3DFILL_WIREFRAME: return MtlTriangleFillMode::Lines;
       default:
@@ -266,26 +257,24 @@ namespace dxvk {
     switch (Type) {
       case D3DDECLTYPE_FLOAT1:    return MtlFormat::R32Float;
       case D3DDECLTYPE_FLOAT2:    return MtlFormat::RG32Float;
-      // FLOAT3 has no 3-component 32-bit PIXEL format, but Metal's VERTEX format
-      // Float3 exists. Use the vertex-only RGB32Float marker so the attribute is
-      // read as Float3 (shader w defaults to 1.0) — promoting to Float4 read a
-      // stale w=0 and broke D3D9 FLOAT3/XYZRHW positions (GTA IV 2D).
+      // Use the vertex-only RGB32Float marker (not a promotion to Float4): reading
+      // this as Float4 previously left a stale w=0 instead of the required 1.0
+      // default and broke D3D9 FLOAT3/XYZRHW positions (GTA IV 2D).
       case D3DDECLTYPE_FLOAT3:    return MtlFormat::RGB32Float;
       case D3DDECLTYPE_FLOAT4:    return MtlFormat::RGBA32Float;
       case D3DDECLTYPE_D3DCOLOR:  return MtlFormat::BGRA8Unorm;
-      // Scaled vertex formats have no MtlFormat (pixel) analogue -> PHASE-C.
-      case D3DDECLTYPE_UBYTE4:    return MtlFormat::Invalid; // R8G8B8A8_USCALED
-      case D3DDECLTYPE_SHORT2:    return MtlFormat::Invalid; // R16G16_SSCALED
-      case D3DDECLTYPE_SHORT4:    return MtlFormat::Invalid; // R16G16B16A16_SSCALED
+      case D3DDECLTYPE_UBYTE4:    return MtlFormat::Invalid;
+      case D3DDECLTYPE_SHORT2:    return MtlFormat::Invalid;
+      case D3DDECLTYPE_SHORT4:    return MtlFormat::Invalid;
       case D3DDECLTYPE_UBYTE4N:   return MtlFormat::RGBA8Unorm;
       case D3DDECLTYPE_SHORT2N:   return MtlFormat::RG16Snorm;
       case D3DDECLTYPE_SHORT4N:   return MtlFormat::RGBA16Snorm;
       case D3DDECLTYPE_USHORT2N:  return MtlFormat::RG16Unorm;
       case D3DDECLTYPE_USHORT4N:  return MtlFormat::RGBA16Unorm;
-      case D3DDECLTYPE_UDEC3:     return MtlFormat::Invalid; // A2B10G10R10_USCALED
+      case D3DDECLTYPE_UDEC3:     return MtlFormat::Invalid;
       case D3DDECLTYPE_FLOAT16_2: return MtlFormat::RG16Float;
       case D3DDECLTYPE_FLOAT16_4: return MtlFormat::RGBA16Float;
-      case D3DDECLTYPE_DEC3N:     return MtlFormat::Invalid; // A2B10G10R10_SNORM (RGB10A2 is unorm here)
+      case D3DDECLTYPE_DEC3N:     return MtlFormat::Invalid;
       case D3DDECLTYPE_UNUSED:
       default:                    return MtlFormat::Invalid;
     }

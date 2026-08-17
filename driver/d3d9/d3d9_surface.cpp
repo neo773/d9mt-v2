@@ -53,7 +53,7 @@ namespace dxvk {
       D3DRESOURCETYPE type = m_baseTexture->GetType();
       if (type == D3DRTYPE_TEXTURE)
         static_cast<D3D9Texture2D*>  (m_baseTexture)->AddRefPrivate();
-      else //if (type == D3DRTYPE_CUBETEXTURE)
+      else
         static_cast<D3D9TextureCube*>(m_baseTexture)->AddRefPrivate();
 
       return;
@@ -67,7 +67,7 @@ namespace dxvk {
       D3DRESOURCETYPE type = m_baseTexture->GetType();
       if (type == D3DRTYPE_TEXTURE)
         static_cast<D3D9Texture2D*>  (m_baseTexture)->ReleasePrivate();
-      else //if (type == D3DRTYPE_CUBETEXTURE)
+      else
         static_cast<D3D9TextureCube*>(m_baseTexture)->ReleasePrivate();
 
       return;
@@ -88,8 +88,6 @@ namespace dxvk {
       *ppvObject = ref(this);
       return S_OK;
     }
-
-    // PHASE-C6: ID3D9VkInteropTexture path DROPPED (Vulkan interop, doc 02 §DROP).
 
     if (logQueryInterfaceError(__uuidof(IDirect3DSurface9), riid)) {
       Logger::warn("D3D9Surface::QueryInterface: Unknown interface query");
@@ -130,9 +128,6 @@ namespace dxvk {
     auto& desc = *(m_texture->Desc());
     D3DRESOURCETYPE type = m_texture->GetType();
 
-    // LockRect clears any existing content present in pLockedRect,
-    // for surfaces in D3DPOOL_DEFAULT. D3D8 additionally clears the content
-    // for non-D3DPOOL_DEFAULT surfaces if their type is not D3DRTYPE_TEXTURE.
     if (desc.Pool == D3DPOOL_DEFAULT
      || (m_texture->Device()->IsD3D8Compatible() && type != D3DRTYPE_TEXTURE)) {
       pLockedRect->pBits = nullptr;
@@ -145,9 +140,6 @@ namespace dxvk {
       const bool isBlockAlignedFormat = blockSize.Width > 0 && blockSize.Height > 0;
       const bool isSystemMemSurface   = desc.Pool == D3DPOOL_SYSTEMMEM && type == D3DRTYPE_SURFACE;
 
-      // The boundaries of pRect are validated for D3DPOOL_DEFAULT surfaces
-      // with formats which need to be block aligned, surfaces created via
-      // CreateImageSurface and D3D8 cube textures outside of D3DPOOL_DEFAULT
       if ((isBlockAlignedFormat && desc.Pool == D3DPOOL_DEFAULT) || isSystemMemSurface
        || (m_texture->Device()->IsD3D8Compatible() &&
            desc.Pool != D3DPOOL_DEFAULT && type == D3DRTYPE_CUBETEXTURE)) {
@@ -156,14 +148,11 @@ namespace dxvk {
 
         const bool invalidDimensions = isSystemMemSurface ? (width < 0 || height < 0) : (width <= 0 || height <= 0);
 
-        // Negative coordinates
+        // A zero-length rect on D3DPOOL_SYSTEMMEM surfaces is tolerated because
+        // Legends of Eisenwald locks/unlocks one and crashes if this rejects it.
         if (pRect->left < 0 || pRect->right  < 0
          || pRect->top  < 0 || pRect->bottom < 0
-        // Negative or zero length dimensions (just negative in case of
-        // D3DPOOL_SYSTEMMEM surfaces, as Legends of Eisenwald tries to lock
-        // and unlock a zero-length pRect and crashes if this fails)
          || invalidDimensions
-        // Exceeding surface dimensions
          || static_cast<UINT>(pRect->right)  > std::max(1u, desc.Width  >> m_mipLevel)
          || static_cast<UINT>(pRect->bottom) > std::max(1u, desc.Height >> m_mipLevel))
           return D3DERR_INVALIDCALL;
@@ -215,7 +204,6 @@ namespace dxvk {
       return hr;
 
     D3DKMT_CREATEDCFROMMEMORY createInfo;
-    // In...
     createInfo.pMemory     = lockedRect.pBits;
     createInfo.Format      = static_cast<D3DFORMAT>(desc.Format);
     createInfo.Width       = desc.Width;
@@ -224,7 +212,6 @@ namespace dxvk {
     createInfo.hDeviceDc   = CreateCompatibleDC(NULL);
     createInfo.pColorTable = nullptr;
 
-    // Out...
     createInfo.hBitmap     = nullptr;
     createInfo.hDc         = nullptr;
 
@@ -233,7 +220,6 @@ namespace dxvk {
 
     DeleteDC(createInfo.hDeviceDc);
 
-    // These should now be set...
     m_hdc     = createInfo.hDc;
     m_hbitmap = createInfo.hBitmap;
 

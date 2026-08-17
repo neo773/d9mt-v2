@@ -122,7 +122,6 @@ namespace dxvk::wsi {
           DxvkWindowState* pState,
           uint32_t         width,
           uint32_t         height) {
-    // Adjust window position and size
     RECT newRect = { 0, 0, 0, 0 };
     RECT oldRect = { 0, 0, 0, 0 };
     
@@ -219,10 +218,8 @@ namespace dxvk::wsi {
     escape.hContext = HandleToUlong(hWindow);
     D3DKMTEscape(&escape);
 
-    // Find a display mode that matches what we need
     ::GetWindowRect(hWindow, &pState->win.rect);
 
-    // Change the window flags to remove the decoration etc.
     LONG style   = ::GetWindowLongW(hWindow, GWL_STYLE);
     LONG exstyle = ::GetWindowLongW(hWindow, GWL_EXSTYLE);
     
@@ -244,8 +241,7 @@ namespace dxvk::wsi {
   bool Win32WsiDriver::leaveFullscreenMode(
           HWND             hWindow,
           DxvkWindowState* pState) {
-    // Only restore the window style if the application hasn't
-    // changed them. This is in line with what native DXGI does.
+    // Only restore the window style if the app hasn't changed it, matching native DXGI.
     LONG curStyle   = ::GetWindowLongW(hWindow, GWL_STYLE)   & ~WS_VISIBLE;
     LONG curExstyle = ::GetWindowLongW(hWindow, GWL_EXSTYLE) & ~WS_EX_TOPMOST;
 
@@ -324,8 +320,7 @@ namespace dxvk::wsi {
     escape.hContext = HandleToUlong(hWindow);
     D3DKMTEscape(&escape);
 
-    // In D3D9, changing display modes re-forces the window
-    // to become top most, whereas in DXGI, it does not.
+    // D3D9 re-forces topmost on display mode changes; DXGI does not.
     if (forceTopmost) {
       ::SetWindowPos(hWindow, HWND_TOPMOST,
         bounds.left, bounds.top,
@@ -336,9 +331,6 @@ namespace dxvk::wsi {
         bounds.right - bounds.left, bounds.bottom - bounds.top, TRUE);
     }
   }
-
-
-  // PHASE-C: createSurface() removed (Vulkan WSI). Metal present via CAMetalLayer.
 
 }
 

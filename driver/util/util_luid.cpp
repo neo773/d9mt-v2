@@ -12,8 +12,6 @@ namespace dxvk {
 #ifndef _WIN32
   static BOOL AllocateLocallyUniqueId(LUID* luid) {
     static std::atomic<uint32_t> counter = { 0u };
-    // Unsigned bottom part is actually the first
-    // member of the struct.
     *luid = LUID{ ++counter, 0 };
     return TRUE;
   }
@@ -31,8 +29,8 @@ namespace dxvk {
 
       if (!AllocateLocallyUniqueId(&luid))
         Logger::err("Failed to allocate LUID");
-      
-        
+
+
       Logger::info(str::format("Adapter LUID ", s_luids.size(), ": ",
         std::hex, luid.HighPart, ":", luid.LowPart, std::dec));
 

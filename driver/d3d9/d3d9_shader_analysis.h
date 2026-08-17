@@ -40,12 +40,6 @@ struct D3D9ShaderConstantsInfo {
 using D3D9RenderTargetMask = uint8_t;
 using D3D9SamplerMask      = uint32_t;
 
-/**
- * \brief Packed semantic
- *
- * Extremely compact representation of a semantic
- * that can be used for look-up purposes.
- */
 struct D3D9PackedSemantic {
   D3D9PackedSemantic() = default;
 
@@ -71,56 +65,28 @@ struct D3D9PackedSemantic {
   uint8_t index : 4u;
 };
 
-/**
- * \brief Input signature
- *
- * Fixed-size structure that stores the semantic that
- * corresponds to any given vertex shader inputs.
- */
 class D3D9InputSignature {
-  // Abuse last element as the element count so that we
-  // can fit the entire structure into two SSE registers
+  // last element doubles as the element count so the struct fits two SSE registers
   static constexpr size_t SizeIndex = 31u;
 public:
 
   D3D9InputSignature() {
-    // Populate with 'invalid' semantics
     for (size_t i = 0u; i < SizeIndex; i++)
       m_entries[i] = 0xffu;
   }
 
-  /**
-   * \brief Number of valid entries in the signature
-   * \returns Number of signature entries
-   */
   uint32_t size() const {
     return m_entries[SizeIndex];
   }
 
-  /**
-   * \brief Retrieves packed representation of a semantic
-   *
-   * \param [in] index Input register index
-   * \returns Semantic bound to the given register
-   */
   D3D9PackedSemantic getPacked(uint32_t index) const {
     return D3D9PackedSemantic(m_entries[index]);
   }
 
-  /**
-   * \brief Retrieves semantic for a given register
-   *
-   * \param [in] index Input register index
-   * \returns Semantic bound to the given register
-   */
   dxbc_spv::sm3::Semantic get(uint32_t index) const {
     return dxbc_spv::sm3::Semantic(getPacked(index));
   }
 
-  /**
-   * \brief Adds an input register with a given semantic
-   * \param [in] semantic Semantic to add
-   */
   void add(dxbc_spv::sm3::Semantic semantic) {
     dxbc_spv_assert(semantic.index < 16u);
 
@@ -128,14 +94,6 @@ public:
     m_entries.at(index) = uint8_t(D3D9PackedSemantic(semantic));
   }
 
-  /**
-   * \brief Finds input register for a given semantic
-   *
-   * Returns an out-of-bounds index if no register
-   * uses the given semantic.
-   * \param [in] semantic Semantic to find
-   * \returns Register index, if any, for given semantic
-   */
   uint32_t find(dxbc_spv::sm3::Semantic semantic) const {
     auto packed = uint8_t(D3D9PackedSemantic(semantic));
 

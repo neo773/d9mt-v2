@@ -47,8 +47,6 @@ namespace dxvk {
 
       ULONG min, max, cur;
 
-      // Wine's implementation of these functions is a stub as of 6.10, which is fine
-      // since it uses select() in NtDelayExecution. This is only relevant for Windows.
       if (NtQueryTimerResolution && !NtQueryTimerResolution(&min, &max, &cur)) {
         m_sleepGranularity = TimerDuration(cur);
 
@@ -58,11 +56,9 @@ namespace dxvk {
         }
       }
     } else {
-      // Assume 1ms sleep granularity by default
       m_sleepGranularity = TimerDuration(1ms);
     }
 #else
-    // Assume 0.5ms sleep granularity by default
     m_sleepGranularity = TimerDuration(500us);
 #endif
   }
@@ -72,12 +68,9 @@ namespace dxvk {
     if (duration <= TimerDuration::zero())
       return t0;
 
-    // If necessary, initialize function pointers and some values
     if (!m_initialized.load())
       initialize();
 
-    // Busy-wait for the last couple of milliseconds since sleeping
-    // on Windows is highly inaccurate and inconsistent.
     TimerDuration sleepThreshold = m_sleepThreshold;
 
     if (m_sleepGranularity != TimerDuration::zero())
@@ -96,7 +89,6 @@ namespace dxvk {
       t0 = t1;
     }
 
-    // Busy-wait until we have slept long enough
     while (remaining > TimerDuration::zero()) {
       t1 = dxvk::high_resolution_clock::now();
       remaining -= std::chrono::duration_cast<TimerDuration>(t1 - t0);

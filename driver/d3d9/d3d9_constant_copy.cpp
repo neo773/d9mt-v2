@@ -23,7 +23,6 @@ namespace dxvk {
   }
 
   D3D9ConstantBufferLayout::D3D9ConstantBufferLayout(uint32_t useLength, const uint32_t* useMask) {
-    // Tightly pack accessed constants
     uint32_t dstIndex = 0u;
 
     for (uint32_t i = 0u; i < useLength; i++) {
@@ -59,7 +58,6 @@ namespace dxvk {
     uint32_t defIndex = 0u;
     uint32_t dstIndex = 0u;
 
-    // Build mask of shader-defined constants
     small_vector<uint32_t, 64u> defMask(align(maxCount, 32u) / 32u);
 
     for (uint32_t i = 0u; i < defCount; i++) {
@@ -67,7 +65,6 @@ namespace dxvk {
         defMask[defData[i].index / 32u] |= 1u << (defData[i].index % 32u);
     }
 
-    // Find index of highest statically indexed constant
     for (uint32_t i = useLength; i; i--) {
       if (useMask[i - 1u]) {
         m_minCount = std::min(32u * i + bit::tzcnt(useMask[i - 1u]) - 31u, maxCount);
@@ -75,8 +72,6 @@ namespace dxvk {
       }
     }
 
-    // More or less the inverse of the above logic. Keep all constants intact,
-    // but insert ranges for any constants that are shader-defined.
     for (uint32_t i = 0u; i < defMask.size(); i++) {
       uint32_t mask = defMask[i];
 
@@ -112,7 +107,6 @@ namespace dxvk {
       }
     }
 
-    // Insert final range of constants
     D3D9ConstantRange range = {};
     range.dstIndex = dstIndex;
     range.srcIndex = dstIndex;
@@ -130,7 +124,6 @@ namespace dxvk {
     if (!range.count)
       return;
 
-    // Merge with previous range if possible
     if (!m_ranges.empty()) {
       auto& last = m_ranges.back();
 
@@ -280,12 +273,10 @@ namespace dxvk {
 
   template<bool FlushNan>
   void D3D9ConstantBufferCopy::writeFloatRange(const D3D9ConstantBufferCopyArgs& args, const D3D9ConstantRange& range, uint32_t maxCount) const {
-    // Need to clamp constant count for the last dynamically indexed range
     auto dstPtr = reinterpret_cast<Vector4*>(args.floatBuffer) + range.dstIndex;
     auto dstCount = std::min<uint32_t>(range.count,
       maxCount - std::min<uint32_t>(range.dstIndex, maxCount));
 
-    // Need to select the correct source array
     auto srcBuffer = range.isShaderDefined
       ? m_floatLayout.getShaderDefinedConstants()
       : args.constFloatApi;

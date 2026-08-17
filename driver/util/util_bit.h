@@ -49,7 +49,7 @@ namespace dxvk::bit {
     std::memcpy(&dst, &src, sizeof(T));
     return dst;
   }
-  
+
   template<typename T>
   T extract(T value, uint32_t fst, uint32_t lst) {
     return (value >> fst) & ~(~T(0) << (lst - fst + 1));
@@ -72,11 +72,6 @@ namespace dxvk::bit {
     #elif defined(__BMI__)
     return __tzcnt_u32(n);
     #elif defined(DXVK_ARCH_X86) && (defined(__GNUC__) || defined(__clang__))
-    // tzcnt is encoded as rep bsf, so we can use it on all
-    // processors, but the behaviour of zero inputs differs:
-    // - bsf:   zf = 1, cf = ?, result = ?
-    // - tzcnt: zf = 0, cf = 1, result = 32
-    // We'll have to handle this case manually.
     uint32_t res;
     uint32_t tmp;
     asm (
@@ -223,14 +218,6 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Clears cache lines of memory
-   *
-   * Uses non-temporal stores. The memory region offset
-   * and size are assumed to be aligned to 64 bytes.
-   * \param [in] mem Memory region to clear
-   * \param [in] size Number of bytes to clear
-   */
   inline void bclear(void* mem, size_t size) {
     #if defined(DXVK_ARCH_X86) && (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER))
     auto zero = _mm_setzero_si128();
@@ -253,13 +240,6 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Compares two aligned structs bit by bit
-   *
-   * \param [in] a First struct
-   * \param [in] b Second struct
-   * \returns \c true if the structs are equal
-   */
   template<typename T>
   bool bcmpeq(const T* a, const T* b) {
     static_assert(alignof(T) >= 16);
@@ -306,14 +286,6 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Compares and copies dwords and returns dirty mask
-   *
-   * \param [in] dstData Destination data
-   * \param [in] srcData Source data
-   * \param [in] count Number of dwords to compare and copy
-   * \returns Mask of dwords actually changed and copied
-   */
   inline uint32_t bcndcpy(void* dstData, const void* srcData, uint32_t count) {
     auto srcPtr = reinterpret_cast<const char*>(srcData);
     auto dstPtr = reinterpret_cast<      char*>(dstData);
@@ -367,7 +339,6 @@ namespace dxvk::bit {
       uint32_t dword = 0;
       uint32_t bit   = idx;
 
-      // Compiler doesn't remove this otherwise.
       if constexpr (Dwords > 1) {
         dword = idx / 32;
         bit   = idx % 32;
@@ -380,7 +351,6 @@ namespace dxvk::bit {
       uint32_t dword = 0;
       uint32_t bit   = idx;
 
-      // Compiler doesn't remove this otherwise.
       if constexpr (Dwords > 1) {
         dword = idx / 32;
         bit   = idx % 32;
@@ -402,7 +372,6 @@ namespace dxvk::bit {
       uint32_t dword = 0;
       uint32_t bit   = idx;
 
-      // Compiler doesn't remove this otherwise.
       if constexpr (Dwords > 1) {
         dword = idx / 32;
         bit   = idx % 32;
@@ -460,7 +429,7 @@ namespace dxvk::bit {
 
       for (size_t i = 0; i < fullDwords; i++)
         m_dwords[i] = std::numeric_limits<uint32_t>::max();
-     
+
       if (offset > 0)
         m_dwords[fullDwords] = (1u << offset) - 1;
     }
@@ -642,17 +611,6 @@ namespace dxvk::bit {
   };
 
 
-  /**
-   * \brief Encodes float as fixed point
-   *
-   * Rounds away from zero. If this is not suitable for
-   * certain use cases, implement round to nearest even.
-   * \tparam T Integer type, may be signed
-   * \tparam I Integer bits
-   * \tparam F Fractional bits
-   * \param n Float to encode
-   * \returns Encoded fixed-point value
-   */
   template<typename T, int32_t I, int32_t F>
   T encodeFixed(float n) {
     if (n != n)
@@ -679,18 +637,8 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Decodes fixed-point integer to float
-   *
-   * \tparam T Integer type, may be signed
-   * \tparam I Integer bits
-   * \tparam F Fractional bits
-   * \param n Number to decode
-   * \returns Decoded  number
-   */
   template<typename T, int32_t I, int32_t F>
   float decodeFixed(T n) {
-    // Sign-extend as necessary
     if constexpr (std::is_signed_v<T>)
       n -= (n & (T(1u) << (I + F - 1u))) << 1u;
 
@@ -698,9 +646,6 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Inserts one null bit after each bit
-   */
   inline uint32_t split2(uint32_t c) {
     c = (c ^ (c << 8u)) & 0x00ff00ffu;
     c = (c ^ (c << 4u)) & 0x0f0f0f0fu;
@@ -710,9 +655,6 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Inserts two null bits after each bit
-   */
   inline uint64_t split3(uint64_t c) {
     c = (c | c << 32u) & 0x001f00000000ffffull;
     c = (c | c << 16u) & 0x001f0000ff0000ffull;
@@ -723,32 +665,16 @@ namespace dxvk::bit {
   }
 
 
-  /**
-   * \brief Interleaves bits from two integers
-   *
-   * Both numbers must fit into 16 bits.
-   * \param [in] x X coordinate
-   * \param [in] y Y coordinate
-   * \returns Morton code of x and y
-   */
   inline uint32_t interleave(uint16_t x, uint16_t y) {
     return split2(x) | (split2(y) << 1u);
   }
 
 
-  /**
-   * \brief Interleaves bits from three integers
-   *
-   * All three numbers must fit into 16 bits.
-   */
   inline uint64_t interleave(uint16_t x, uint16_t y, uint16_t z) {
     return split3(x) | (split3(y) << 1u) | (split3(z) << 2u);
   }
 
 
-  /**
-   * \brief 48-bit integer storage type
-   */
   struct uint48_t {
     explicit uint48_t(uint64_t n)
     : a(uint16_t(n)), b(uint16_t(n >> 16)), c(uint16_t(n >> 32)) { }
@@ -758,16 +684,12 @@ namespace dxvk::bit {
     uint16_t c;
 
     explicit operator uint64_t () const {
-      // GCC generates worse code if we promote to uint64 directly
       uint32_t lo = uint32_t(a) | (uint32_t(b) << 16);
       return uint64_t(lo) | (uint64_t(c) << 32);
     }
   };
 
 
-  /**
-   * \brief FNV-1a hash implementation
-   */
   inline uint64_t fnv1a_init() {
     return 0xcbf29ce484222325ull;
   }

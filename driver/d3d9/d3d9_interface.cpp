@@ -1,14 +1,3 @@
-// PHASE-C10: D3D9InterfaceEx port onto the Mtl seam.
-//   Singleton<DxvkInstance>       -> Singleton<MtlInstance>
-//   Rc<DxvkAdapter> (Find9On12Args) -> Rc<MtlAdapter>
-//   adapter->GetDXVKAdapter()->createDevice() -> Rc<MtlDevice>
-// DROPPED (Vulkan interop/ext, mirrored from d3d9_interface.h):
-//   - g_dxvkInstance.acquire(DxvkInstanceFlag::ClientApiIsD3D9) flag (MtlInstance
-//     takes no client-api flag).
-//   - m_d3d9Interop / m_d3d9ExtInterface members + their QueryInterface branches
-//     (ID3D9VkInteropInterface{,1} / ID3D9VkExtInterface).
-//   - Find9On12Args LUID matching (Adapter->info() D3D12 LUID interop — no Metal
-//     analogue); the override loop keeps the first non-null override (PHASE-E).
 #include "d3d9_interface.h"
 
 #include "d3d9_monitor.h"
@@ -30,12 +19,7 @@ namespace dxvk {
     , m_d3d8Bridge  ( this )
     , m_extended    ( bExtended )
     , m_d3d9Options ( nullptr, m_instance->config() ) {
-    // D3D9 doesn't enumerate adapters like physical adapters...
-    // only as connected displays.
 
-    // Let's create some "adapters" for the amount of displays we have.
-    // We'll go through and match up displays -> our adapters in order.
-    // If we run out of adapters, then we'll just make repeats of the first one.
 #ifdef _WIN32
     if (m_d3d9Options.enumerateByDisplays) {
       DISPLAY_DEVICEA device = { };
@@ -44,11 +28,9 @@ namespace dxvk {
       uint32_t adapterOrdinal = 0;
       uint32_t i = 0;
       while (::EnumDisplayDevicesA(nullptr, i++, &device, 0)) {
-        // If we aren't attached, skip over.
         if (!(device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP))
           continue;
 
-        // If we are a mirror, skip over this device.
         if (device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER)
           continue;
 
@@ -305,7 +287,7 @@ namespace dxvk {
       hFocusWindow,
       BehaviorFlags,
       pPresentationParameters,
-      nullptr, // <-- pFullscreenDisplayMode
+      nullptr,
       reinterpret_cast<IDirect3DDevice9Ex**>(ppReturnedDeviceInterface));
   }
 
@@ -341,10 +323,6 @@ namespace dxvk {
 
     return D3D_OK;
   }
-
-
-  // Ex Methods
-
 
   UINT STDMETHODCALLTYPE D3D9InterfaceEx::GetAdapterModeCountEx(UINT Adapter, CONST D3DDISPLAYMODEFILTER* pFilter) {
     if (auto* adapter = GetAdapter(Adapter)) {
@@ -399,14 +377,11 @@ namespace dxvk {
     if (unlikely(DeviceType == D3DDEVTYPE_SW))
       return D3DERR_INVALIDCALL;
 
-    // Creating a device with D3DCREATE_PUREDEVICE only works in conjunction
-    // with D3DCREATE_HARDWARE_VERTEXPROCESSING on native drivers.
     if (unlikely(BehaviorFlags & D3DCREATE_PUREDEVICE &&
                !(BehaviorFlags & D3DCREATE_HARDWARE_VERTEXPROCESSING)))
       return D3DERR_INVALIDCALL;
 
-    // Neither D3DDEVTYPE_REF nor D3DDEVTYPE_NULLREF support HWVP, although they
-    // will accept these flags as any regular D3DDEVTYPE_HAL device would.
+    // REF/NULLREF never support hardware vertex processing, so force software VP.
     if (unlikely(DeviceType == D3DDEVTYPE_REF || DeviceType == D3DDEVTYPE_NULLREF)) {
       BehaviorFlags &= ~D3DCREATE_MIXED_VERTEXPROCESSING
                      & ~D3DCREATE_PUREDEVICE
@@ -415,8 +390,7 @@ namespace dxvk {
     }
 
     HRESULT hr;
-    // Black Desert creates a D3DDEVTYPE_NULLREF device and
-    // expects it be created despite passing invalid parameters.
+    // Some titles create a NULLREF device with invalid parameters and expect it to succeed.
     if (likely(DeviceType != D3DDEVTYPE_NULLREF)) {
       hr = ValidatePresentationParameters(pPresentationParameters);
 
@@ -475,16 +449,12 @@ namespace dxvk {
     if (unlikely(pPresentationParameters == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // pFullscreenDisplayMode must not be NULL in full screen mode.
     if (unlikely(!pPresentationParameters->Windowed && pFullscreenDisplayMode == nullptr))
       return D3DERR_INVALIDCALL;
 
-    // pFullscreenDisplayMode must be NULL in windowed mode.
     if (unlikely(pPresentationParameters->Windowed && pFullscreenDisplayMode != nullptr))
       return D3DERR_INVALIDCALL;
 
-    // On extended devices, the backbuffer dimensions
-    // must match the display mode when in full screen mode.
     if (unlikely(!pPresentationParameters->Windowed &&
                   (pPresentationParameters->BackBufferWidth  != pFullscreenDisplayMode->Width
                 || pPresentationParameters->BackBufferHeight != pFullscreenDisplayMode->Height)))
@@ -500,36 +470,27 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     if (m_extended) {
-      // The swap effect value on a D3D9Ex device
-      // can not be higher than D3DSWAPEFFECT_FLIPEX.
       if (unlikely(pPresentationParameters->SwapEffect > D3DSWAPEFFECT_FLIPEX))
         return D3DERR_INVALIDCALL;
 
-      // 30 is the highest supported back buffer count for Ex devices.
       if (unlikely(pPresentationParameters->BackBufferCount > D3DPRESENT_BACK_BUFFERS_MAX_EX))
         return D3DERR_INVALIDCALL;
     } else {
-      // The swap effect value on a non-Ex D3D9 device
-      // can not be higher than D3DSWAPEFFECT_COPY.
       if (unlikely(pPresentationParameters->SwapEffect > D3DSWAPEFFECT_COPY))
         return D3DERR_INVALIDCALL;
 
-      // 3 is the highest supported back buffer count for non-Ex devices.
       if (unlikely(pPresentationParameters->BackBufferCount > D3DPRESENT_BACK_BUFFERS_MAX))
         return D3DERR_INVALIDCALL;
     }
 
-    // The swap effect value can not be 0.
     if (unlikely(!pPresentationParameters->SwapEffect))
       return D3DERR_INVALIDCALL;
 
-    // D3DSWAPEFFECT_COPY can not be used with more than one back buffer.
     if (unlikely(!IsD3D8Compatible()
               && pPresentationParameters->SwapEffect == D3DSWAPEFFECT_COPY
               && pPresentationParameters->BackBufferCount > 1))
       return D3DERR_INVALIDCALL;
 
-    // Valid fullscreen presentation intervals must be known values.
     if (unlikely(!pPresentationParameters->Windowed
             && !(pPresentationParameters->PresentationInterval == D3DPRESENT_INTERVAL_DEFAULT
               || pPresentationParameters->PresentationInterval == D3DPRESENT_INTERVAL_ONE
@@ -539,7 +500,6 @@ namespace dxvk {
               || pPresentationParameters->PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE)))
       return D3DERR_INVALIDCALL;
 
-    // In windowed mode, only a subset of the presentation interval flags can be used.
     if (unlikely(pPresentationParameters->Windowed
             && !(pPresentationParameters->PresentationInterval == D3DPRESENT_INTERVAL_DEFAULT
               || pPresentationParameters->PresentationInterval == D3DPRESENT_INTERVAL_ONE
@@ -557,8 +517,6 @@ namespace dxvk {
     (void)Adapter;
     const D3D9ON12_ARGS* arg = nullptr;
 
-    // PHASE-C10: DXVK matched overrides by D3D12 adapter LUID (Adapter->info()).
-    // Metal has no D3D12 LUID interop, so we just take the first supplied override.
     for (uint32_t i = 0u; i < OverrideCount; i++) {
       if (!arg)
         arg = &pOverrides[i];

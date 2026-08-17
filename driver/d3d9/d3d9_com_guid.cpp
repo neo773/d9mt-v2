@@ -1,11 +1,3 @@
-// PHASE-C10: minimal local firewall impl of the com_guid seam.
-//
-// The full util/com/com_guid.cpp is excluded from CORE because it pulls
-// ../../d3d11 + ../../dxgi interface headers (for __uuidof registration) that
-// are not part of the ported driver tree. The D3D9 frontend only needs the two
-// free functions — logQueryInterfaceError() and operator<<(ostream, REFIID) —
-// so we provide a self-contained implementation here (no d3d11/dxgi, no
-// DxvkHash dedup set). Behaviour: log every unknown QI at Warn level.
 #include "../util/com/com_guid.h"
 
 #include "../util/log/log.h"

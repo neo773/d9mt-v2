@@ -1,8 +1,4 @@
 #pragma once
-/*
- * Minimal portable SHA-256 (FIPS 180-4) for metallib function hashes.
- * Self-contained, no platform crypto dependency (must build for PE + host).
- */
 
 #include <array>
 #include <cstdint>
@@ -62,7 +58,7 @@ inline void compress(uint32_t state[8], const uint8_t block[64]) {
   state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-} // namespace sha256_detail
+}
 
 inline Sha256Digest sha256(const void* data, size_t size) {
   uint32_t state[8] = {
@@ -79,7 +75,6 @@ inline Sha256Digest sha256(const void* data, size_t size) {
     remaining -= 64u;
   }
 
-  /* Final block(s): message tail + 0x80 pad + 64-bit big-endian bit length */
   uint8_t block[128] = {};
   std::memcpy(block, p, remaining);
   block[remaining] = 0x80u;
@@ -103,4 +98,4 @@ inline Sha256Digest sha256(const void* data, size_t size) {
   return digest;
 }
 
-} // namespace d9mt::air
+}

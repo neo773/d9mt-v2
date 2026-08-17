@@ -3,16 +3,7 @@
 #include "d3d9_device.h"
 #include "d3d9_vertex_declaration.h"
 
-// PHASE-C6 STAGE-2: ported off Vulkan onto the Mtl seam. The hash/eq operators
-// (used by the m_modules cache) are backend-neutral and copied verbatim. The
-// D3D9SWVPShaderGenerator (dxbc_spv IR builder → geometry ubershader) is the
-// SM3→Air shader REWRITE track (Phase-D), NOT part of the device-graph body port;
-// GetShaderModule is stubbed to return a null MtlShaderFunction so the link stays
-// honest (doc: "STAGE 2 may leave GetShaderModule stubbed").
-
 namespace dxvk {
-
-  // Doesn't compare everything, only what we use in SWVP.
 
   size_t D3D9VertexDeclHash::operator () (const D3D9CompactVertexElements& key) const {
     DxvkHashState hash;
@@ -53,9 +44,6 @@ namespace dxvk {
     if (entry != m_modules.end())
       return entry->second;
 
-    // PHASE-E: verify — real SWVP ProcessVertices geometry ubershader is the
-    // SM3→Air compile path (shader REWRITE track). Cache a null module so repeated
-    // lookups are stable and the link resolves.
     Rc<MtlShaderFunction> shader = nullptr;
 
     m_modules.insert({ std::move(elements), shader });

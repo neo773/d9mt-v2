@@ -1,8 +1,5 @@
 #pragma once
 
-// PHASE-C5: Rc<DxvkImageView> -> Rc<MtlTextureView>; RTV/DSV creation drops the
-// Vulkan usage+layout arguments (backend owns layout). CreateView now takes
-// (face, mip, MtlTextureUsage, srgb).
 #include "d3d9_resource.h"
 #include "d3d9_common_texture.h"
 
@@ -33,7 +30,6 @@ namespace dxvk {
     }
 
     ~D3D9Subresource() {
-      // We own the texture!
       if (m_baseTexture == nullptr)
         delete m_texture;
     }
@@ -83,7 +79,6 @@ namespace dxvk {
       Rc<MtlTextureView>& view = m_renderTargetView.Pick(Srgb);
 
       if (unlikely(!view && !IsNull())) {
-        // The backend will sort out feedback loop layout and usage on its own
         MtlTextureUsage usage = MtlTextureUsageRenderTarget;
 
         view = m_texture->CreateView(m_face, m_mipLevel,
@@ -117,8 +112,6 @@ namespace dxvk {
     }
 
     inline void Swap(D3D9Subresource* Other) {
-      // Only used for swap chain back buffers that don't
-      // have a container and all have identical properties
       std::swap(m_texture,          Other->m_texture);
       std::swap(m_renderTargetView, Other->m_renderTargetView);
     }

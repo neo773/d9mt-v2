@@ -1,24 +1,15 @@
 #pragma once
-/*
- * Typed RAII wrappers over winemetal obj_handle_t.
- *
- * winemetal hands out opaque uint64 handles to Obj-C objects living on the
- * unix side; lifetime is manual NSObject_retain/release. These wrappers make
- * ownership explicit and let handle type mixups fail at compile time
- * (binding a texture handle where a buffer belongs was a real v1 bug class).
- */
+
+// Typed wrappers so handle type mixups (e.g. binding a texture handle where
+// a buffer belongs) fail at compile time instead of at the ABI boundary.
 
 #include <cstdint>
 #include <utility>
 
-/* The BRIDGE header is the canonical ABI: upstream winemetal plus our
- * additive entries (vertex-descriptor PSO, per-slot samplers, vertex
- * textures). Same _WINEMETAL_H guard — supersedes third_party's copy. */
 #include "../../bridge/winemetal.h"
 
 namespace dxvk::backend {
 
-/* Owned reference: releases on destruction. Tag makes each alias distinct. */
 template<typename Tag>
 class WmtRef {
 
@@ -26,14 +17,12 @@ public:
 
   WmtRef() = default;
 
-  /* Takes ownership of a +1 handle (new- and copy-family returns) */
   static WmtRef adopt(obj_handle_t handle) {
     WmtRef ref;
     ref.m_handle = handle;
     return ref;
   }
 
-  /* Retains a borrowed handle */
   static WmtRef retain(obj_handle_t handle) {
     if (handle)
       NSObject_retain(handle);
@@ -65,8 +54,6 @@ public:
     }
   }
 
-  /* Transfers the owned +1 reference OUT; the caller becomes responsible
-   * for the eventual NSObject_release (deferred-destruction hand-off). */
   obj_handle_t detach() {
     return std::exchange(m_handle, 0u);
   }
@@ -93,4 +80,4 @@ struct RenderPsoTag;     using WmtRenderPso     = WmtRef<RenderPsoTag>;
 struct DepthStencilTag;  using WmtDepthStencil  = WmtRef<DepthStencilTag>;
 struct SharedEventTag;   using WmtSharedEvent   = WmtRef<SharedEventTag>;
 
-} // namespace dxvk::backend
+}

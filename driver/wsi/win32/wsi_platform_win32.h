@@ -11,10 +11,8 @@ namespace dxvk::wsi {
     uint64_t m_lastForegroundTimestamp = 0;
 
   public:
-    // Platform
     virtual std::vector<const char *> getInstanceExtensions();
 
-    // Monitor
     virtual HMONITOR getDefaultMonitor();
 
     virtual HMONITOR enumMonitors(uint32_t index);
@@ -43,8 +41,6 @@ namespace dxvk::wsi {
             WsiMode*         pMode);
 
     virtual WsiEdidData getMonitorEdid(HMONITOR hMonitor);
-
-    // Window
 
     virtual void getWindowSize(
             HWND      hWindow,
@@ -98,8 +94,6 @@ namespace dxvk::wsi {
             HMONITOR hMonitor,
             HWND     hWindow,
             bool     forceTopmost);
-
-    // PHASE-C: createSurface() removed (Vulkan WSI). Metal present via CAMetalLayer.
   };
 
 }

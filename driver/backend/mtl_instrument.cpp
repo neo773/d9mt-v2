@@ -1,31 +1,3 @@
-/*
- * mtl_instrument.cpp — per-function CPU profiler backing the PROFILE_INSTRUMENT=1
- * build mode (scripts/build-driver.sh). The backend hot-path TUs are compiled
- * with -finstrument-functions; GCC then calls the two __cyg_profile hooks below
- * on every function enter/exit. This TU is compiled WITHOUT the flag and every
- * function is additionally marked no_instrument_function (belt and suspenders).
- *
- * Design (wine PE / Rosetta constraints — see the profiling notes):
- *  - Gated at runtime on getenv("D9MT_PROFILE_INSTRUMENT"): unset -> the hooks
- *    are a load+compare+ret. The instrumented BUILD can run "normally".
- *  - Per-thread state (thread_local pointer, lazily calloc'd): a shadow call
- *    stack {fn, enter_tsc, children_ticks} plus an open-addressing aggregate
- *    table fn -> {calls, self_ticks, total_ticks}. The CS thread is the hot
- *    thread; thread-local state means zero locks/atomics on the hot path.
- *  - Clock: rdtsc (cheap and monotonic under Rosetta), calibrated against
- *    QueryPerformanceCounter at dump time to convert ticks -> ns.
- *  - Symbolication: mingw PE has no dladdr. Each dump line logs the function's
- *    OFFSET from the DLL load base (&__ImageBase), symbolicated OFFLINE against
- *    llvm-nm/objdump output of build/driver/d3d9.dll.
- *  - Dump: whenever a thread's shadow stack returns to depth 0 and >=10s have
- *    elapsed since its last dump, it prints its CUMULATIVE table to stderr
- *    (ends up in the wine launch log). Lines are `D9MTINST F <off> <calls>
- *    <self_ns> <total_ns>` between BEGIN/END markers; ranking is done offline.
- *  - Recursion: total_ns of a directly/indirectly recursive function counts
- *    each nested activation (inclusive time is per-activation). self_ns is
- *    unaffected. The backend hot path has no meaningful recursion.
- */
-
 #include <windows.h>
 
 #include <cstdint>
@@ -39,13 +11,13 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace {
 
   constexpr uint32_t kMaxDepth   = 512u;
-  constexpr uint32_t kTableSize  = 1u << 15;         /* 32768 slots, pow2   */
+  constexpr uint32_t kTableSize  = 1u << 15;
   constexpr double   kDumpPeriodSec = 10.0;
 
   struct StackFrame {
     void*    fn;
-    uint64_t t0;          /* rdtsc at enter                       */
-    uint64_t childTicks;  /* inclusive ticks of completed callees */
+    uint64_t t0;
+    uint64_t childTicks;
   };
 
   struct Slot {
@@ -59,17 +31,16 @@ namespace {
     StackFrame stack[kMaxDepth];
     Slot       table[kTableSize];
     uint32_t   depth;
-    uint32_t   overflow;     /* enters skipped past kMaxDepth        */
-    uint64_t   droppedSlots; /* exits dropped because table was full */
-    uint32_t   zeroEvents;   /* depth-0 returns; QPC checked every 8192 */
+    uint32_t   overflow;
+    uint64_t   droppedSlots;
+    uint32_t   zeroEvents;
     LARGE_INTEGER lastDumpQpc;
     DWORD      tid;
   };
 
-  /* -1 = not probed yet, 0 = off, 1 = on. Racy init is benign (idempotent). */
+  /* -1 = not probed, 0 = off, 1 = on; racy init is benign since it's idempotent. */
   volatile int g_enabledState = -1;
 
-  /* Global tsc<->QPC calibration anchor, set once by the first thread. */
   volatile LONG g_calibInit = 0;
   uint64_t      g_tsc0  = 0;
   LARGE_INTEGER g_qpc0  = {};
@@ -114,16 +85,15 @@ namespace {
       Slot& s = ts->table[i];
       if (s.fn == fn)
         return &s;
-      if (!s.fn) {         /* claim empty slot (single-thread table: no race) */
+      if (!s.fn) {
         s.fn = fn;
         return &s;
       }
       i = (i + 1u) & (kTableSize - 1u);
     }
-    return nullptr;        /* table full — drop */
+    return nullptr;
   }
 
-  /* ticks -> ns using the QPC-calibrated tsc rate since process anchor. */
   NOINSTR static double nsPerTick() {
     LARGE_INTEGER qpcNow;
     QueryPerformanceCounter(&qpcNow);
@@ -178,7 +148,7 @@ extern "C" NOINSTR void __cyg_profile_func_enter(void* this_fn, void* call_site)
   StackFrame& f = ts->stack[ts->depth++];
   f.fn         = this_fn;
   f.childTicks = 0u;
-  f.t0         = rdtscNow();       /* last: exclude hook prologue */
+  f.t0         = rdtscNow();
 }
 
 extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) {
@@ -188,24 +158,24 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
   ThreadState* ts = t_state;
   if (!ts)
     return;
-  if (ts->overflow) {              /* unwinding past-depth enters */
+  if (ts->overflow) {
     ts->overflow--;
     return;
   }
   if (!ts->depth)
     return;
 
-  uint64_t now = rdtscNow();       /* first: exclude hook body */
+  uint64_t now = rdtscNow();
 
-  /* Normally the top frame matches. Exceptions/longjmp can skip exit hooks;
-   * resynchronize by searching down for this_fn and discarding frames above. */
+  /* Exceptions/longjmp can skip exit hooks, desyncing the top frame from
+   * this_fn; resync by searching down and discarding frames above it. */
   uint32_t top = ts->depth - 1u;
   if (ts->stack[top].fn != this_fn) {
     uint32_t j = top;
     while (j > 0u && ts->stack[j].fn != this_fn)
       j--;
     if (ts->stack[j].fn != this_fn)
-      return;                      /* not on our stack — ignore */
+      return;
     ts->depth = j + 1u;
     top = j;
   }
@@ -227,8 +197,6 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
   if (ts->depth) {
     ts->stack[ts->depth - 1u].childTicks += incl;
   } else if ((++ts->zeroEvents & 0x1FFFu) == 0u) {
-    /* Depth-0 returns fire per CS dispatch (thousands/frame); only touch the
-     * (syscall-backed) QPC clock every 8192th one, then dump every ~10s. */
     LARGE_INTEGER qpcNow;
     QueryPerformanceCounter(&qpcNow);
     if (double(qpcNow.QuadPart - ts->lastDumpQpc.QuadPart)

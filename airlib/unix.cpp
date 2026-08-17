@@ -1,12 +1,4 @@
 #include <cstdio>
-/* d9mtair.so: unix side. Deserializes dxbc-spirv IR, runs AirBuilder
- * (LLVM 15, statically linked, x86_64 Mach-O), returns metallib bytes.
- *
- * Exports __wine_unix_call_funcs / __wine_unix_call_wow64_funcs for the
- * wine loader (param structs are all-u64, both tables share entries), and
- * plain C symbols (d9mtair_*) so host-side tests can dlopen + call the
- * same implementations directly without wine.
- */
 
 #include <cstdlib>
 #include <cstring>
@@ -64,7 +56,6 @@ int compileImpl(d9mt_air_compile_params* p) {
     return 0;
   }
 
-  /* reflection blob */
   std::vector<d9mt_air_reflection_entry> entries;
 
   auto addEntry = [&entries](uint32_t kind, uint32_t index,
@@ -81,8 +72,6 @@ int compileImpl(d9mt_air_compile_params* p) {
     entries.push_back(entry);
   };
 
-  /* AB members report their handle-word index in `index` (flagged IN_AB);
-   * everything else keeps its argument-table slot there. */
   for (const auto& b : airBuilder.getBufferBindings())
     addEntry(D9MT_AIR_BIND_BUFFER,
              b.abWord >= 0 ? uint32_t(b.abWord) : b.index,
@@ -128,9 +117,6 @@ int compileImpl(d9mt_air_compile_params* p) {
   p->out_size = metallib.size();
   p->out_reflection_size = reflectionSize;
 
-  /* 32-bit PE mode: copy into the caller's own buffers (a unix-allocated
-   * pointer would be unreachable from the 32-bit PE process). Unix can
-   * write PE memory via the wine mapping. */
   if (p->pe_metallib_buffer || p->pe_reflection_buffer) {
     if (metallib.size() > p->pe_metallib_capacity
      || reflectionSize > p->pe_reflection_capacity) {
@@ -146,7 +132,6 @@ int compileImpl(d9mt_air_compile_params* p) {
     return 0;
   }
 
-  /* host / loopback mode: unix-allocated, freed via FUNC_FREE */
   void* metallibOut = std::malloc(metallib.size());
   void* reflectionOut = std::malloc(reflectionSize);
 
@@ -166,12 +151,9 @@ int compileImpl(d9mt_air_compile_params* p) {
   return 0;
 }
 
-} // namespace
+}
 
 extern "C" {
-
-/* Direct-callable entry points (host tests dlopen these). Same
- * implementations back the wine call tables below. */
 
 __attribute__((visibility("default")))
 int d9mtair_version(d9mt_air_version_params* p) {
@@ -190,9 +172,7 @@ int d9mtair_free(d9mt_air_free_params* p) {
   return 0;
 }
 
-/* wine unixlib entry tables */
-
-typedef int NTSTATUS; /* wine unixlib_entry_t contract */
+typedef int NTSTATUS;
 typedef NTSTATUS (*unixlib_entry_t)(void* args);
 
 static NTSTATUS air_version_entry(void* args) {
@@ -216,7 +196,6 @@ extern const unixlib_entry_t __wine_unix_call_funcs[D9MT_AIR_FUNC_COUNT] = {
   air_free_entry,
 };
 
-/* identical param layouts for 32-bit callers (see header ABI rule) */
 __attribute__((visibility("default")))
 extern const unixlib_entry_t __wine_unix_call_wow64_funcs[D9MT_AIR_FUNC_COUNT] = {
   air_version_entry,
@@ -224,4 +203,4 @@ extern const unixlib_entry_t __wine_unix_call_wow64_funcs[D9MT_AIR_FUNC_COUNT] =
   air_free_entry,
 };
 
-} // extern "C"
+}

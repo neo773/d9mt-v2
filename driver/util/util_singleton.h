@@ -6,11 +6,6 @@
 
 namespace dxvk {
 
-/**
- * \brief Singleton helper
- *
- * Class that manages a dynamically created 
- */
 template<typename T>
 class Singleton {
 

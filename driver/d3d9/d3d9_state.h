@@ -9,7 +9,7 @@
 
 #include "../util/util_matrix.h"
 
-#include "../mtl/mtl_types.h"   // MtlStageMask, MtlCompareFunction (retyped from Vk*)
+#include "../mtl/mtl_types.h"
 
 #include <array>
 #include <bitset>
@@ -17,9 +17,6 @@
 
 namespace dxvk {
 
-  // PHASE-C6: was DxvkLimits::MaxNumSpecConstants (dxvk_limits.h), reached
-  // transitively via dxvk_shader.h before the dxvk/ include chain was severed.
-  // Kept as a standalone D3D9 spec-constant ceiling on the seam.
   static constexpr uint32_t MaxNumSpecConstants = 20u;
 
   static constexpr uint32_t RenderStateCount  = 256;
@@ -40,7 +37,6 @@ namespace dxvk {
     }
   };
 
-  /// Shared push data
   struct D3D9SharedPushData {
     static constexpr MtlStageMask Stages = MtlStageVertex | MtlStageFragment;
     static constexpr uint32_t           Offset = 0u;
@@ -53,21 +49,16 @@ namespace dxvk {
     float fogDensity = 0.0f;
   };
 
-  /// Vertex shader push data
   struct D3D9VsPushData {
     static constexpr MtlStageMask Stages = MtlStageVertex;
     static constexpr uint32_t           Offset = 0u;
 
-    // Dynamically indexed float count
     uint16_t floatCount = 0u;
-    // Point size, as 13.3 fixed-point
     uint16_t pointSize = 0u;
     uint16_t pointSizeMin = 0u;
     uint16_t pointSizeMax = 0u;
   };
 
-  /// Fixed-function vertex shader push data.
-  /// Can theoretically use up to 32 bytes.
   struct D3D9FfvsPushData {
     static constexpr MtlStageMask Stages = MtlStageVertex;
     static constexpr uint32_t           Offset = sizeof(D3D9VsPushData);
@@ -77,7 +68,6 @@ namespace dxvk {
     float pointScaleC = 0.0f;
   };
 
-  /// Fixed-function pixel shader push data.
   struct D3D9FfpsPushData {
     static constexpr MtlStageMask Stages = MtlStageFragment;
     static constexpr uint32_t           Offset = 0u;
@@ -85,8 +75,6 @@ namespace dxvk {
     uint32_t textureFactor = 0u;
   };
 
-  /// Complete push data state. Note that the data layout inside
-  /// this struct is different from what it is in shaders.
   struct D3D9PushData {
     D3D9SharedPushData shared;
     D3D9VsPushData vs;
@@ -94,7 +82,6 @@ namespace dxvk {
     D3D9FfpsPushData ffps;
   };
 
-  /// Sampler modes
   enum class D3D9SamplerMode : uint8_t {
     Default   = 0,
     Fetch4    = 1,
@@ -102,76 +89,37 @@ namespace dxvk {
     DrefClamp = 3,
   };
 
-  /// Specialization constant data. Each dword corresponds to one numbered
-  /// spec constants inside shaders and in the backend.
-  ///
-  /// Spec constants are packed in such a way that shaders can use only
-  /// those constants that they actually need, with minimal unrelated
-  /// state. This helps keep the number of redundant pipeline variants
-  /// to a minimum, while requiring little normalization in the front-end.
   struct D3D9SpecData {
-    // Spec ID 0: Common parameters used by all pipelines. Alpha compare
-    // op is packed into the lower 4 bits of the alpha test byte, alpha
-    // precision into the upper 4 bits.
     uint8_t alphaTest = 0u;
     bool enablePointSprite = false;
     uint8_t clipPlaneCount = 0u;
     uint8_t drefScale = 0u;
 
-    // Spec ID 1: Fog. Used in fixed-function pipelines as
-    // well as pixel shaders with Shader Model 2 and below.
     bool fogEnable = 0u;
     uint8_t fogModeVertex = 0u;
     uint8_t fogModePixel = 0u;
     bool fogUseZ = 0u;
 
-    // Spec ID 2: Parameters used in fixed-function pipelines. The
-    // projection mask is also used in shader model 1 pixel shaders.
     uint8_t samplerProjMask = 0u;
     bool enableGlobalSpecular = false;
     bool enablePointScale = false;
     bool psIsShaderModel3 = false;
 
-    // Spec ID 3: Vertex shader sampler info and bool
-    // constants. Used in programmable shaders only.
     uint8_t vsSamplerTypes = 0u;
     uint8_t vsSamplerModes = 0u;
     uint16_t vsBoolConstants = 0u;
 
-    // Spec ID 4: Pixel shader sampler types, two bits per sampler.
-    // Fixed-function will only use the lower 16 bits.
     uint32_t psSamplerTypes = 0u;
 
-    // Spec ID 5: Pixel shader sampler modes, two bits per sampler.
-    // Fixed-function will only use the lower 16 bits.
     uint32_t psSamplerModes = 0u;
 
-    // Spec ID 6: Pixel shader boolean constants.
-    // Programmable shaders only. 16 bits used.
     uint16_t psBoolConstants = 0u;
     uint16_t spec6Pad = 0u;
 
-    // Spec ID 7: Reserved.
     uint32_t spec7Pad = 0u;
 
-    // Spec ID 8..11: Texture stage ops for fixed function.
-    // Each stage is packed as follows:
-    // - Bits 0..4: Color op
-    // - Bits 5..7: Unused
-    // - Bits 8..12: Alpha op
-    // - Bits 13..14: Unused;
-    // - Bit 15: Whether to store result in temp
     std::array<uint16_t, 8u> stageOps = {};
 
-    // Spec ID 12..19: Arguments for each texture stage:
-    // - Bits 0..4: Color arg 0, with flags packed into bits 3..4
-    // - Bits 5..9: Color arg 1
-    // - Bits 10..14: Color arg 2
-    // - Bit 15: Unused
-    // - Bits 16..20: Alpha arg 0
-    // - Bits 21..25: Alpha arg 1
-    // - Bits 26..30: Alpha arg 2
-    // - Bit 31: Unused
     std::array<uint32_t, 8u> stageArgs = {};
 
     bool setAlphaCompareOp(MtlCompareFunction op) {
@@ -282,15 +230,9 @@ namespace dxvk {
     template<typename T>
     static bool updateSamplers(T& types, T& modes, uint32_t textureTypes, uint32_t nullMask,
         uint32_t fetch4Mask, uint32_t drefMask, uint32_t drefClampMask) {
-      // Forward null texture mask as texture type '3'
       uint32_t nullTypes = bit::interleave(nullMask, nullMask);
       uint32_t newTypes = nullTypes | textureTypes;
 
-      // As for the modes, treat it as a two-bit value:
-      // - 0: Default mode
-      // - 1: Fetch4 (color only)
-      // - 2: Depth-compare
-      // - 3: Depth-compare with dref clamp
       uint32_t newFetch4 = fetch4Mask & ~drefMask;
       uint32_t newClamp = drefClampMask & drefMask;
 
@@ -307,8 +249,6 @@ namespace dxvk {
     }
 
     static uint32_t getTextureArg(DWORD arg) {
-      // Shift flags one  to the right to pack everything
-      // into 5 bits, only 7 selectors are defined.
       uint32_t select = arg & D3DTA_SELECTMASK;
       uint32_t flags = arg & ~D3DTA_SELECTMASK;
       return uint32_t(select | (flags >> 1u)) & 0x1fu;
@@ -339,9 +279,7 @@ namespace dxvk {
 
   static_assert(sizeof(D3D9SpecData) <= sizeof(uint32_t) * MaxNumSpecConstants);
 
-  // This is needed in fixed function for POSITION_T support.
-  // These are constants we need to * and add to move
-  // Window Coords -> Real Coords w/ respect to the viewport.
+  // needed in fixed function to map window coords back to real coords for POSITION_T
   struct D3D9ViewportInfo {
     Vector4 inverseOffset;
     Vector4 inverseExtent;
@@ -381,17 +319,17 @@ namespace dxvk {
   };
 
   constexpr D3DLIGHT9 DefaultLight = {
-    D3DLIGHT_DIRECTIONAL,     // Type
-    {1.0f, 1.0f, 1.0f, 0.0f}, // Diffuse
-    {0.0f, 0.0f, 0.0f, 0.0f}, // Specular
-    {0.0f, 0.0f, 0.0f, 0.0f}, // Ambient
-    {0.0f, 0.0f, 0.0f},       // Position
-    {0.0f, 0.0f, 1.0f},       // Direction
-    0.0f,                     // Range
-    0.0f,                     // Falloff
-    0.0f, 0.0f, 0.0f,         // Attenuations [constant, linear, quadratic]
-    0.0f,                     // Theta
-    0.0f                      // Phi
+    D3DLIGHT_DIRECTIONAL,
+    {1.0f, 1.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 0.0f, 0.0f},
+    {0.0f, 0.0f, 0.0f, 0.0f},
+    {0.0f, 0.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f},
+    0.0f,
+    0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f,
+    0.0f
   };
 
   struct D3D9LightState {
@@ -416,33 +354,27 @@ namespace dxvk {
     uint32_t GlobalAmbient;
     float TweenFactor;
 
-    // Following part uses uint8 and bool so it's gonna be represented as uint32 in the shader and manually unpacked:
     std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordIndices;
     std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordFlags;
     std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordTransformFlags;
 
-    // How many vector components does each texcoord have
     uint32_t VertexTexcoordDeclMask;
 
-    // Vertex Decl
     bool VertexHasPositionT;
-    bool VertexHasColor0; // Diffuse
-    bool VertexHasColor1; // Specular
+    bool VertexHasColor0;
+    bool VertexHasColor1;
     bool VertexHasPointSize;
     bool VertexHasFog;
 
-    // Blending
     uint8_t VertexBlendMode;
     bool VertexBlendIndexed;
     uint8_t VertexBlendCount;
 
-    // Misc
     bool VertexClipping;
     bool NormalizeNormals;
     bool LocalViewer;
     bool RangeFog;
 
-    // Lighting
     bool UseLighting;
     uint8_t LightCount;
     uint8_t DiffuseSource;
@@ -656,9 +588,6 @@ namespace dxvk {
       auto* dstPtr = reinterpret_cast<      __m128i*>(dstData);
       auto* srcPtr = reinterpret_cast<const __m128i*>(pConstantData);
 
-      // In the first loop, find the first contant that has changed, if any, and
-      // only copy that. Basically a glorified memcmp. The idea is to give feedback
-      // to the caller on whether any constant values have changed.
       bool dirty = false;
 
       uint32_t index = 0u;
@@ -681,7 +610,6 @@ namespace dxvk {
       if (unlikely(!dirty))
         return false;
 
-      // Once we know constants have changed, just copy the rest.
       while (index + 2u <= Count) {
         __m128i src0 = _mm_loadu_si128(srcPtr + index + 0u);
         __m128i src1 = _mm_loadu_si128(srcPtr + index + 1u);
@@ -698,7 +626,6 @@ namespace dxvk {
       }
 
       return true;
-      // If any mask bit is 0, a constant has changed
       #else
       size_t dataSize = Count * sizeof(*dstData);
 

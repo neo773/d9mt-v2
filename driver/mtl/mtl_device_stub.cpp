@@ -9,15 +9,9 @@
 #include "../util/util_env.h"
 #include "../util/config/config.h"
 
-// Log-and-return stub so the frontend port compiles/links before the real
-// backend (driver/backend) is wired in. Every method that returns an object
-// returns an empty default so misuse is loud, not silently wrong.
-
 namespace dxvk {
 
   size_t MtlSamplerKey::hash() const {
-    // FNV-1a over the POD bytes; padding is zeroed by default initializers.
-    // Computed in 64-bit, folded for 32-bit size_t (i686 PE).
     const uint8_t* p = reinterpret_cast<const uint8_t*>(this);
     uint64_t h = 0xcbf29ce484222325ull;
     for (size_t i = 0; i < sizeof(*this); i++)
@@ -94,8 +88,6 @@ namespace dxvk {
   }
 
   void MtlDevice::waitForResource(const MtlResource& resource) {
-    /* No GPU behind the stub: nothing to wait for. The backend overrides
-     * this with a blocking wait on the submission tracker's shared event. */
     (void) resource;
     Logger::warn("MtlDevice::waitForResource: stub");
   }
@@ -113,9 +105,8 @@ namespace dxvk {
     return MtlStagingBufferStats();
   }
 
-  // --- query / event (doc 05 §Queries) — stub objects ---------------------
   MtlGpuQueryStatus MtlQuery::getData(MtlQueryData& out) {
-    out = MtlQueryData{};   // zeroed
+    out = MtlQueryData{};
     return MtlGpuQueryStatus::Available;
   }
 
@@ -134,7 +125,7 @@ namespace dxvk {
   }
 
   uint64_t MtlDevice::getTimestampFrequency() const {
-    return 1000000000ull;   // 1 GHz placeholder (PHASE-E)
+    return 1000000000ull;
   }
 
   const MtlDeviceInfo& MtlAdapter::deviceInfo() const {
@@ -146,7 +137,6 @@ namespace dxvk {
   }
 
   Rc<MtlDevice> MtlAdapter::createDevice() {
-    /* the real backend device; defined in driver/backend (always linked) */
     extern Rc<MtlDevice> backendCreateDevice();
     Rc<MtlDevice> device = backendCreateDevice();
     if (device == nullptr) {
@@ -157,12 +147,8 @@ namespace dxvk {
   }
 
   MtlInstance::MtlInstance() {
-    wsi::init();   // upstream DxvkInstance ctor parity (dxvk_instance.cpp:30)
+    wsi::init();
 
-    // Build the driver config the same way DxvkInstance does: user config
-    // (dxvk.conf / d3d9.conf) then per-app profiles keyed off the full exe
-    // path (dxvk_instance.cpp:32-34). Without this, the g_profiles table
-    // (e.g. Oblivion modeCountCompatibility) is dead code and never applies.
     m_config.merge(Config::getUserConfig());
     m_config.merge(Config::getAppConfig(env::getExePath()));
     m_config.logOptions();

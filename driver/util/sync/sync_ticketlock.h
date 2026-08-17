@@ -5,15 +5,7 @@
 #include "../thread.h"
 
 namespace dxvk::sync {
-  
-  /**
-   * \brief Ticket spinlock
-   * 
-   * A fair spinlock implementation that should
-   * be preferred over \ref Spinlock when one of
-   * the threads accessing the lock is likely to
-   * starve another.
-   */
+
   class TicketLock {
 
   public:
@@ -36,5 +28,5 @@ namespace dxvk::sync {
     std::atomic<uint32_t> m_serving = { 0 };
 
   };
-  
+
 }

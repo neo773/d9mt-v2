@@ -1,13 +1,4 @@
 #pragma once
-/*
- * Real MtlDevice on winemetal.
- *
- * Owns the WMTDevice + command queue, the submission tracker (retirement
- * spine), the upload ring, and the sampler/view caches. Resource objects
- * are backend subclasses of the seam types so shared headers stay stable:
- * the frontend sees Rc<MtlBuffer>/Rc<MtlTexture>; the backend downcasts to
- * reach the owned winemetal handles.
- */
 
 #include <atomic>
 #include <memory>
@@ -16,7 +7,7 @@
 #include <vector>
 
 #include "../mtl/mtl_device.h"
-#include "../mtl/mtl_context.h"   // MtlQuery / MtlEvent / MtlQueryType
+#include "../mtl/mtl_context.h"
 
 #include "wmt_handle.h"
 #include "mtl_residency.h"
@@ -25,40 +16,25 @@
 
 namespace dxvk::backend {
 
-  /* Metal 4 handle tags (additive to wmt_handle.h's set; kept here so that
-   * API-neutral file stays untouched). */
   struct Mtl4CompilerTag;     using WmtCompiler     = WmtRef<Mtl4CompilerTag>;
   struct Mtl4AllocatorTag;    using WmtAllocator    = WmtRef<Mtl4AllocatorTag>;
   struct Mtl4ArgTableTag;     using WmtArgTable     = WmtRef<Mtl4ArgTableTag>;
 
-  /* Backend payloads. The seam's POD handle mirrors the owned handle so
-   * frontend fast paths (binding) never need the downcast. */
   class MtlAllocationImpl : public MtlAllocation {
   public:
     WmtBuffer owned;
-    class MtlDeviceImpl* residencyDevice = nullptr;   // deferred-destruction route
+    class MtlDeviceImpl* residencyDevice = nullptr;
 
-    /* Hands the Metal object, the VirtualAlloc'd host backing and the
-     * residency-set entry to the device's MtlResidencyTracker, which tears
-     * them down only after every submission that could reference the
-     * allocation has completed (mtl_residency.h invariant 3). */
     ~MtlAllocationImpl();
   };
 
   class MtlBufferImpl : public MtlBuffer {
   public:
-    WmtBuffer owned;                    /* initial backing (also in storage) */
-    MtlBufferCreateInfo info = { };     /* for rename re-creation */
+    WmtBuffer owned;
+    MtlBufferCreateInfo info = { };
 
     void bindDevice(MtlDevice* device) { m_device = device; }
 
-    /* Discard-rename recycling (DXVK's per-buffer slice cache): a retired
-     * backing returns here via the retirement spine — only AFTER the last
-     * submission referencing it completed — and renameBuffer() hands it out
-     * again instead of minting a fresh Metal buffer per DISCARD. Bounded:
-     * overflow drops the Rc, which routes the allocation into deferred
-     * destruction (~MtlAllocationImpl). Cross-thread: renames run on app
-     * threads, recycling on the retirement pump / CS thread. */
     void recycleStorage(Rc<MtlAllocation>&& alloc) {
       if (alloc == nullptr)
         return;
@@ -88,13 +64,13 @@ namespace dxvk::backend {
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
     MtlImageCreateInfo info  = { };
-    class MtlDeviceImpl* residencyDevice = nullptr;   // deferred-destruction route
-    ~MtlTextureImpl();   // inline-defined after MtlDeviceImpl below
+    class MtlDeviceImpl* residencyDevice = nullptr;
+    ~MtlTextureImpl();
   };
 
   class MtlTextureViewImpl : public MtlTextureView {
   public:
-    WmtTexture owned;             /* view object; base kept alive via image */
+    WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
   };
 
@@ -135,12 +111,8 @@ namespace dxvk::backend {
     uint64_t getNextSerial() override;
     void     waitForIdle() override;
 
-    /* Blocking wait on the submission tracker's shared event for the
-     * resource's tracking serial (never a spin). */
     void     waitForResource(const MtlResource& resource) override;
 
-    /* VirtualAlloc with a drain-and-retry fallback when the 32-bit address
-     * space is exhausted by in-flight buffer backings. */
     void*    hostAlloc(uint64_t size);
 
     bool supportsFormat(
@@ -152,27 +124,19 @@ namespace dxvk::backend {
     Rc<MtlQuery> createGpuQuery(MtlQueryType type) override;
     Rc<MtlEvent> createGpuEvent() override;
 
-    // --- backend-internal ----------------------------------------------------
     obj_handle_t wmtDevice()   const { return m_device.handle(); }
-    obj_handle_t wmtQueue()    const { return m_queue.handle(); }     // MTL4CommandQueue
-    obj_handle_t wmtCompiler() const { return m_compiler.handle(); }  // MTL4Compiler
+    obj_handle_t wmtQueue()    const { return m_queue.handle(); }
+    obj_handle_t wmtCompiler() const { return m_compiler.handle(); }
 
     SubmissionTracker& submissions() { return *m_tracker; }
     UploadRing&        uploadRing()  { return *m_ring; }
 
-    /* Single owner of all residency state (set membership, batched
-     * commits, deferred destruction, drawable-layer sets) — see
-     * mtl_residency.h for the invariants. */
     MtlResidencyTracker& residency() { return *m_residency; }
 
-    /* Cached MTLDepthStencilState keyed by the folded depth-stencil state
-     * (setDepthStencilState is not a PSO key; the DSSO is bound dynamically). */
     obj_handle_t getDepthStencilState(const MtlDepthStencilState& ds);
 
     bool valid() const { return bool(m_device); }
 
-    /* DIAG observers: cumulative creation counts by source, so the endFrame
-     * DIAG line can attribute residency churn (buffers vs renames vs images). */
     uint64_t diagBuffersCreated() const { return m_diagBuffersCreated.load(); }
     uint64_t diagBuffersRenamed() const { return m_diagBuffersRenamed.load(); }
     uint64_t diagBuffersRecycled() const { return m_diagBuffersRecycled.load(); }
@@ -186,12 +150,12 @@ namespace dxvk::backend {
     std::atomic<uint64_t> m_diagImagesCreated  { 0u };
 
     WmtDevice   m_device;
-    WmtQueue    m_queue;      // MTL4CommandQueue
-    WmtCompiler m_compiler;   // MTL4Compiler (PSO builds)
+    WmtQueue    m_queue;
+    WmtCompiler m_compiler;
 
-    /* Declaration order is load-bearing: destruction runs in reverse, so
-     * the ring hands its chunks to the tracker before the tracker flushes
-     * and detaches, and the tracker still has a live queue underneath. */
+    // Declaration order is load-bearing: destruction runs in reverse, so the
+    // ring hands its chunks to the tracker before the tracker detaches, and
+    // the tracker still has a live queue underneath it.
     std::unique_ptr<SubmissionTracker>   m_tracker;
     std::unique_ptr<MtlResidencyTracker> m_residency;
     std::unique_ptr<UploadRing>          m_ring;
@@ -206,11 +170,8 @@ namespace dxvk::backend {
 
   };
 
-  /* Inline (weak comdat) so TUs that construct MtlTextureImpl — e.g. the
-   * presenter wrapping a drawable — don't each emit a conflicting strong
-   * out-of-line definition. Defined here now that MtlDeviceImpl is complete.
-   * Drawable wrappers own nothing (borrowed handle, no residencyDevice) and
-   * fall through; owned textures ride the deferred-destruction queue. */
+  // Defined inline (weak comdat) so every TU constructing MtlTextureImpl
+  // shares one definition instead of emitting conflicting strong symbols.
   inline MtlTextureImpl::~MtlTextureImpl() {
     if (residencyDevice && owned) {
       residencyDevice->residency().allocDestroyed(

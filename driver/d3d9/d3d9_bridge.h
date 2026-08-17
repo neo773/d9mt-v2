@@ -3,62 +3,28 @@
 #include <windows.h>
 #include "../util/config/config.h"
 
-/**
- * The D3D9 bridge allows D3D8 to access DXVK internals.
- * For Vulkan interop without needing DXVK internals, see d3d9_interop.h.
- *
- * NOTE: You must include "d3d9_include.h" or "d3d8_include.h" before this header.
- */
 
-/**
- * \brief D3D9 device interface for D3D8 interop
- */
 MIDL_INTERFACE("D3D9D3D8-42A9-4C1E-AA97-BEEFCAFE2000")
 IDxvkD3D8Bridge : public IUnknown {
 
-  // D3D8 keeps D3D9 objects contained in a namespace.
   #ifdef DXVK_D3D9_NAMESPACE
     using IDirect3DSurface9 = d3d9::IDirect3DSurface9;
     using D3DFORMAT = d3d9::D3DFORMAT;
   #endif
 
-  /**
-   * \brief Updates a D3D9 surface from a D3D9 buffer
-   *
-   * \param [in] pDestSurface Destination surface (typically in VRAM)
-   * \param [in] pSrcSurface  Source surface (typically in system memory)
-   * \param [in] pSrcRect     Source rectangle
-   * \param [in] pDestPoint   Destination (top-left) point
-   */
   virtual HRESULT UpdateTextureFromBuffer(
       IDirect3DSurface9*        pDestSurface,
       IDirect3DSurface9*        pSrcSurface,
       const RECT*               pSrcRect,
       const POINT*              pDestPoint) = 0;
 
-  /**
-   * \brief Checks if a particular surface format is supported by D3D9
-   *
-   * \param [in] Format D3DFORMAT value to be checked
-   */
   virtual bool IsSupportedSurfaceFormat(D3DFORMAT Format) = 0;
 };
 
-/**
- * \brief D3D9 instance interface for D3D8 interop
- */
 MIDL_INTERFACE("D3D9D3D8-A407-773E-18E9-CAFEBEEF3000")
 IDxvkD3D8InterfaceBridge : public IUnknown {
-  /**
-   * \brief Enforces D3D8-specific features and validations
-   */
   virtual void EnableD3D8CompatibilityMode() = 0;
 
-  /**
-   * \brief Retrieves the DXVK configuration
-   *
-   * \returns The DXVK Config object
-   */
   virtual const dxvk::Config* GetConfig() const = 0;
 };
 
