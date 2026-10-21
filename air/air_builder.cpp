@@ -1974,7 +1974,7 @@ struct AirBuilderImpl {
   MDNode* mdTuple(ArrayRef<Metadata*> ops) { return MDTuple::get(ctx, ops); }
 
   static std::string varyingName(uint32_t location) {
-    return "generated(loc" + std::to_string(location) + "_user)";
+    return "user(locn" + std::to_string(location) + ")";
   }
 
   MDNode* buildAbMetadata() {
