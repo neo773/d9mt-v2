@@ -384,6 +384,7 @@ namespace dxvk::backend {
       return;
     }
 
+    ensureVisBuffer();
     WMTRenderPassInfo info = {};
     info.visibility_buffer = m_visBuffer.handle();
     for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
@@ -1163,6 +1164,7 @@ namespace dxvk::backend {
         continue;
       }
 
+      ensureVisBuffer();
       WMTRenderPassInfo info = {};
       info.visibility_buffer = m_visBuffer.handle();
       for (uint32_t s = 0u; s < MtlRenderTargets::MaxColorTargets; s++) {
